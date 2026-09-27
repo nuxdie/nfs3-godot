@@ -40,9 +40,10 @@ static func build(root: Node3D, seed_value := 1998) -> TrackPath:
 		path.right_width.append(ROAD_HALF + VERGE)
 	path.finalize()
 
-	_build_road(root, path)
-	_build_terrain(root, path)
-	_build_props(root, path, rng)
+	var ground := _ground_level(path)
+	_build_road(root, path, ground)
+	_build_terrain(root, ground)
+	_build_props(root, path, rng, ground)
 	root.add_child(Nfs3TrackBuilder.make_walls(path))
 	return path
 
@@ -69,11 +70,35 @@ static func _mat(color: Color, stripes := false) -> StandardMaterial3D:
 	return m
 
 
-static func _build_road(root: Node3D, path: TrackPath) -> void:
+## The flat ground sits below the lowest point of the road.
+static func _ground_level(path: TrackPath) -> float:
+	var lowest := INF
+	for p in path.points:
+		lowest = minf(lowest, p.y)
+	return lowest - 1.5
+
+
+## Width of the grass bank from the verge's outer edge down to the ground, for road height `y`.
+static func _bank_width(y: float, ground: float) -> float:
+	return maxf((y - 0.3 - ground) * 1.6, 1.0)
+
+
+## Ground height `d` metres to the side of a road point at height `y` (verge, then bank, then flat).
+static func _ground_at(y: float, d: float, ground: float) -> float:
+	var off := d - (ROAD_HALF + VERGE)
+	if off <= 0.0:
+		return y - 0.3
+	return lerpf(y - 0.3, ground, clampf(off / _bank_width(y, ground), 0.0, 1.0))
+
+
+static func _build_road(root: Node3D, path: TrackPath, ground: float) -> void:
 	var road := SurfaceTool.new()
 	road.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var verge := SurfaceTool.new()
 	verge.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Grass banks from the verges down to the ground, so a raised stretch doesn't float in the air.
+	var bank := SurfaceTool.new()
+	bank.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var faces := PackedVector3Array()
 	var n := path.size()
 	for i in n:
@@ -95,10 +120,25 @@ static func _build_road(root: Node3D, path: TrackPath) -> void:
 			var ao := a + ra * (ROAD_HALF + VERGE) * side + Vector3.DOWN * 0.3
 			var bi := b + rb * ROAD_HALF * side
 			var bo := b + rb * (ROAD_HALF + VERGE) * side + Vector3.DOWN * 0.3
-			_quad(verge, ai, ao, bo, bi, Vector2.ZERO, Vector2.RIGHT, Vector2.ONE, Vector2.DOWN)
+			var ga := ao + ra * _bank_width(a.y, ground) * side
+			ga.y = ground
+			var gb := bo + rb * _bank_width(b.y, ground) * side
+			gb.y = ground
+			# Wound outward from the road on the right, so the left side is listed in reverse.
+			if side > 0.0:
+				_quad(verge, ai, ao, bo, bi, Vector2.ZERO, Vector2.RIGHT, Vector2.ONE, Vector2.DOWN)
+				_quad(bank, ao, ga, gb, bo, Vector2.ZERO, Vector2.RIGHT, Vector2.ONE, Vector2.DOWN)
+			else:
+				_quad(verge, bi, bo, ao, ai, Vector2.DOWN, Vector2.ONE, Vector2.RIGHT, Vector2.ZERO)
+				_quad(bank, bo, gb, ga, ao, Vector2.DOWN, Vector2.ONE, Vector2.RIGHT, Vector2.ZERO)
 			faces.append_array([ai, ao, bo, ai, bo, bi])
 	road.generate_normals()
 	verge.generate_normals()
+	bank.generate_normals()
+	var bmi := MeshInstance3D.new()
+	bmi.mesh = bank.commit()
+	bmi.material_override = _mat(Color(0.3, 0.45, 0.2))
+	root.add_child(bmi)
 	var mi := MeshInstance3D.new()
 	mi.mesh = road.commit()
 	mi.material_override = _mat(Color(0.28, 0.28, 0.3), true)
@@ -125,22 +165,19 @@ static func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector
 		st.add_vertex(pair[0])
 
 
-static func _build_terrain(root: Node3D, path: TrackPath) -> void:
+static func _build_terrain(root: Node3D, ground: float) -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(4000, 4000)
 	plane.subdivide_width = 1
 	plane.subdivide_depth = 1
 	var mi := MeshInstance3D.new()
 	mi.mesh = plane
-	var lowest := INF
-	for p in path.points:
-		lowest = minf(lowest, p.y)
-	mi.position = Vector3(0, lowest - 1.5, 0)
+	mi.position = Vector3(0, ground, 0)
 	mi.material_override = _mat(Color(0.3, 0.45, 0.2))
 	root.add_child(mi)
 
 
-static func _build_props(root: Node3D, path: TrackPath, rng: RandomNumberGenerator) -> void:
+static func _build_props(root: Node3D, path: TrackPath, rng: RandomNumberGenerator, ground: float) -> void:
 	var trunk := CylinderMesh.new()
 	trunk.top_radius = 0.25
 	trunk.bottom_radius = 0.35
@@ -162,7 +199,7 @@ static func _build_props(root: Node3D, path: TrackPath, rng: RandomNumberGenerat
 				continue
 			var d := ROAD_HALF + VERGE + rng.randf_range(4.0, 60.0)
 			var p: Vector3 = path.points[i] + path.rights[i] * d * side
-			p.y -= 1.2
+			p.y = _ground_at(path.points[i].y, d, ground) - 0.2
 			var s := rng.randf_range(0.8, 1.5)
 			xforms.append(Transform3D(Basis().scaled(Vector3.ONE * s), p))
 	trunk_mm.instance_count = xforms.size()

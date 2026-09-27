@@ -34,13 +34,19 @@ var _finish_order: Array = []
 func _ready() -> void:
 	hud.race = self
 	hud.show_loading("Loading " + Game.track_name(Game.track_id) + "...")
-	# Let the loading text render before the heavy lifting.
-	await get_tree().process_frame
-	await get_tree().process_frame
+	# Let the loading text render before the heavy lifting. The player can pause and restart
+	# or quit meanwhile, so stop if this scene has already been swapped out.
+	var tree := get_tree()
+	for k in 2:
+		await tree.process_frame
+		if not is_inside_tree():
+			return
 	_build_world()
 	# Let the physics space pick up the track collision so spawn points can be ray-checked.
-	await get_tree().physics_frame
-	await get_tree().physics_frame
+	for k in 2:
+		await tree.physics_frame
+		if not is_inside_tree():
+			return
 	_spawn_cars()
 	state = State.COUNTDOWN
 	hud.hide_loading()

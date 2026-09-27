@@ -30,6 +30,10 @@ static func load_dir(dir: String) -> Nfs3Car:
 	if not tga.is_empty():
 		var img := Image.new()
 		if img.load_tga_from_buffer(tga) == OK:
+			# The game reads the pixel rows in file order and ignores the TGA "top-down" flag, so
+			# undo the flip Godot applies for those files or the UVs land on the wrong rows.
+			if tga.size() > 17 and tga[17] & 0x20:
+				img.flip_y()
 			img.generate_mipmaps()
 			c.texture = ImageTexture.create_from_image(img)
 	var fce := viv.get_file("car.fce")
