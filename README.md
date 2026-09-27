@@ -85,3 +85,5 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
 - Night, weather, mirrored/reverse tracks, damage, split-screen.
 - The Knockout/tournament structure and car unlocks.
 - The car body collides as a box; FCE dummies (light positions) are unused.
+- Only the road surface and the invisible side walls collide: roadside scenery (trees, poles,
+  signs) is visual, so cars pass through it.
