@@ -55,6 +55,8 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		# Collision: the drivable surface only (terrain + road of the block).
 		var faces := PackedVector3Array()
 		for p in b.road:
+			if p.v[0] >= b.verts.size() or p.v[1] >= b.verts.size() or p.v[2] >= b.verts.size() or p.v[3] >= b.verts.size():
+				continue
 			for k in Nfs3Track.QUAD:
 				faces.append(b.verts[p.v[k]])
 		if faces.size() > 0:

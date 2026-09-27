@@ -106,8 +106,8 @@ static func load_dir(dir: String) -> Nfs3Track:
 		return t
 	var col_path := DataPath.find_ci(dir, short + ".col")
 	var col := FileAccess.get_file_as_bytes(col_path) if col_path != "" else PackedByteArray()
-	if not col.is_empty():
-		t._parse_col(col)
+	if not col.is_empty() and not t._parse_col(col):
+		return t
 	var fsh := Fsh.load_file(DataPath.find_ci(dir, short + "0.qfs"))
 	if fsh:
 		t.images = fsh.images
@@ -116,7 +116,18 @@ static func load_dir(dir: String) -> Nfs3Track:
 	return t
 
 
+## True (and sets `error`) when `n` bytes at `p` run past the end of the file: a damaged or
+## truncated file is rejected instead of being read as garbage.
+func _short(d: PackedByteArray, p: int, n: int, what: String) -> bool:
+	if p < 0 or n < 0 or p + n > d.size():
+		error = "truncated or damaged " + what
+		return true
+	return false
+
+
 func _parse_frd(d: PackedByteArray) -> bool:
+	if _short(d, 0, 32, "FRD"):
+		return false
 	var n_blocks := d.decode_u32(28) + 1
 	if n_blocks < 1 or n_blocks > 1000:
 		error = "bad FRD block count"
@@ -124,6 +135,8 @@ func _parse_frd(d: PackedByteArray) -> bool:
 	var p := 32
 	var poly_counts: Array[int] = []
 	for bi in n_blocks:
+		if _short(d, p, 84, "FRD"):
+			return false
 		var b := Block.new()
 		b.center = mirror(Vector3(d.decode_float(p), d.decode_float(p + 4), d.decode_float(p + 8)))
 		p += 60
@@ -131,6 +144,8 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		b.n_hires_verts = d.decode_u32(p + 4)
 		b.n_object_verts = d.decode_u32(p + 20)
 		p += 24
+		if _short(d, p, n_verts * 16 + 4 * 0x12C + 32, "FRD"):
+			return false
 		b.verts = read_vec3s(d, p, n_verts)
 		p += n_verts * 12
 		b.shading = read_shading(d, p, n_verts)
@@ -145,6 +160,8 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		var n_light := d.decode_u32(p + 28)
 		p += 32
 		p += n_pos * 8 + n_poly * 8 + n_vroad * 12 + n_xobj * 20 + n_polyobj * 20 + n_sound * 16
+		if _short(d, p, n_light * 16, "FRD"):
+			return false
 		for li in n_light:
 			b.lights.append(fixed(d, p + li * 16))
 		p += n_light * 16
@@ -154,10 +171,14 @@ func _parse_frd(d: PackedByteArray) -> bool:
 	for bi in n_blocks:
 		var b := blocks[bi]
 		for chunk in 7:
+			if _short(d, p, 4, "FRD"):
+				return false
 			var sz := d.decode_u32(p)
 			p += 4
 			if sz == 0:
 				continue
+			if _short(d, p, 4 + sz * POLY_SIZE, "FRD"):
+				return false
 			p += 4  # duplicate size
 			if chunk == 4:
 				b.road = read_polys(d, p, sz)
@@ -165,25 +186,37 @@ func _parse_frd(d: PackedByteArray) -> bool:
 				b.lanes = read_polys(d, p, sz)
 			p += sz * POLY_SIZE
 		for chunk in 4:
+			if _short(d, p, 4, "FRD"):
+				return false
 			var n1 := d.decode_u32(p)
 			p += 4
 			if n1 == 0:
 				continue
+			if _short(d, p, 4, "FRD"):
+				return false
 			var n2 := d.decode_u32(p)
 			p += 4
 			for k in n2:
+				if _short(d, p, 8, "FRD"):
+					return false
 				var typ := d.decode_u32(p)
 				p += 4
 				if typ == 1:
 					var np := d.decode_u32(p)
 					p += 4
+					if _short(d, p, np * POLY_SIZE, "FRD"):
+						return false
 					b.objects.append(read_polys(d, p, np))
 					p += np * POLY_SIZE
 
 	for xi in 4 * n_blocks + 1:
+		if _short(d, p, 4, "FRD"):
+			return false
 		var nobj := d.decode_u32(p)
 		p += 4
 		for k in nobj:
+			if _short(d, p, 12 + 24, "FRD"):
+				return false
 			var crosstype := d.decode_u32(p)
 			p += 12
 			var x := {}
@@ -194,12 +227,16 @@ func _parse_frd(d: PackedByteArray) -> bool:
 				var n_anim := d.decode_u16(p + 20)
 				x.anim_delay = d.decode_u16(p + 22)
 				p += 24
+				if _short(d, p, n_anim * 20, "FRD"):
+					return false
 				var keys := []
 				for a in n_anim:
 					var q := p + a * 20
+					# Fixed-point (1.0 = 16384) x, y, z, w; mirroring X flips the y and z parts.
+					var rot := Quaternion(d.decode_s16(q + 12), -d.decode_s16(q + 14), -d.decode_s16(q + 16), d.decode_s16(q + 18))
 					keys.append({
 						"pos": fixed(d, q),
-						"rot": Quaternion(d.decode_s16(q + 12), d.decode_s16(q + 14), d.decode_s16(q + 16), d.decode_s16(q + 18)),
+						"rot": rot.normalized() if rot.length_squared() > 1.0 else Quaternion.IDENTITY,
 					})
 				p += n_anim * 20
 				x.anim = keys
@@ -207,21 +244,31 @@ func _parse_frd(d: PackedByteArray) -> bool:
 			else:
 				error = "unknown xobj type %d" % crosstype
 				return false
+			if _short(d, p, 4, "FRD"):
+				return false
 			var nv := d.decode_u32(p)
 			p += 4
+			if _short(d, p, nv * 16 + 4, "FRD"):
+				return false
 			x.verts = read_vec3s(d, p, nv)
 			p += nv * 12
 			x.shading = read_shading(d, p, nv)
 			p += nv * 4
 			var np := d.decode_u32(p)
 			p += 4
+			if _short(d, p, np * POLY_SIZE, "FRD"):
+				return false
 			x.polys = read_polys(d, p, np)
 			p += np * POLY_SIZE
 			# XOBJ blocks are laid out 4 per track block (+1 global).
 			blocks[mini(xi / 4, n_blocks - 1)].xobjs.append(x)
 
+	if _short(d, p, 4, "FRD"):
+		return false
 	var n_tex := d.decode_u32(p)
 	p += 4
+	if _short(d, p, n_tex * TEX_BLOCK_SIZE, "FRD"):
+		return false
 	for i in n_tex:
 		var ti := TexInfo.new()
 		ti.width = d.decode_u16(p)
@@ -237,15 +284,20 @@ func _parse_frd(d: PackedByteArray) -> bool:
 	return true
 
 
-func _parse_col(d: PackedByteArray) -> void:
-	if d.slice(0, 4).get_string_from_ascii() != "COLL":
-		return
+func _parse_col(d: PackedByteArray) -> bool:
+	if d.slice(0, 4).get_string_from_ascii() != "COLL" or _short(d, 0, 16, "COL"):
+		error = "bad COL file"
+		return false
 	var n_xb := d.decode_u32(12)
 	var p := 16 + n_xb * 4
+	if n_xb > 16 or _short(d, p, 8, "COL"):
+		return false
 	# texture table
 	var tex_nrec := d.decode_u16(p + 6)
 	var col_tex: Array[int] = []
 	p += 8
+	if _short(d, p, tex_nrec * 8 + 8, "COL"):
+		return false
 	for i in tex_nrec:
 		col_tex.append(d.decode_u16(p + i * 8))
 	p += tex_nrec * 8
@@ -254,9 +306,14 @@ func _parse_col(d: PackedByteArray) -> void:
 		var n := d.decode_u16(p + 6)
 		p += 8
 		for i in n:
+			if _short(d, p, 8, "COL"):
+				return false
 			var size := d.decode_u32(p)
 			var nv := d.decode_u16(p + 4)
 			var np := d.decode_u16(p + 6)
+			if size < 8 + nv * 16 + np * 6 or _short(d, p, size, "COL"):
+				error = "truncated or damaged COL"
+				return false
 			var q := p + 8
 			var verts := PackedVector3Array()
 			var sh := PackedColorArray()
@@ -276,14 +333,21 @@ func _parse_col(d: PackedByteArray) -> void:
 			structs.append({"verts": verts, "shading": sh, "polys": polys})
 			p += size
 		for pass_i in (2 if n_xb == 5 else 1):
+			if _short(d, p, 8, "COL"):
+				return false
 			var n_obj := d.decode_u16(p + 6)
 			p += 8
 			for i in n_obj:
+				if _short(d, p, 4, "COL"):
+					return false
 				var size := d.decode_u16(p)
+				if size < 4 or _short(d, p, size, "COL"):
+					error = "truncated or damaged COL"
+					return false
 				var typ := d[p + 2]
 				var s := d[p + 3]
 				var ref := Vector3.ZERO
-				if typ == 1:
+				if typ == 1 and size >= 16:
 					ref = fixed(d, p + 4)
 				elif typ == 3 and size >= 28:
 					ref = fixed(d, p + 8)
@@ -291,8 +355,12 @@ func _parse_col(d: PackedByteArray) -> void:
 					col_objects.append({"ref": ref, "verts": structs[s].verts, "shading": structs[s].shading, "polys": structs[s].polys, "col_tex": true})
 				p += size
 	# virtual road
+	if _short(d, p, 8, "COL"):
+		return false
 	var n_vr := d.decode_u16(p + 6)
 	p += 8
+	if _short(d, p, n_vr * 36, "COL"):
+		return false
 	for i in n_vr:
 		var q := p + i * 36
 		var vr := VRoad.new()
@@ -303,6 +371,7 @@ func _parse_col(d: PackedByteArray) -> void:
 		vr.left_wall = d.decode_u32(q + 28) / 65536.0
 		vr.right_wall = d.decode_u32(q + 32) / 65536.0
 		vroad.append(vr)
+	return true
 
 
 static func _i8vec(d: PackedByteArray, p: int) -> Vector3:

@@ -87,11 +87,17 @@ func carp_value(key: int, default := 0.0, index := 0) -> float:
 
 
 func _parse_fce(d: PackedByteArray) -> void:
+	if d.size() < HEADER_END:
+		error = "damaged car.fce"
+		return
 	var vert_off := d.decode_u32(16)
 	var norm_off := d.decode_u32(20)
 	var tri_off := d.decode_u32(24)
 	half_size = Vector3(d.decode_float(40), d.decode_float(44), d.decode_float(48)) * SCALE
 	var n_parts := d.decode_u32(248)
+	if n_parts < 1 or n_parts > 64:
+		error = "damaged car.fce"
+		return
 	var n_pri := d.decode_u32(2044)
 	for i in mini(n_pri, 16):
 		var q := 2048 + i * 16
@@ -121,10 +127,16 @@ func _parse_fce(d: PackedByteArray) -> void:
 		var nv := d.decode_u32(1276 + pi * 4)
 		var first_t := d.decode_u32(1532 + pi * 4)
 		var nt := d.decode_u32(1788 + pi * 4)
+		if HEADER_END + tri_off + (first_t + nt) * TRI_SIZE > d.size() \
+				or HEADER_END + maxi(vert_off, norm_off) + (first_v + nv) * 12 > d.size():
+			error = "damaged car.fce"
+			return
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		for ti in nt:
 			var q := HEADER_END + tri_off + (first_t + ti) * TRI_SIZE
+			if d.decode_u32(q + 4) >= nv or d.decode_u32(q + 8) >= nv or d.decode_u32(q + 12) >= nv:
+				continue
 			# Mirroring X flips handedness; emit the triangle in reverse order to keep it front-facing.
 			for k in [2, 1, 0]:
 				var vi := d.decode_u32(q + 4 + k * 4)

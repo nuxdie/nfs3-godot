@@ -1,5 +1,5 @@
 extends Node3D
-## Loops a node through NFS3 animated-object keyframes (positions only).
+## Loops a node through NFS3 animated-object keyframes (position and rotation).
 
 var keys: Array = []
 var delay := 1
@@ -15,3 +15,6 @@ func _process(dt: float) -> void:
 	var a: Vector3 = keys[i].pos
 	var b: Vector3 = keys[(i + 1) % keys.size()].pos
 	position = a.lerp(b, _t - i)
+	var qa: Quaternion = keys[i].rot
+	var qb: Quaternion = keys[(i + 1) % keys.size()].rot
+	quaternion = qa.slerp(qb, _t - i)

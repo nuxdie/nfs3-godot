@@ -137,7 +137,15 @@ func load_car(path: String, preset := 0) -> Object:
 		if path == "":
 			_car_cache[key] = ProceduralCar.make(preset)
 		else:
-			_car_cache[key] = Nfs3Car.load_dir(path)
+			var car := Nfs3Car.load_dir(path)
+			if car.error != "" or car.body_parts.is_empty():
+				# A damaged car file: race a stand-in rather than an invisible car.
+				push_warning("Car %s failed to load (%s), using a stand-in" % [path, car.error])
+				var stand_in := ProceduralCar.make(preset % ProceduralCar.PRESETS.size())
+				stand_in.display_name = car.display_name if car.display_name != "" else stand_in.display_name
+				_car_cache[key] = stand_in
+			else:
+				_car_cache[key] = car
 	return _car_cache[key]
 
 
@@ -165,14 +173,25 @@ func _load_settings() -> void:
 	var cf := ConfigFile.new()
 	if cf.load(SETTINGS_PATH) != OK:
 		return
-	data_root = cf.get_value("game", "data_root", "")
-	mode = cf.get_value("game", "mode", mode)
+	# Hand-edited or stale files: take only values of the right type and range.
+	data_root = str(cf.get_value("game", "data_root", ""))
+	mode = clampi(_int(cf, "mode", mode), 0, MODE_NAMES.size() - 1) as Mode
 	track_id = str(cf.get_value("game", "track", track_id)).to_lower()
-	car_index = cf.get_value("game", "car", 0)
-	laps = cf.get_value("game", "laps", laps)
-	opponents = cf.get_value("game", "opponents", opponents)
-	traffic = cf.get_value("game", "traffic", traffic)
-	units_kmh = cf.get_value("game", "kmh", units_kmh)
+	car_index = maxi(_int(cf, "car", 0), 0)
+	laps = clampi(_int(cf, "laps", laps), 1, 8)
+	opponents = clampi(_int(cf, "opponents", opponents), 0, 7)
+	traffic = _bool(cf, "traffic", traffic)
+	units_kmh = _bool(cf, "kmh", units_kmh)
+
+
+func _int(cf: ConfigFile, key: String, fallback: int) -> int:
+	var v: Variant = cf.get_value("game", key, fallback)
+	return int(v) if v is int or v is float else fallback
+
+
+func _bool(cf: ConfigFile, key: String, fallback: bool) -> bool:
+	var v: Variant = cf.get_value("game", key, fallback)
+	return v if v is bool else fallback
 
 
 # ------------------------------------------------------------------ input

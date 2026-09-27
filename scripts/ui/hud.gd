@@ -204,7 +204,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			get_tree().paused = true
 			_pause.visible = true
 			(_pause.get_meta("box") as VBoxContainer).get_child(1).grab_focus()
-	elif e.is_action_pressed("mirror"):
+	elif e.is_action_pressed("mirror") and _results == null:
 		_mirror.visible = not _mirror.visible
 
 

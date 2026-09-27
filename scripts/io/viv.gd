@@ -14,6 +14,8 @@ static func load_file(path: String) -> Viv:
 	var count := _be32(d, 8)
 	var p := 16
 	for i in count:
+		if p + 8 > d.size():
+			break
 		var pos := _be32(d, p)
 		var size := _be32(d, p + 4)
 		p += 8
@@ -22,7 +24,9 @@ static func load_file(path: String) -> Viv:
 			name_end += 1
 		var name := d.slice(p, name_end).get_string_from_ascii().to_lower()
 		p = name_end + 1
-		v.files[name] = d.slice(pos, pos + size)
+		# A truncated archive: leave out entries that run past the end rather than hand back half a file.
+		if pos + size <= d.size():
+			v.files[name] = d.slice(pos, pos + size)
 	return v
 
 

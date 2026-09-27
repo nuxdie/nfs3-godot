@@ -9,7 +9,7 @@ const BUST_RADIUS := 10.0
 const BUST_TIME := 1.6
 const ESCAPE_DISTANCE := 380.0
 const MAX_TICKETS := 3
-const TICKET_FINES := [150, 400, 0]
+const TICKET_FINES := [150, 400]   # the third ticket in Hot Pursuit is an arrest; Free Roam keeps fining
 
 var state := State.LOADING
 var path: TrackPath
@@ -197,7 +197,7 @@ func _controller(c: Node) -> AIController:
 
 func _cop_data(i: int) -> Object:
 	if Game.cop_cars.size() > 0:
-		return Game.load_car(Game.cop_cars[i % Game.cop_cars.size()])
+		return Game.load_car(Game.cop_cars[i % Game.cop_cars.size()], 3)
 	return Game.load_car("", 3)
 
 
@@ -229,7 +229,7 @@ func _spawn_traffic() -> void:
 	for i in count:
 		var data: Object
 		if Game.traffic_cars.size() > 0:
-			data = Game.load_car(Game.traffic_cars[randi() % Game.traffic_cars.size()])
+			data = Game.load_car(Game.traffic_cars[randi() % Game.traffic_cars.size()], 4)
 		else:
 			data = ProceduralCar.make(4, Color.from_hsv(randf(), 0.4, 0.8))
 		var tc := _make_car(data)
@@ -456,7 +456,7 @@ func _bust() -> void:
 		return
 	var fine: int = TICKET_FINES[mini(tickets - 1, TICKET_FINES.size() - 1)]
 	fines += fine
-	hud.flash("BUSTED! Ticket #%d - $%d fine" % [tickets, fine] if fine > 0 else "BUSTED! Warning", 3.0)
+	hud.flash("BUSTED! Ticket #%d - $%d fine" % [tickets, fine], 3.0)
 
 
 func _spawn_roadblock() -> void:

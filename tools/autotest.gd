@@ -25,7 +25,8 @@ func _ready() -> void:
 		# Just photograph the front end.
 		for k in 60:
 			await get_tree().process_frame
-		get_viewport().get_texture().get_image().save_png("shots/menu.png")
+		if DisplayServer.get_name() != "headless":
+			get_viewport().get_texture().get_image().save_png("shots/menu.png")
 		get_tree().quit()
 		return
 	get_tree().change_scene_to_file.call_deferred("res://scenes/race.tscn")
