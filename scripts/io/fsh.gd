@@ -11,6 +11,8 @@ const PALETTE_CODES := [0x22, 0x24, 0x29, 0x2A, 0x2D]
 
 
 static func load_file(path: String) -> Fsh:
+	if path == "" or not FileAccess.file_exists(path):
+		return null
 	var bytes := FileAccess.get_file_as_bytes(path)
 	if bytes.is_empty():
 		return null

@@ -5,6 +5,8 @@ var files := {}
 
 
 static func load_file(path: String) -> Viv:
+	if path == "" or not FileAccess.file_exists(path):
+		return null
 	var d := FileAccess.get_file_as_bytes(path)
 	if d.size() < 16 or d.slice(0, 4).get_string_from_ascii() != "BIGF":
 		return null

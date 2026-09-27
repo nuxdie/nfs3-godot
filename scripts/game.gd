@@ -69,8 +69,9 @@ func scan_data() -> void:
 	if data_root != "":
 		var tdir := find_ci(data_root, "gamedata/tracks")
 		for t in _sorted_dirs(tdir):
-			if find_ci(tdir.path_join(t), t.replace("k0", "") + ".frd") != "":
-				tracks.append(t)
+			# Ids are lower-case ("trk000") whatever the install's folder case ("Trk000").
+			if find_ci(tdir.path_join(t), t.to_lower().replace("k0", "") + ".frd") != "":
+				tracks.append(t.to_lower())
 		var cdir := find_ci(data_root, "gamedata/carmodel")
 		if cdir != "":
 			for c in _sorted_dirs(cdir):
@@ -115,26 +116,7 @@ func track_dir(id: String) -> String:
 ## Case-insensitive path lookup (the Windows install uses mixed case).
 ## Returns the real absolute path, or "" when it doesn't exist.
 func find_ci(base: String, rel: String) -> String:
-	if base == "":
-		return ""
-	var cur := base
-	for part in rel.split("/", false):
-		var exact := cur.path_join(part)
-		if DirAccess.dir_exists_absolute(exact) or FileAccess.file_exists(exact):
-			cur = exact
-			continue
-		var d := DirAccess.open(cur)
-		if d == null:
-			return ""
-		var found := ""
-		for e in Array(d.get_directories()) + Array(d.get_files()):
-			if e.to_lower() == part.to_lower():
-				found = e
-				break
-		if found == "":
-			return ""
-		cur = cur.path_join(found)
-	return cur
+	return DataPath.find_ci(base, rel)
 
 
 func _sorted_dirs(path: String) -> PackedStringArray:
@@ -185,7 +167,7 @@ func _load_settings() -> void:
 		return
 	data_root = cf.get_value("game", "data_root", "")
 	mode = cf.get_value("game", "mode", mode)
-	track_id = cf.get_value("game", "track", track_id)
+	track_id = str(cf.get_value("game", "track", track_id)).to_lower()
 	car_index = cf.get_value("game", "car", 0)
 	laps = cf.get_value("game", "laps", laps)
 	opponents = cf.get_value("game", "opponents", opponents)

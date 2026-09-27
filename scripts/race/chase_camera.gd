@@ -43,7 +43,8 @@ func _physics_process(dt: float) -> void:
 	var up := Vector3.UP
 	var desired: Vector3
 	if m.dist < 0.0:
-		desired = target.global_transform * Vector3(0, m.height, target.hood_z)
+		# Looking back from the bumper view: sit on the rear bumper, not inside the car.
+		desired = target.global_transform * Vector3(0, m.height, -target.hood_z if back else target.hood_z)
 		_pos = desired
 	else:
 		desired = target.global_position - _fwd * m.dist + up * m.height

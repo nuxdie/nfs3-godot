@@ -86,7 +86,7 @@ static func make(preset: int, tint := Color(0, 0, 0, 0)) -> ProceduralCar:
 	arr[Mesh.ARRAY_NORMAL] = norms
 	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 	am.surface_set_material(0, wm)
-	var wx := W - 0.15
+	var wx := W + 0.02   # tyres stand just proud of the body sides
 	var wz := L * 0.62
 	var wy := -H * 0.55
 	for slot in 4:
@@ -116,5 +116,6 @@ static func _box(st: SurfaceTool, c: Vector3, h: Vector3) -> void:
 		c + Vector3(-h.x, -h.y, h.z), c + Vector3(h.x, -h.y, h.z), c + Vector3(h.x, h.y, h.z), c + Vector3(-h.x, h.y, h.z),
 	]
 	for f in [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [3, 7, 6, 2], [0, 1, 5, 4]]:
-		for k in [0, 1, 2, 0, 2, 3]:
+		# Faces are listed counter-clockwise seen from outside; Godot's front faces are clockwise.
+		for k in [0, 2, 1, 0, 3, 2]:
 			st.add_vertex(p[f[k]])

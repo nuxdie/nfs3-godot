@@ -18,6 +18,7 @@ var cruise_speed := 20.0     # traffic/cop patrol speed
 var target: Car = null       # COP: who to chase
 var chasing := false
 var node := -1
+var stranded_t := 0.0        # time spent making no headway; the race respawns the car after a while
 
 var _stuck_t := 0.0
 var _reverse_t := 0.0
@@ -33,6 +34,7 @@ func _ready() -> void:
 func _physics_process(dt: float) -> void:
 	car.hold = false
 	if not enabled or path == null:
+		stranded_t = 0.0
 		car.throttle = 0.0
 		car.hold = true
 		car.steer = 0.0
@@ -41,8 +43,8 @@ func _physics_process(dt: float) -> void:
 	var dir := -1 if reverse_dir else 1
 	var spd := car.linear_velocity.length()
 
-	# --- where to aim
-	var look := int(clampf(3.0 + spd * 0.35, 3.0, 22.0))
+	# --- where to aim (about a second ahead: further out, the line cuts across bends into the inside wall)
+	var look := int(clampf(2.0 + spd * 0.16, 3.0, 12.0))
 	var aim_node := path.idx(node + look * dir)
 	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * lane
 	var desired := _speed_limit(dir)
@@ -84,6 +86,10 @@ func _physics_process(dt: float) -> void:
 	car.handbrake = false
 
 	# --- getting unstuck: back up for a moment, then carry on
+	if desired > 5.0 and absf(fwd_speed) < 5.0:
+		stranded_t += dt
+	else:
+		stranded_t = 0.0
 	if _reverse_t > 0.0:
 		_reverse_t -= dt
 		car.throttle = 0.0

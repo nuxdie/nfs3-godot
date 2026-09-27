@@ -6,6 +6,7 @@ class_name Nfs3TrackBuilder
 const TEX_SIZE := 256
 const DRAW_DISTANCE := 700.0
 const WALL_HEIGHT := 6.0
+const WALL_DEPTH := 3.0
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
@@ -185,11 +186,12 @@ static func _make_path(t: Nfs3Track) -> TrackPath:
 	var path := TrackPath.new()
 	for vr in t.vroad:
 		path.points.append(vr.pos)
-		# NFS "right" was mirrored with X, so it now points to the driver's left.
-		path.rights.append(-vr.right.normalized())
+		# Mirroring X is a change of basis, so the converted "right" still points to the
+		# driver's right (it equals forward x normal in Godot space).
+		path.rights.append(vr.right.normalized())
 		path.ups.append(vr.normal.normalized() if vr.normal.length() > 0.1 else Vector3.UP)
-		path.left_width.append(vr.right_wall)
-		path.right_width.append(vr.left_wall)
+		path.left_width.append(vr.left_wall)
+		path.right_width.append(vr.right_wall)
 	path.finalize()
 	return path
 
@@ -201,17 +203,22 @@ static func make_walls(path: TrackPath) -> StaticBody3D:
 	body.collision_layer = 1
 	body.collision_mask = 0
 	var n := path.size()
+	var grid := _path_grid(path)
 	for side: float in [-1.0, 1.0]:
+		var foot := PackedVector3Array()
+		var extent := PackedVector2Array()   # (down, up) per node
+		for i in n:
+			var w: float = path.right_width[i] if side > 0 else path.left_width[i]
+			var p: Vector3 = path.points[i] + path.rights[i] * w * side
+			foot.append(p)
+			extent.append(_wall_extent(path, grid, i, p))
 		var faces := PackedVector3Array()
 		for i in n:
 			var j := (i + 1) % n
-			var wi: float = path.right_width[i] if side > 0 else path.left_width[i]
-			var wj: float = path.right_width[j] if side > 0 else path.left_width[j]
-			var a: Vector3 = path.points[i] + path.rights[i] * wi * side
-			var b: Vector3 = path.points[j] + path.rights[j] * wj * side
-			var down := Vector3.DOWN * 3.0
-			var up := Vector3.UP * WALL_HEIGHT
-			faces.append_array([a + down, b + down, b + up, a + down, b + up, a + up])
+			var a := foot[i]
+			var b := foot[j]
+			faces.append_array([a + Vector3.DOWN * extent[i].x, b + Vector3.DOWN * extent[j].x, b + Vector3.UP * extent[j].y,
+				a + Vector3.DOWN * extent[i].x, b + Vector3.UP * extent[j].y, a + Vector3.UP * extent[i].y])
 		var shape := ConcavePolygonShape3D.new()
 		shape.set_faces(faces)
 		shape.backface_collision = true
@@ -219,3 +226,49 @@ static func make_walls(path: TrackPath) -> StaticBody3D:
 		cs.shape = shape
 		body.add_child(cs)
 	return body
+
+
+const _GRID_CELL := 40.0
+
+
+static func _cell(p: Vector3) -> Vector2i:
+	return Vector2i(floori(p.x / _GRID_CELL), floori(p.z / _GRID_CELL))
+
+
+## Path nodes bucketed by ground-plane cell, for finding where the track crosses itself.
+static func _path_grid(path: TrackPath) -> Dictionary:
+	var grid := {}
+	for i in path.size():
+		var c := _cell(path.points[i])
+		if not grid.has(c):
+			grid[c] = PackedInt32Array()
+		grid[c].append(i)
+	return grid
+
+
+## How far a wall post at `p` (belonging to node `i`) may reach down and up. Where another
+## stretch of the track passes over or under (bridges, overpasses) the wall is cut short so
+## it doesn't poke through that road.
+static func _wall_extent(path: TrackPath, grid: Dictionary, i: int, p: Vector3) -> Vector2:
+	var down := WALL_DEPTH
+	var up := WALL_HEIGHT
+	var n := path.size()
+	var c := _cell(p)
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for k: int in grid.get(c + Vector2i(dx, dz), PackedInt32Array()):
+				var gap := absi(k - i)
+				if mini(gap, n - gap) < 20:
+					continue
+				var q := path.points[k]
+				var reach := maxf(path.left_width[k], path.right_width[k]) + 2.0
+				if Vector2(q.x - p.x, q.z - p.z).length() > reach:
+					continue
+				# Only a separate level counts (a car fits in between); side-by-side
+				# stretches such as hairpins keep their full walls.
+				var dy := q.y - p.y
+				if dy > 3.0:
+					up = minf(up, dy - 0.5)
+				elif dy < -3.0:
+					down = minf(down, -dy - 2.5)
+	return Vector2(down, up)

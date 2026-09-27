@@ -53,9 +53,12 @@ func _physics_process(dt: float) -> void:
 	if int(t * 2) != int((t - dt) * 2):
 		print("t=%.1f state=%d kmh=%d gear=%d rpm=%d wheels=%d lap=%d node=%d pos=%d slip=%.2f" % [t, race.state, p.kmh(), p.gear, p.rpm, p.grounded_wheels, r.get("lap", -9), r.get("node", -1), race.position_of(p), p.slip])
 	if shots.size() > 0 and t >= shots[0]:
-		var path := "shots/auto_%02d.png" % int(shots[0])
-		get_viewport().get_texture().get_image().save_png(path)
-		print("shot ", path)
+		# No framebuffer to read back in --headless runs; telemetry only.
+		if DisplayServer.get_name() != "headless":
+			var img := get_viewport().get_texture().get_image()
+			var path := "shots/auto_%02d.png" % int(shots[0])
+			img.save_png(path)
+			print("shot ", path)
 		shots.pop_front()
 	if t > duration:
 		get_tree().quit()

@@ -22,7 +22,7 @@ const WHEEL_PREFIXES := ["left front", "right front", "left rear", "right rear"]
 static func load_dir(dir: String) -> Nfs3Car:
 	var c := Nfs3Car.new()
 	c.id = dir.get_file()
-	var viv := Viv.load_file(dir.path_join("car.viv"))
+	var viv := Viv.load_file(DataPath.find_ci(dir, "car.viv"))
 	if viv == null:
 		c.error = "missing car.viv"
 		return c
@@ -44,7 +44,7 @@ static func load_dir(dir: String) -> Nfs3Car:
 
 ## Quick name lookup for menus, without building meshes.
 static func peek_name(dir: String) -> String:
-	var viv := Viv.load_file(dir.path_join("car.viv"))
+	var viv := Viv.load_file(DataPath.find_ci(dir, "car.viv"))
 	if viv == null:
 		return ""
 	return read_name(viv.get_file("fedata.eng"), dir.get_file())

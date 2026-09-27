@@ -95,18 +95,20 @@ static func fixed(d: PackedByteArray, p: int) -> Vector3:
 
 static func load_dir(dir: String) -> Nfs3Track:
 	var t := Nfs3Track.new()
-	t.name = dir.get_file()
+	t.name = dir.get_file().to_lower()
 	var short := t.name.replace("k0", "")  # trk000 -> tr00
-	var frd := FileAccess.get_file_as_bytes(dir.path_join(short + ".frd"))
+	var frd_path := DataPath.find_ci(dir, short + ".frd")
+	var frd := FileAccess.get_file_as_bytes(frd_path) if frd_path != "" else PackedByteArray()
 	if frd.is_empty():
 		t.error = "missing " + short + ".frd"
 		return t
 	if not t._parse_frd(frd):
 		return t
-	var col := FileAccess.get_file_as_bytes(dir.path_join(short + ".col"))
+	var col_path := DataPath.find_ci(dir, short + ".col")
+	var col := FileAccess.get_file_as_bytes(col_path) if col_path != "" else PackedByteArray()
 	if not col.is_empty():
 		t._parse_col(col)
-	var fsh := Fsh.load_file(dir.path_join(short + "0.qfs"))
+	var fsh := Fsh.load_file(DataPath.find_ci(dir, short + "0.qfs"))
 	if fsh:
 		t.images = fsh.images
 	else:

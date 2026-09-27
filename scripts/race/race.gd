@@ -415,8 +415,9 @@ func _update_pursuit(dt: float) -> void:
 	if not roadblock.is_empty():
 		var rb_node: int = roadblock[0].get_meta("node")
 		var pr := player_racer()
-		var behind := path.cumulative[pr.node] - path.cumulative[rb_node]
-		if behind > 150.0 or behind < -path.length * 0.5:
+		# Signed distance past the roadblock, wrapped so a block just after the start line works.
+		var behind := fposmod(path.cumulative[pr.node] - path.cumulative[rb_node] + path.length * 0.5, path.length) - path.length * 0.5
+		if behind > 150.0:
 			for n in roadblock:
 				n.queue_free()
 			roadblock.clear()
@@ -462,6 +463,11 @@ func _spawn_roadblock() -> void:
 		cop.freeze = true
 		cop.set_meta("node", n)
 		roadblock.append(cop)
+		# Racers steer around it like any other car.
+		for r in racers:
+			var ai := _controller(r.car)
+			if ai:
+				ai.others.append(cop)
 	hud.flash("Roadblock ahead!", 2.0)
 
 
@@ -479,7 +485,9 @@ func _check_resets() -> void:
 		var fell: bool = c.global_position.y < path.points[n].y - 25.0
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
 		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + 5.0
-		if c.is_stuck_upside_down() or fell or lost:
+		# AI wedged against scenery that backing up hasn't cleared.
+		var stranded: bool = ai != null and ai.stranded_t > 7.0
+		if c.is_stuck_upside_down() or fell or lost or stranded:
 			_respawn(c)
 
 
@@ -487,6 +495,7 @@ func _respawn(c: Car) -> void:
 	var n := path.closest(c.global_position)
 	var ai := _controller(c)
 	if ai:
+		ai.stranded_t = 0.0
 		ai.lane = _ground_offset(n, ai.lane)
 	var xf := path.transform_at(n, ai.lane if ai else 0.0, 1.0)
 	if ai and ai.reverse_dir:

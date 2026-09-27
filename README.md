@@ -64,7 +64,8 @@ What's read:
 ## Layout
 
 ```
-scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd
+scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd,
+                   data_path.gd (case-insensitive lookups)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
                    procedural_track.gd, track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
