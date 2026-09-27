@@ -1,0 +1,398 @@
+class_name Car
+extends RigidBody3D
+## Arcade-sim car: four raycast wheels with spring/damper suspension, a
+## friction-circle tyre model and an automatic gearbox driven by the car's own
+## torque curve, gear ratios and top speed (from NFS3 carp.txt when available).
+## The car faces local +Z; local +X is the driver's left.
+
+signal crashed(impulse: float)
+
+const SUSPENSION_TRAVEL := 0.22
+const STATIC_SAG := 0.09
+
+# --- control inputs, written by a controller every physics frame
+var throttle := 0.0
+var brake := 0.0
+var steer := 0.0          # -1 left .. +1 right
+var handbrake := false
+var hold := false         # parked: full brakes, never engages reverse
+
+# --- telemetry
+var speed := 0.0          # signed forward speed, m/s
+var rpm := 1000.0
+var gear := 1             # -1 reverse, 1..n forward
+var slip := 0.0           # 0..1 how much the tyres are sliding
+var grounded_wheels := 0
+var steer_angle := 0.0
+var display_name := ""
+var is_player := false
+var is_cop := false
+
+# --- tuning (filled from car data)
+var top_speed := 70.0
+var brake_decel := 10.0
+var grip := 1.0
+var idle_rpm := 1000.0
+var redline := 7000.0
+var final_drive := 3.8
+var v2rpm := PackedFloat32Array()
+var ratios := PackedFloat32Array()
+var torque_curve := PackedFloat32Array()
+var n_gears := 5
+var power_scale := 1.0     # AI rubber-banding / difficulty
+var max_steer := deg_to_rad(32.0)
+var hood_z := 0.8          # front bumper, local z (bumper camera sits here)
+
+var _wheels: Array[Dictionary] = []
+var _shift_timer := 0.0
+var _upside_timer := 0.0
+var _body_visual: Node3D
+var _siren_lights: Array[OmniLight3D] = []
+var _siren := false
+var _siren_t := 0.0
+var _brake_lights: Array[OmniLight3D] = []
+
+
+func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
+	display_name = data.display_name
+	mass = maxf(data.carp_value(2, 1400.0), 600.0)
+	top_speed = data.carp_value(15, 70.0)
+	brake_decel = data.carp_value(18, 10.0)
+	grip = clampf(data.carp_value(30, 3.2) / 3.2, 0.8, 1.3)
+	idle_rpm = data.carp_value(12, 1000.0)
+	redline = data.carp_value(13, 7000.0)
+	final_drive = data.carp_value(11, 3.8)
+	v2rpm = data.carp.get(7, PackedFloat32Array([-220, 0, 230, 150, 110, 88, 70, 0]))
+	ratios = data.carp.get(8, PackedFloat32Array([2.1, 0, 2.3, 1.5, 1.12, 0.88, 0.7, 0]))
+	torque_curve = data.carp.get(10, PackedFloat32Array([300.0]))
+	n_gears = 0
+	for i in range(2, v2rpm.size()):
+		if v2rpm[i] > 0.0:
+			n_gears += 1
+	n_gears = maxi(n_gears, 1)
+
+	collision_layer = 2
+	collision_mask = 1 | 2
+	contact_monitor = true
+	max_contacts_reported = 4
+	can_sleep = false
+	continuous_cd = true
+	# Replace (not add to) the project's default damping; drag is modelled explicitly.
+	linear_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+	angular_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
+	linear_damp = 0.0
+	angular_damp = 0.6
+	physics_material_override = PhysicsMaterial.new()
+	physics_material_override.friction = 0.25
+	physics_material_override.bounce = 0.05
+	body_entered.connect(_on_body_entered)
+
+	_body_visual = Node3D.new()
+	_body_visual.name = "Visual"
+	add_child(_body_visual)
+	var mat: Material = null
+	if data.texture:
+		var sm := ShaderMaterial.new()
+		sm.shader = preload("res://shaders/car.gdshader")
+		sm.set_shader_parameter("albedo_tex", data.texture)
+		var paint := tint
+		if paint.a == 0.0:
+			paint = data.colours[0] if data.colours.size() > 0 else Color.WHITE
+		sm.set_shader_parameter("paint", paint)
+		mat = sm
+	for p in data.body_parts:
+		var mi := MeshInstance3D.new()
+		mi.mesh = p.mesh
+		mi.position = p.center
+		if mat:
+			mi.material_override = mat
+		_body_visual.add_child(mi)
+
+	var hs: Vector3 = data.half_size
+	hood_z = hs.z + 0.1
+	var wheel_parts: Array = data.wheels
+	for slot in 4:
+		var w := {"front": slot < 2, "left": slot % 2 == 0, "radius": 0.33, "spin": 0.0, "compression": 0.0,
+			"contact": false, "slip": 0.0}
+		var center := Vector3((hs.x - 0.2) * (1 if w.left else -1), -hs.y * 0.45, (hs.z * 0.62) * (1 if w.front else -1))
+		if slot < wheel_parts.size():
+			var wp: Dictionary = wheel_parts[slot]
+			center = wp.center
+			var aabb: AABB = wp.mesh.get_aabb()
+			w.radius = clampf(maxf(aabb.size.y, aabb.size.z) * 0.5, 0.2, 0.6)
+			var pivot := Node3D.new()
+			pivot.position = center
+			var wmi := MeshInstance3D.new()
+			wmi.mesh = wp.mesh
+			wmi.position = -aabb.get_center()
+			var spin := Node3D.new()
+			spin.position = aabb.get_center()
+			spin.add_child(wmi)
+			pivot.add_child(spin)
+			if mat:
+				wmi.material_override = mat
+			_body_visual.add_child(pivot)
+			w.visual = pivot
+			w.spin_node = spin
+		w.center = center
+		# The ray starts above the wheel centre by the suspension travel.
+		w.mount = center + Vector3.UP * SUSPENSION_TRAVEL
+		_wheels.append(w)
+
+	# Body collision: a box that stays clear of the ground (the wheels hold the car up).
+	var bottom: float = _wheels[0].center.y + 0.08
+	var top := hs.y
+	var box := BoxShape3D.new()
+	box.size = Vector3(hs.x * 1.9, top - bottom, hs.z * 1.92)
+	var cs := CollisionShape3D.new()
+	cs.shape = box
+	cs.position = Vector3(0, (top + bottom) * 0.5, 0)
+	add_child(cs)
+	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+	center_of_mass = Vector3(0, _wheels[0].center.y + 0.1, 0)
+	# Inertia of a solid box, a little exaggerated for stability.
+	var sz := box.size
+	inertia = Vector3(sz.y * sz.y + sz.z * sz.z, sz.x * sz.x + sz.z * sz.z, sz.x * sz.x + sz.y * sz.y) * mass / 12.0 * 1.4
+
+	for side: float in [-1.0, 1.0]:
+		var bl := OmniLight3D.new()
+		bl.light_color = Color(1, 0.05, 0.02)
+		bl.omni_range = 2.5
+		bl.light_energy = 0.0
+		bl.position = Vector3(side * hs.x * 0.7, 0.0, -hs.z - 0.2)
+		add_child(bl)
+		_brake_lights.append(bl)
+
+
+func enable_siren(on: bool) -> void:
+	_siren = on
+	if on and _siren_lights.is_empty():
+		var hs_y := 0.8
+		for c in [Color(1, 0.05, 0.05), Color(0.1, 0.2, 1)]:
+			var l := OmniLight3D.new()
+			l.light_color = c
+			l.omni_range = 14.0
+			l.light_energy = 0.0
+			l.position = Vector3(0.4 if _siren_lights.is_empty() else -0.4, hs_y, 0)
+			add_child(l)
+			_siren_lights.append(l)
+			var bulb := MeshInstance3D.new()
+			var bm := BoxMesh.new()
+			bm.size = Vector3(0.35, 0.12, 0.2)
+			var m := StandardMaterial3D.new()
+			m.albedo_color = c
+			m.emission_enabled = true
+			m.emission = c
+			m.emission_energy_multiplier = 3.0
+			bm.material = m
+			bulb.mesh = bm
+			l.add_child(bulb)
+	for l in _siren_lights:
+		l.visible = on
+
+
+func forward_dir() -> Vector3:
+	return global_basis.z
+
+
+func kmh() -> float:
+	return absf(speed) * 3.6
+
+
+func reset_to(xf: Transform3D) -> void:
+	global_transform = xf
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	gear = 1
+	rpm = idle_rpm
+
+
+func _torque_at(r: float) -> float:
+	if torque_curve.is_empty():
+		return 300.0
+	var f := clampf(r / 256.0, 0.0, torque_curve.size() - 1.001)
+	var i := int(f)
+	return lerpf(torque_curve[i], torque_curve[mini(i + 1, torque_curve.size() - 1)], f - i)
+
+
+func _gear_index(g: int) -> int:
+	return 0 if g < 0 else g + 1
+
+
+func _physics_process(dt: float) -> void:
+	var fwd := global_basis.z
+	var up := global_basis.y
+	var vel := linear_velocity
+	speed = vel.dot(fwd)
+	var abs_speed := absf(speed)
+
+	# --- gearbox (automatic) and reverse
+	_shift_timer = maxf(_shift_timer - dt, 0.0)
+	if hold:
+		throttle = 0.0
+		brake = 1.0
+	elif gear > 0 and brake > 0.5 and throttle < 0.1 and abs_speed < 1.0:
+		gear = -1
+	elif gear < 0 and throttle > 0.1 and speed > -1.0:
+		gear = 1
+	if gear > 0 and _shift_timer <= 0.0:
+		var r := abs_speed * v2rpm[_gear_index(gear)]
+		if r > redline * 0.94 and gear < n_gears:
+			gear += 1
+			_shift_timer = 0.22
+		elif gear > 1 and abs_speed * v2rpm[_gear_index(gear - 1)] < redline * 0.7:
+			gear -= 1
+			_shift_timer = 0.15
+	var target_rpm := maxf(idle_rpm, abs_speed * absf(v2rpm[_gear_index(gear)]))
+	# In first/reverse the clutch slips at low speed (see torque_rpm below), so the revs rise with the throttle.
+	var pedal := throttle if gear > 0 else (0.0 if hold else brake)
+	if absi(gear) == 1:
+		target_rpm = maxf(target_rpm, lerpf(idle_rpm, redline * 0.45, pedal))
+	if grounded_wheels == 0 or (throttle > 0.1 and slip > 0.6):
+		target_rpm = lerpf(target_rpm, redline, throttle * 0.8)
+	rpm = lerpf(rpm, minf(target_rpm, redline * 1.02), 1.0 - exp(-dt * 12.0))
+
+	var gi := _gear_index(gear)
+	var drive := 0.0
+	if _shift_timer <= 0.0 and pedal > 0.0:
+		var wheel_r: float = _wheels[2].radius
+		# Below ~45% of redline in first/reverse the clutch slips, so torque comes from a higher rpm.
+		var torque_rpm := maxf(rpm, redline * 0.45) if absi(gear) == 1 else rpm
+		drive = _torque_at(torque_rpm) * absf(ratios[gi]) * final_drive * 0.85 / wheel_r * pedal * power_scale
+		if rpm >= redline or abs_speed >= top_speed:
+			drive = 0.0
+		if gear < 0:
+			drive = -drive * 0.6
+	var braking := 0.0
+	if gear > 0 or hold:
+		braking = brake
+	elif throttle > 0.0:
+		braking = throttle
+
+	# --- steering: less lock at speed
+	var lock := max_steer * lerpf(1.0, 0.28, clampf(abs_speed / 55.0, 0.0, 1.0))
+	steer_angle = move_toward(steer_angle, -steer * lock, dt * 2.5)
+
+	var space := get_world_3d().direct_space_state
+	var q := PhysicsRayQueryParameters3D.new()
+	q.exclude = [get_rid()]
+	q.collision_mask = 1
+	grounded_wheels = 0
+	var total_slip := 0.0
+	var k := mass * 9.81 / 4.0 / STATIC_SAG
+	var c := 2.0 * sqrt(k * mass / 4.0) * 0.45
+
+	for w in _wheels:
+		var origin: Vector3 = global_transform * w.mount
+		var ray_len: float = SUSPENSION_TRAVEL + w.radius
+		q.from = origin
+		q.to = origin - up * ray_len
+		var hit := space.intersect_ray(q)
+		var prev_comp: float = w.compression
+		if hit.is_empty():
+			w.compression = 0.0
+			w.contact = false
+			w.slip = 0.0
+			w.spin += speed / w.radius * dt
+			continue
+		grounded_wheels += 1
+		w.contact = true
+		var dist := origin.distance_to(hit.position)
+		w.compression = ray_len - dist
+		var comp_vel: float = (w.compression - prev_comp) / dt
+		var spring := maxf(k * w.compression + c * comp_vel, 0.0)
+		var n: Vector3 = hit.normal
+		var contact: Vector3 = hit.position
+		var offset := contact - global_position
+		apply_force(up * spring, offset)
+
+		# Tyre frame on the ground plane.
+		var wf := fwd
+		if w.front:
+			wf = fwd.rotated(up, steer_angle)
+		wf = (wf - n * wf.dot(n)).normalized()
+		var ws := n.cross(wf).normalized()  # points to the car's left
+		var pv := linear_velocity + angular_velocity.cross(offset)
+		var v_long := pv.dot(wf)
+		var v_lat := pv.dot(ws)
+
+		var load := maxf(spring, 0.0)
+		var mu := 1.25 * grip
+		var lat_grip := 1.0
+		if handbrake and not w.front:
+			mu *= 0.55
+			lat_grip = 0.35
+		var max_f := mu * load
+		# Lateral: cancel sideways sliding (stiff at low speed, capped by grip).
+		var f_lat := -v_lat * mass * 0.25 / dt * 0.18 * lat_grip
+		# Longitudinal: drive on the rear (and some front), brakes on all.
+		var f_long := 0.0
+		if not w.front:
+			f_long += drive * 0.5
+		if braking > 0.0:
+			var b := brake_decel * mass * 0.25 * braking * 1.25
+			f_long -= clampf(v_long * mass * 0.25 / dt, -b, b)
+		if handbrake and not w.front:
+			f_long -= clampf(v_long * mass * 0.25 / dt, -max_f * 0.8, max_f * 0.8)
+		# Rolling resistance.
+		f_long -= v_long * 4.0
+		var f := Vector2(f_lat, f_long)
+		var ws_slip := 0.0
+		if f.length() > max_f:
+			ws_slip = clampf((f.length() - max_f) / max_f, 0.0, 1.0)
+			f = f.normalized() * max_f
+		w.slip = maxf(ws_slip, clampf(absf(v_lat) / 8.0, 0.0, 1.0) if abs_speed > 3.0 else 0.0)
+		total_slip += w.slip
+		apply_force(ws * f.x + wf * f.y, offset)
+		w.spin += v_long / w.radius * dt
+	slip = total_slip / 4.0
+
+	# --- aero: drag and downforce
+	var drag := 0.42 * speed * absf(speed)
+	apply_central_force(-fwd * drag)
+	if grounded_wheels > 0:
+		apply_central_force(-up * mass * clampf(abs_speed * abs_speed * 0.00035, 0.0, 0.9) * 9.81 * 0.5)
+	# Keep yaw from running away when grip is lost (arcade assist).
+	var yaw := angular_velocity.dot(up)
+	if not handbrake:
+		apply_torque(-up * yaw * inertia.y * 1.2)
+	# Gentle self-righting in the air so jumps land on the wheels.
+	if grounded_wheels == 0:
+		var axis := up.cross(Vector3.UP)
+		apply_torque(axis * inertia.x * 6.0 - angular_velocity * inertia.x * 1.5)
+
+	if up.y < 0.2:
+		_upside_timer += dt
+	else:
+		_upside_timer = 0.0
+
+	for bl in _brake_lights:
+		bl.light_energy = 2.0 if brake > 0.1 and gear > 0 else 0.0
+
+
+func is_stuck_upside_down() -> bool:
+	return _upside_timer > 2.5
+
+
+func _process(dt: float) -> void:
+	for w in _wheels:
+		if not w.has("visual"):
+			continue
+		# Wheel centre sits `compression` above its fully-extended position.
+		var y: float = w.center.y + w.compression
+		w.visual.position.y = lerpf(w.visual.position.y, y, 0.6)
+		w.visual.rotation.y = steer_angle if w.front else 0.0
+		w.spin_node.rotation.x = fmod(w.spin, TAU)
+	if _siren:
+		_siren_t += dt
+		var phase := fmod(_siren_t * 3.0, 1.0)
+		_siren_lights[0].light_energy = 6.0 if phase < 0.5 else 0.0
+		_siren_lights[1].light_energy = 6.0 if phase >= 0.5 else 0.0
+
+
+func _on_body_entered(other: Node) -> void:
+	var impulse := linear_velocity.length()
+	if other is Car:
+		impulse = (linear_velocity - (other as Car).linear_velocity).length()
+	if impulse > 4.0:
+		crashed.emit(impulse)
