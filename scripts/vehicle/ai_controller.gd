@@ -23,6 +23,9 @@ var stranded_t := 0.0        # time spent making no headway; the race respawns t
 var _stuck_t := 0.0
 var _reverse_t := 0.0
 var _lane_change_t := 0.0
+var _progress_node := -1
+var _dodge := 0.0            # TRAFFIC: temporary sideways shift around a stopped car
+var _dodge_t := 0.0
 var others: Array = []       # cars to avoid (set by the race)
 
 
@@ -46,7 +49,11 @@ func _physics_process(dt: float) -> void:
 	# --- where to aim (about a second ahead: further out, the line cuts across bends into the inside wall)
 	var look := int(clampf(2.0 + spd * 0.16, 3.0, 12.0))
 	var aim_node := path.idx(node + look * dir)
-	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * lane
+	if role == Role.TRAFFIC:
+		_pull_around(dt)
+	# The lane was picked where the road was wide; keep it inside the walls where it narrows.
+	var off := clampf(lane + _dodge, -maxf(path.left_width[aim_node] - 2.5, 0.0), maxf(path.right_width[aim_node] - 2.5, 0.0))
+	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * off
 	var desired := _speed_limit(dir)
 	if role == Role.COP and chasing and target:
 		var to_t := target.global_position - car.global_position
@@ -55,7 +62,7 @@ func _physics_process(dt: float) -> void:
 			aim = target.global_position + lead
 		desired = maxf(desired, target.linear_velocity.length() + 12.0) if to_t.length() > 15.0 else target.linear_velocity.length() + 4.0
 	elif role == Role.TRAFFIC:
-		desired = minf(desired, cruise_speed)
+		desired = minf(desired, cruise_speed if _dodge == 0.0 else 10.0)
 	elif role == Role.COP:
 		desired = 0.0
 
@@ -86,10 +93,7 @@ func _physics_process(dt: float) -> void:
 	car.handbrake = false
 
 	# --- getting unstuck: back up for a moment, then carry on
-	if desired > 5.0 and absf(fwd_speed) < 5.0:
-		stranded_t += dt
-	else:
-		stranded_t = 0.0
+	_update_stranded(dt, desired, dir)
 	if _reverse_t > 0.0:
 		_reverse_t -= dt
 		car.throttle = 0.0
@@ -104,6 +108,25 @@ func _physics_process(dt: float) -> void:
 			_reverse_t = 1.2
 	else:
 		_stuck_t = 0.0
+
+
+## Time spent making no headway. Measured as progress along the road, so a car that keeps
+## backing off a wall and driving into it again still counts as stranded. A chasing cop
+## goes wherever its target goes, so it only counts time spent (nearly) stationary.
+func _update_stranded(dt: float, desired: float, dir: int) -> void:
+	if desired <= 5.0:
+		stranded_t = 0.0
+		_progress_node = node
+		return
+	if role == Role.COP and chasing:
+		stranded_t = stranded_t + dt if absf(car.speed) < 5.0 else 0.0
+		return
+	var gained := wrapi((node - _progress_node) * dir, -path.size() / 2, path.size() / 2)
+	if _progress_node < 0 or gained >= 3:
+		_progress_node = node
+		stranded_t = 0.0
+	else:
+		stranded_t += dt
 
 
 ## Max speed for the upcoming bend: v = sqrt(a_lat * r).
@@ -125,6 +148,25 @@ func _speed_limit(dir: int) -> float:
 	return worst * (0.97 if role == Role.RACER else 0.8)
 
 
+## Traffic: pull out around a car stopped in its lane (a parked cruiser, a wreck), then
+## drop back into the lane.
+func _pull_around(dt: float) -> void:
+	_dodge_t -= dt
+	if _dodge_t <= 0.0:
+		_dodge = 0.0
+	var fwd := car.forward_dir()
+	for o in others:
+		if o == car or not is_instance_valid(o):
+			continue
+		var rel: Vector3 = o.global_position - car.global_position
+		var ahead := rel.dot(fwd)
+		if ahead > 3.0 and ahead < 22.0 and absf(rel.dot(car.global_basis.x)) < 2.4 and absf(o.speed) < 1.5:
+			# Towards the middle of the road (traffic lanes sit either side of it).
+			_dodge = -3.2 if lane > 0.0 else 3.2
+			_dodge_t = 2.5
+			return
+
+
 func _avoid(dt: float) -> void:
 	_lane_change_t -= dt
 	if _lane_change_t > 0.0:
@@ -135,8 +177,10 @@ func _avoid(dt: float) -> void:
 			continue
 		var rel: Vector3 = o.global_position - car.global_position
 		var ahead := rel.dot(fwd)
-		if ahead > 2.0 and ahead < 25.0 and absf(rel.dot(car.global_basis.x)) < 2.5 and o.speed < car.speed:
-			var w: float = minf(path.left_width[node], path.right_width[node]) * 0.6
+		# Pull out past slower cars, and try another line when stuck behind anything.
+		if ahead > 2.0 and ahead < 25.0 and absf(rel.dot(car.global_basis.x)) < 2.5 and (o.speed < car.speed or stranded_t > 2.0):
+			# The virtual road's walls can be far out past the tarmac, so keep to a few metres either side.
+			var w: float = minf(minf(path.left_width[node], path.right_width[node]) * 0.6, 5.5)
 			lane = clampf(lane + (4.0 if randf() < 0.5 else -4.0), -w, w)
 			_lane_change_t = 2.0
 			return

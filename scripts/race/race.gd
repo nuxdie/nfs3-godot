@@ -14,10 +14,10 @@ const TICKET_FINES := [150, 400, 0]
 var state := State.LOADING
 var path: TrackPath
 var player: Car
-var racers: Array[Dictionary] = []   # {car, name, lap, node, progress, total, finished, time, best, lap_start}
+var racers: Array[Dictionary] = []   # {car, name, lap, max_lap, node, progress, total, finished, time, best, lap_start}
 var cops: Array[Car] = []
 var traffic_cars: Array[Car] = []
-var roadblock: Array[Node3D] = []
+var roadblock: Array[Car] = []
 var race_time := 0.0
 var countdown := 3.5
 var tickets := 0
@@ -175,17 +175,17 @@ func _spawn_cars() -> void:
 		var grid_ai := _controller(grid[i])
 		if grid_ai:
 			grid_ai.lane = side * col
-		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1, "node": n,
+		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1, "max_lap": -1, "node": n,
 			"progress": path.progress_at(grid[i].global_position, n), "total": 0.0, "finished": false, "time": 0.0, "best": INF, "lap_start": 0.0})
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
 		_spawn_cops()
 	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
 		_spawn_traffic()
-	# Racers steer around each other and around traffic.
-	for r in racers:
-		var ai: AIController = _controller(r.car)
+	# Racers steer around each other, traffic and parked cruisers; traffic pulls around stopped cars.
+	for c in grid + traffic_cars:
+		var ai: AIController = _controller(c)
 		if ai:
-			ai.others = grid + traffic_cars
+			ai.others = grid + traffic_cars + cops
 
 
 func _controller(c: Node) -> AIController:
@@ -265,7 +265,9 @@ func _physics_process(dt: float) -> void:
 			_update_pursuit(dt)
 			_check_resets()
 		State.FINISHED:
+			# The rest of the field races on behind the results screen.
 			_update_progress()
+			_check_resets()
 	if Input.is_action_just_pressed("reset_car") and state == State.RACING:
 		_respawn(player)
 
@@ -309,6 +311,10 @@ func _update_progress() -> void:
 
 func _lap_done(r: Dictionary) -> void:
 	r.lap += 1
+	# Crossing the line again after backing over it (a spin, reversing off a wall) isn't a new lap.
+	if r.lap <= r.max_lap:
+		return
+	r.max_lap = r.lap
 	if r.lap <= 0:
 		r.lap_start = race_time
 		return
@@ -335,6 +341,10 @@ func _lap_done(r: Dictionary) -> void:
 
 func _end_race(arrested: bool) -> void:
 	state = State.FINISHED
+	# The chase is over either way: no "PURSUIT" banner or sirens over the results.
+	for cop in cops:
+		_stop_chase(cop)
+	hud.pursuit = false
 	var pc: PlayerController = null
 	for ch in player.get_children():
 		if ch is PlayerController:
@@ -421,6 +431,8 @@ func _update_pursuit(dt: float) -> void:
 			for n in roadblock:
 				n.queue_free()
 			roadblock.clear()
+			# The next one only after another long stretch of chase.
+			pursuit_time = 0.0
 
 
 func _stop_chase(cop: Car) -> void:
@@ -463,11 +475,15 @@ func _spawn_roadblock() -> void:
 		cop.freeze = true
 		cop.set_meta("node", n)
 		roadblock.append(cop)
-		# Racers steer around it like any other car.
-		for r in racers:
-			var ai := _controller(r.car)
-			if ai:
-				ai.others.append(cop)
+	# Racers head for the gap: just past the inner cruiser (parked sideways, ~2.4 m either side of
+	# its centre), where there's road even when the walls are far apart. They also steer around
+	# the cruisers like any other car.
+	var gap_lane := (0.05 * w + 3.9) * gap_side
+	for r in racers:
+		var ai := _controller(r.car)
+		if ai:
+			ai.others.append_array(roadblock)
+			ai.lane = gap_lane
 	hud.flash("Roadblock ahead!", 2.0)
 
 
@@ -492,12 +508,36 @@ func _check_resets() -> void:
 
 
 func _respawn(c: Car) -> void:
-	var n := path.closest(c.global_position)
 	var ai := _controller(c)
+	# Search near the node the car was last tracked at: a global search can pick a stretch of
+	# road on another level (bridges, overpasses) and skip part of the lap.
+	var hint := ai.node if ai else -1
+	for r in racers:
+		if r.car == c:
+			hint = r.node
+	var n := path.closest(c.global_position, hint)
+	var dir := -1 if ai and ai.reverse_dir else 1
+	# Near the middle of the road: an overtaking line far out can be over a verge or a drop.
+	var lane := clampf(ai.lane, -3.5, 3.5) if ai else 0.0
+	# Put it down clear of other cars (a parked roadblock, a pile-up), moving up the road if need be.
+	var off := 0.0
+	for k in 8:
+		var m := path.idx(n + k * 3 * dir)
+		off = _ground_offset(m, lane)
+		if k == 7 or not _car_near(c, path.transform_at(m, off, 0.0).origin, 5.0):
+			n = m
+			break
 	if ai:
 		ai.stranded_t = 0.0
-		ai.lane = _ground_offset(n, ai.lane)
-	var xf := path.transform_at(n, ai.lane if ai else 0.0, 1.0)
-	if ai and ai.reverse_dir:
+		ai.lane = off
+	var xf := path.transform_at(n, off, 1.0)
+	if dir < 0:
 		xf = xf.rotated_local(Vector3.UP, PI)
 	c.reset_to(xf)
+
+
+func _car_near(me: Car, pos: Vector3, radius: float) -> bool:
+	for o in racers.map(func(r): return r.car) + traffic_cars + cops + roadblock:
+		if o != me and is_instance_valid(o) and o.global_position.distance_to(pos) < radius:
+			return true
+	return false

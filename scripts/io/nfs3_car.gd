@@ -16,8 +16,6 @@ var colours: Array[Color] = []
 var carp := {}                           # id -> PackedFloat32Array
 var error := ""
 
-const WHEEL_PREFIXES := ["left front", "right front", "left rear", "right rear"]
-
 
 static func load_dir(dir: String) -> Nfs3Car:
 	var c := Nfs3Car.new()
@@ -98,14 +96,25 @@ func _parse_fce(d: PackedByteArray) -> void:
 	for i in mini(n_pri, 16):
 		var q := 2048 + i * 16
 		colours.append(Color.from_hsv(d.decode_u32(q) / 255.0, d.decode_u32(q + 4) / 255.0, d.decode_u32(q + 8) / 255.0))
+	# Parts come in LOD groups: body, then its four wheels, then the next LOD down. Part 0 is the
+	# most detailed body ("high body", or "medium body" on traffic), so its wheels are parts 1-4.
+	# Wheel names in the data are unreliable (left/right swapped, a "left front" at the back), so
+	# slots come from where the wheel sits. Headlight glass is a separate part at the end.
+	var wheel_ids: Array[int] = []
+	for pi in range(1, mini(5, n_parts)):
+		if _part_name(d, pi).contains("wheel"):
+			wheel_ids.append(pi)
+	var slots: Array[int] = []
+	for pi in wheel_ids:
+		var c := _v(d, 252 + pi * 12)
+		slots.append((0 if c.z > 0.0 else 2) + (0 if c.x > 0.0 else 1))
+	var slots_ok := wheel_ids.size() == 4
+	for k in 4:
+		slots_ok = slots_ok and k in slots
 	for pi in n_parts:
-		var pname := d.slice(3588 + pi * 64, 3588 + pi * 64 + 64).get_string_from_ascii().strip_edges().to_lower()
-		var slot := -1
-		for w in 4:
-			if pname.begins_with(WHEEL_PREFIXES[w]):
-				slot = w
-		# Part 0 is always the high-detail body; other "medium/small/tiny" parts are LODs.
-		if slot < 0 and pi != 0 and not pname.begins_with("high"):
+		var pname := _part_name(d, pi)
+		var wi := wheel_ids.find(pi)
+		if pi != 0 and wi < 0 and not pname.contains("headlight"):
 			continue
 		var center := _v(d, 252 + pi * 12)
 		var first_v := d.decode_u32(1020 + pi * 4)
@@ -125,12 +134,17 @@ func _parse_fce(d: PackedByteArray) -> void:
 				st.set_uv(Vector2(d.decode_float(q + 32 + k * 4), 1.0 - d.decode_float(q + 44 + k * 4)))
 				st.add_vertex(_v(d, vp))
 		var part := {"name": pname, "mesh": st.commit(), "center": center}
-		if slot >= 0:
-			part.slot = slot
+		if wi >= 0 and slots_ok:
+			part.slot = slots[wi]
 			wheels.append(part)
 		else:
+			# Without a clean set of four wheels, draw them as part of the body.
 			body_parts.append(part)
 	wheels.sort_custom(func(a, b): return a.slot < b.slot)
+
+
+static func _part_name(d: PackedByteArray, pi: int) -> String:
+	return d.slice(3588 + pi * 64, 3588 + pi * 64 + 64).get_string_from_ascii().strip_edges().to_lower()
 
 
 static func _v(d: PackedByteArray, p: int) -> Vector3:

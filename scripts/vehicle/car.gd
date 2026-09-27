@@ -59,7 +59,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	top_speed = data.carp_value(15, 70.0)
 	brake_decel = data.carp_value(18, 10.0)
 	grip = clampf(data.carp_value(30, 3.2) / 3.2, 0.8, 1.3)
-	idle_rpm = data.carp_value(12, 1000.0)
+	idle_rpm = maxf(data.carp_value(12, 1000.0), 700.0)   # some traffic cars list 0
 	redline = data.carp_value(13, 7000.0)
 	final_drive = data.carp_value(11, 3.8)
 	v2rpm = data.carp.get(7, PackedFloat32Array([-220, 0, 230, 150, 110, 88, 70, 0]))
@@ -117,8 +117,9 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		var center := Vector3((hs.x - 0.2) * (1 if w.left else -1), -hs.y * 0.45, (hs.z * 0.62) * (1 if w.front else -1))
 		if slot < wheel_parts.size():
 			var wp: Dictionary = wheel_parts[slot]
-			center = wp.center
 			var aabb: AABB = wp.mesh.get_aabb()
+			# The part's origin isn't always the hub; the middle of the tyre mesh is.
+			center = wp.center + aabb.get_center()
 			w.radius = clampf(maxf(aabb.size.y, aabb.size.z) * 0.5, 0.2, 0.6)
 			var pivot := Node3D.new()
 			pivot.position = center
@@ -126,7 +127,6 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 			wmi.mesh = wp.mesh
 			wmi.position = -aabb.get_center()
 			var spin := Node3D.new()
-			spin.position = aabb.get_center()
 			spin.add_child(wmi)
 			pivot.add_child(spin)
 			if mat:
@@ -138,6 +138,14 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		# The ray starts above the wheel centre by the suspension travel.
 		w.mount = center + Vector3.UP * SUSPENSION_TRAVEL
 		_wheels.append(w)
+
+	# Many traffic cars list all-zero gear ratios; derive them from the speed-to-rpm table
+	# (rpm per m/s = ratio * final drive * 60 / (2 pi r)).
+	ratios = ratios.duplicate()
+	var r_drive: float = _wheels[2].radius
+	for i in mini(ratios.size(), v2rpm.size()):
+		if ratios[i] == 0.0 and v2rpm[i] != 0.0 and final_drive > 0.0:
+			ratios[i] = absf(v2rpm[i]) * TAU * r_drive / 60.0 / final_drive
 
 	# Body collision: a box that stays clear of the ground (the wheels hold the car up).
 	var bottom: float = _wheels[0].center.y + 0.08
