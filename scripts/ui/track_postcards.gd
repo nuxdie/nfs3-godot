@@ -57,7 +57,8 @@ static func _soften(img: Image) -> void:
 
 
 static func _file(id: String, night: bool) -> String:
-	return "%s/%s_%s_v%d.webp" % [DIR, id, "night" if night else "day", VERSION]
+	var v := "%d.%d" % [VERSION, ProceduralTrack.VERSION] if id == Game.PROCEDURAL_TRACK else str(VERSION)
+	return "%s/%s_%s_v%s.webp" % [DIR, id, "night" if night else "day", v]
 
 
 func _process(_dt: float) -> void:

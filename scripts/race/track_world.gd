@@ -80,6 +80,9 @@ func light(parent: Node, night: bool, weather: bool, vp: Viewport = null) -> voi
 		parent.add_child(n)
 	if vp:
 		Game.apply_quality(vp, sun)
+	# The procedural track's street-lamp light pools only show at night.
+	for n: Node3D in root.get_meta("night_only", []):
+		n.visible = night
 	if night:
 		_make_night(e, sm)
 	if weather and not horizon:

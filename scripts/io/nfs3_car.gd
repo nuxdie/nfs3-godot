@@ -217,6 +217,7 @@ static func _bleed_cutout(img: Image) -> void:
 		if alpha[i] < 20:
 			todo.append(i)
 			px[i * 4 + 3] = 0
+	px = _defringe(px, w, h)
 	# Ring by ring outwards from the visible texels until every cut-out texel has a colour:
 	# the small mip levels average whole blocks, so any key colour left over shows at the edges.
 	while not todo.is_empty():
@@ -253,6 +254,69 @@ static func _bleed_cutout(img: Image) -> void:
 	for i in w * h:
 		px[i * 4 + 3] = alpha[i]
 	img.set_data(w, h, false, Image.FORMAT_RGBA8, px)
+
+
+## Some skins were pieced together over a green backdrop and kept thin seams of it: green
+## texels along the cut-out edge and between panels (round the windows and bumpers of
+## traffic car 0001, say), which show as green specks on the bodywork. Give such a texel the
+## colour of its neighbours, unless enough of those are green too (green paint keeps its
+## edges). `px` is RGBA8 with cut-out texels at alpha 0.
+static func _defringe(px: PackedByteArray, w: int, h: int) -> PackedByteArray:
+	var candidates := PackedInt32Array()
+	for i in w * h:
+		var o := i * 4
+		if px[o + 3] != 0 and px[o + 1] > maxi(px[o], px[o + 2]) + 30:
+			candidates.append(i)
+	# Two passes: the seams can be two texels wide.
+	for pass_i in 2:
+		var fixes := {}
+		for i in candidates:
+			var o := i * 4
+			if not _greenish(px, o):
+				continue
+			var x := i % w
+			var y := i / w
+			var sum := Vector3.ZERO
+			var n := 0
+			var green := 0
+			var green_around := 0
+			for dy in range(-4, 5):
+				# Inside a green panel: no need to look further.
+				if green_around >= 24:
+					break
+				for dx in range(-4, 5):
+					var xx := x + dx
+					var yy := y + dy
+					if xx < 0 or yy < 0 or xx >= w or yy >= h:
+						continue
+					var q := (yy * w + xx) * 4
+					if px[q + 3] == 0:
+						continue
+					var near := absi(dx) <= 2 and absi(dy) <= 2
+					# Dark green paint is green too, if not as vividly as a seam.
+					if _greenish(px, q, 1.25, 8):
+						green_around += 1
+						green += int(near)
+					elif near:
+						sum += Vector3(px[q], px[q + 1], px[q + 2])
+						n += 1
+			# A 1-2 texel seam is outnumbered by far; a green panel's straight edge is not,
+			# nor is its thin trim (window frames) with the rest of the panel close by.
+			if n > green + 4 and green_around < 24:
+				fixes[o] = sum / n
+		for o: int in fixes:
+			var c: Vector3 = fixes[o]
+			px[o] = int(c.x)
+			px[o + 1] = int(c.y)
+			px[o + 2] = int(c.z)
+		if fixes.is_empty():
+			break
+	return px
+
+
+static func _greenish(px: PackedByteArray, o: int, ratio := 1.0, margin := 30) -> bool:
+	var other := maxi(px[o], px[o + 2])
+	return px[o + 1] > maxi(int(other * ratio), other + margin)
 
 
 static func _part_name(d: PackedByteArray, pi: int) -> String:

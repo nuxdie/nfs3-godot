@@ -76,7 +76,10 @@ What's read:
 scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd,
                    nfs3_horizon.gd (.hrz sky/fog), data_path.gd (case-insensitive lookups)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
-                   procedural_track.gd, track_path.gd (virtual road), keyframe_mover.gd
+                   procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges),
+                   proc_ground.gd (its road, cuttings and banks, terrain, mountains, water, tunnel,
+                   bridges), proc_scenery.gd (its town, farms, forest, rails, signs, lamps),
+                   track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd,
                    car_damage.gd (dents and wear from crashes; NFS3 had none, Settings → Car damage)
@@ -94,12 +97,20 @@ fonts/             Barlow / Barlow Condensed (SIL Open Font License, see fonts/O
 scripts/audio/     car_audio.gd (synthesised engine, tyre squeal, siren)
 shaders/           track.gdshader (unshaded, vertex-lit like the original; wet road), track_additive.gdshader
                    (glows, fire, light shafts), car.gdshader (paint mask), precipitation.gdshader
-                   (rain/snow wrapped around the camera on the GPU)
+                   (rain/snow wrapped around the camera on the GPU), proc_road.gdshader and
+                   proc_ground.gdshader (the procedural track's asphalt and land)
 tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk000|procedural|menu> [mode] [car] [--duration=S]
                    (add --settings with menu to photograph the settings panel)
                    (--night / --weather set the conditions, --tag=NAME prefixes the screenshots)
+                   (--classic drops the body sway and progressive grip, --no-traffic empties the road)
+tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with
+                   draw-call and triangle counts: godot --path . -- --trackshots <track> [0.25 ...]
+                   (--night / --weather; --up= --back= --ahead= --side= move the eye; --tag=NAME)
 tools/postcards.gd re-render the menu's track pictures and copy them to shots/:
                    godot --path . -- --postcards [track ...]
+tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, front and rear, saved to shots/:
+                   godot --path . -- --carshots [traffic|cops|cars] [id ...] [--track=trk000 [--night]]
+                   (--big / --low / --yaw=DEG / --wire for close inspection)
 tools/car_calib.gd flat-out drag test of every car against the original game's acceleration table:
                    godot --headless --path . -s tools/car_calib.gd [-- name-filter]
 ```

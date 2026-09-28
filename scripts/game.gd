@@ -47,9 +47,20 @@ func _ready() -> void:
 	if "--autotest" in OS.get_cmdline_user_args():
 		var t: Node = load("res://tools/autotest.gd").new()
 		add_child(t)
+	# `godot --path . -- --trackshots <track> [lap fraction ...]` photographs a track's road.
+	if "--trackshots" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/track_shots.gd").new())
 	# `godot --path . -- --postcards [track ...]` re-renders the menu's track pictures.
 	if "--postcards" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/postcards.gd").new())
+	# `godot --path . -- --carshots [traffic|cops|cars]` photographs cars for a contact sheet.
+	if "--carshots" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/car_shots.gd").new())
+	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
+	if "--repro" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/_tmp/" + OS.get_environment("REPRO") + ".gd").new())
+	if "--fxshots" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/fx_shots.gd").new())
 
 
 # ------------------------------------------------------------------ data files
@@ -265,6 +276,7 @@ func _setup_input() -> void:
 	_bind("headlights", [KEY_L], [JOY_BUTTON_DPAD_UP])
 	_bind("high_beam", [KEY_K], [JOY_BUTTON_DPAD_DOWN])
 	_bind("pause", [KEY_ESCAPE, KEY_P], [JOY_BUTTON_START])
+	_bind("handling_feel", [KEY_F6], [])
 	# Analog steering on the left stick.
 	for dir in [["steer_left", -1.0], ["steer_right", 1.0]]:
 		var ev := InputEventJoypadMotion.new()

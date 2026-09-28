@@ -11,12 +11,15 @@ render_mode cull_disabled;
 
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
 uniform vec4 paint : source_color = vec4(0.5, 0.5, 0.5, 1.0);
-uniform float gloss = 0.55;
+uniform float gloss = 0.4;
 uniform bool wheel = false;
 
 void fragment() {
 	vec4 c = texture(albedo_tex, UV);
-	if (c.a < 0.08) {
+	// Cut out on the full-size skin's alpha, like the original's colour key. Traffic bodies
+	// are big panels reaching down to the road whose lower edge and wheel arches are cut out
+	// of the skin; the averaged alpha of the small mip levels shows those as strips on the road.
+	if (textureLod(albedo_tex, UV, 0.0).a < 0.08) {
 		discard;
 	}
 	float paint_area = 1.0 - smoothstep(0.7, 0.85, c.a);
@@ -27,10 +30,10 @@ void fragment() {
 	vec3 body = min(c.rgb * paint.rgb, vec3(1.0));
 	ALBEDO = mix(c.rgb, body, painted);
 	ROUGHNESS = mix(mix(0.6, 1.0 - gloss, painted), 0.08, glass);
-	METALLIC = 0.3 * painted;
-	SPECULAR = mix(0.6, 0.8, glass);
-	CLEARCOAT = painted;
-	CLEARCOAT_ROUGHNESS = 0.15;
+	METALLIC = 0.15 * painted;
+	SPECULAR = mix(0.5, 0.8, glass);
+	CLEARCOAT = 0.5 * painted;
+	CLEARCOAT_ROUGHNESS = 0.3;
 	if (wheel) {
 		float rubber = 1.0 - painted;
 		ROUGHNESS = mix(ROUGHNESS, 0.9, rubber);

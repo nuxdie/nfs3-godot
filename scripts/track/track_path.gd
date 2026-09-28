@@ -10,6 +10,9 @@ var right_width := PackedFloat32Array()
 var cumulative := PackedFloat32Array()  # distance along the path at each node
 var radius := PackedFloat32Array()      # bend radius around each node (m), for AI speeds
 var length := 0.0
+## How far past a wall a car off the drivable surface may get before the race resets it
+## (the procedural track has no walls, so its cars can roam out onto the land).
+var lost_margin := 5.0
 
 
 func size() -> int:

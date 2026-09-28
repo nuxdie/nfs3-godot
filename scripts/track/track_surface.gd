@@ -11,6 +11,22 @@ class_name TrackSurface
 const UNKNOWN := 255
 const LOOSE := [2, 3, 5, 11, 13, 14, 15]
 
+## How the tyres get on with each surface: [grip factor, drag (1/s: deceleration per m/s of
+## speed, for the whole car), roughness (m: height of the bumps the wheels ride over)].
+## Paved is the reference; anything missing from the table (untagged scenery, bridges)
+## counts as paved. Off the road the car slides more, bogs down and shakes.
+const PAVED := [1.0, 0.0, 0.0]
+const FEEL := {
+	10: [0.97, 0.0, 0.006],    # road edge: rumble strip
+	7: [0.95, 0.0, 0.004], 12: [0.95, 0.0, 0.004],   # bridge planks
+	5: [0.72, 0.09, 0.022],    # gravel / dirt verge
+	13: [0.66, 0.14, 0.02],    # sand
+	2: [0.68, 0.12, 0.018], 3: [0.68, 0.12, 0.018],   # grass verges
+	11: [0.8, 0.05, 0.01],     # leaves
+	14: [0.6, 0.16, 0.03],     # off-road terrain
+	15: [0.55, 0.1, 0.015],    # snow
+}
+
 static var _colours := {}   # body instance id * 4096 + texture -> dust Color
 
 
@@ -24,17 +40,31 @@ static func set_images(body: CollisionObject3D, images: Array[Image]) -> void:
 	body.set_meta("surface_images", images)
 
 
+## Surface code under a ray hit; UNKNOWN on untagged ground.
+static func code(collider: Object, shape: int, face: int) -> int:
+	var body := collider as CollisionObject3D
+	if body == null or face < 0:
+		return UNKNOWN
+	var cs := body.shape_owner_get_owner(body.shape_find_owner(shape)) as CollisionShape3D
+	if cs == null or not cs.has_meta("surface"):
+		return UNKNOWN
+	var surfaces: PackedByteArray = cs.get_meta("surface")
+	return surfaces[face] if face < surfaces.size() else UNKNOWN
+
+
+## [grip, drag, roughness] for a surface code (see FEEL).
+static func feel(surface: int) -> Array:
+	return FEEL.get(surface, PAVED)
+
+
 ## Dust colour for the ground under a ray hit, alpha 1; alpha 0 on paved or untagged ground.
 static func dust(collider: Object, shape: int, face: int) -> Color:
 	var body := collider as CollisionObject3D
-	if body == null or face < 0 or not body.has_meta("surface_images"):
+	if body == null or not body.has_meta("surface_images"):
+		return Color(0, 0, 0, 0)
+	if code(collider, shape, face) not in LOOSE:
 		return Color(0, 0, 0, 0)
 	var cs := body.shape_owner_get_owner(body.shape_find_owner(shape)) as CollisionShape3D
-	if cs == null or not cs.has_meta("surface"):
-		return Color(0, 0, 0, 0)
-	var surfaces: PackedByteArray = cs.get_meta("surface")
-	if face >= surfaces.size() or surfaces[face] not in LOOSE:
-		return Color(0, 0, 0, 0)
 	var tex: int = cs.get_meta("texture")[face]
 	var images: Array[Image] = body.get_meta("surface_images")
 	var key := body.get_instance_id() * 4096 + tex

@@ -19,6 +19,24 @@ const BUMP_STOP_DAMPING := 4.0      # x damper rate
 const RAY_LEAD := 0.25
 # Deceleration from the engine when coasting off the pedals, m/s^2.
 const ENGINE_BRAKE := 0.6
+# Body sway: the bodywork rides its springs as a damped oscillator, so it lags, leans into a
+# bend and overshoots a little on a quick direction change. Radians per m/s^2 at pitch_roll
+# [45] 1, natural frequency (Hz), damping ratio, and the most it may lean.
+const SWAY_GAIN := 0.0095
+const SWAY_HZ := 1.4
+const SWAY_DAMPING := 0.5
+const SWAY_MAX := 0.12
+# Progressive grip: past the limit the tyre gives up its grip gradually with the slip angle,
+# from the peak (rad) to the full slide, instead of all at once as soon as it breaks away.
+const SLIP_PEAK := 0.12
+const SLIP_FULL := 0.6
+# Where the demand on a tyre starts easing into its limit, as a share of it: the limit is
+# approached on a soft knee, so the tyre starts to slide a touch before it lets go.
+const GRIP_KNEE := 0.85
+
+## The GTA IV-style additions, for A/B testing against the plain NFS3 handling (F6 toggles).
+static var body_sway := true
+static var progressive_grip := true
 
 # --- control inputs, written by a controller every physics frame
 var throttle := 0.0
@@ -49,6 +67,7 @@ var max_velocity := 70.0   # [14] what the engine reaches on the flat, m/s: sets
 var brake_decel := 10.0    # [18] m/s^2
 var grip := 1.0            # [30] lateral grip multiplier over 3.2, x tyre factor [66]
 var surface_grip := 1.0    # the road under it: below 1 when wet or snowy (set by Weather)
+var off_road := 0.0        # share of the grounded wheels on loose ground (grass, dirt, sand, snow)
 var idle_rpm := 1000.0     # [12]
 var redline := 7000.0      # [13]
 var final_drive := 3.8     # [79] (automatic) or [11]
@@ -114,6 +133,9 @@ var _wear := 0.0            # grip worn off the tyres [37]
 var _prev_vel := Vector3.ZERO
 var _acc := Vector2.ZERO    # smoothed acceleration in the car's frame: x to the left, y forward
 var _body_tilt: Node3D
+var _tilt_pivot := Vector3.ZERO     # roll and pitch centre, car-local (at axle height)
+var _tilt := Vector2.ZERO           # body pitch (x) and roll (y), rad
+var _tilt_vel := Vector2.ZERO
 var _half_size := Vector3(0.9, 0.7, 2.2)
 var _shift_timer := 0.0
 var _upside_timer := 0.0
@@ -252,6 +274,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		w.mount = center + Vector3.UP * (SUSPENSION_TRAVEL + RAY_LEAD)
 		_wheels.append(w)
 
+	_tilt_pivot = Vector3(0, _wheels[0].center.y, 0)
 	if wheelbase <= 0.0:
 		wheelbase = maxf(_wheels[0].center.z - _wheels[2].center.z, 1.5)
 	# Turning circle [34], kerb to kerb: the outer front wheel turns on half of it. A few cars
@@ -296,19 +319,20 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	_lamps.append_array(_head_glows)
 	for p in tails:
 		_lamps.append(_lamp_glow(p - Vector3(0, 0, 0.06), Color(0.45, 0.03, 0.02), 0.22))
+	# The lamps ride on the bodywork, so they lean with it.
 	for l in _lamps:
-		add_child(l)
+		_body_tilt.add_child(l)
 	_siren_pos = _lamp_positions(data, "S", Vector3(0.4, hs.y * 0.9, 0.0))
 	for p in tails:
 		var glow := _lamp_glow(p - Vector3(0, 0, 0.08), Color(1.0, 0.08, 0.04), 0.3)
 		glow.visible = false
-		add_child(glow)
+		_body_tilt.add_child(glow)
 		_brake_lights.append(glow)
 	# Reversing lamps: white, just inboard of the taillights (the models have no dummies for them).
 	for p in tails:
 		var glow := _lamp_glow(p - Vector3(signf(p.x) * 0.16, 0.03, 0.07), Color(0.9, 0.9, 0.85), 0.22)
 		glow.visible = false
-		add_child(glow)
+		_body_tilt.add_child(glow)
 		_reverse_lights.append(glow)
 	var rear := Vector3(0.0, tails[0].y, (tails[0].z + tails[-1].z) * 0.5)
 	var rl := OmniLight3D.new()
@@ -317,7 +341,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	rl.light_energy = 1.0
 	rl.visible = false
 	rl.position = rear - Vector3(0, 0, 0.3)
-	add_child(rl)
+	_body_tilt.add_child(rl)
 	_reverse_lights.append(rl)
 	# Facing -Z (backwards) is the light's default; tip it 15° down at the road.
 	_reverse_xf = Transform3D(Basis.from_euler(Vector3(deg_to_rad(-15.0), 0, 0)), rear)
@@ -328,7 +352,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		bl.light_energy = 1.2
 		bl.visible = false
 		bl.position = p - Vector3(0, 0, 0.2)
-		add_child(bl)
+		_body_tilt.add_child(bl)
 		_brake_lights.append(bl)
 	# Real headlight beams, where set_headlight_beam() allows them: one per lamp, or a single
 	# one between the lamps to spare the per-object light budget (8 spots on the Mobile renderer).
@@ -339,7 +363,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		beam.light_color = Color(1.0, 0.95, 0.85)
 		beam.spot_attenuation = 0.4
 		beam.visible = false
-		add_child(beam)
+		_body_tilt.add_child(beam)
 		_beams.append(beam)
 	set_high_beam(false)
 	for g: GeometryInstance3D in find_children("*", "GeometryInstance3D", true, false):
@@ -632,10 +656,10 @@ func enable_siren(on: bool) -> void:
 			l.omni_range = 14.0
 			l.light_energy = 0.0
 			l.position = ends[k] + Vector3.UP * 0.1
-			add_child(l)
+			_body_tilt.add_child(l)
 			_siren_lights.append(l)
 			var glow := _lamp_glow(ends[k] + Vector3.UP * 0.05, c, 0.55)
-			add_child(glow)
+			_body_tilt.add_child(glow)
 			_siren_glows.append(glow)
 	for l in _siren_lights:
 		l.visible = on
@@ -680,6 +704,8 @@ func reset_to(xf: Transform3D, drop := 0.1) -> void:
 	_brake_pedal = 0.0
 	_prev_vel = Vector3.ZERO
 	_acc = Vector2.ZERO
+	_tilt = Vector2.ZERO
+	_tilt_vel = Vector2.ZERO
 	was_reset.emit()
 
 
@@ -791,6 +817,7 @@ func _physics_process(dt: float) -> void:
 	q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
 	grounded_wheels = 0
 	var total_slip := 0.0
+	var loose_wheels := 0
 	# Suspension stiffness [64]; a bumpier car [46] rides on softer dampers.
 	var k := mass * 9.81 / 4.0 / STATIC_SAG * _k_scale
 	var c := 2.0 * sqrt(k * mass / 4.0) * 0.45 * lerpf(1.25, 0.85, clampf(bumpiness, 0.0, 1.0))
@@ -811,8 +838,20 @@ func _physics_process(dt: float) -> void:
 			continue
 		grounded_wheels += 1
 		w.contact = true
+		# What's underfoot (TrackSurface): off the road the tyres grip less, the ground drags
+		# at them and it's bumpy, where the road is smooth.
+		var surface := TrackSurface.code(hit.collider, hit.shape, hit.get("face_index", -1))
+		var feel := TrackSurface.feel(surface)
+		if surface in TrackSurface.LOOSE:
+			loose_wheels += 1
 		var dist := origin.distance_to(hit.position)
 		w.compression = ray_len - dist
+		if feel[2] > 0.0:
+			# Bumps fixed to the ground (so they come faster the faster the car goes), a
+			# different pattern under each wheel.
+			var gp: Vector3 = hit.position
+			w.compression += feel[2] * (sin(gp.x * 1.9 + gp.z * 0.7) * sin(gp.z * 2.3 - gp.x * 0.4) \
+					+ 0.5 * sin((gp.x + gp.z) * 5.1)) + feel[2]
 		var offset: Vector3 = hit.position - global_position
 		# On first contact the finite difference from zero would read as a huge compression
 		# speed (and a huge damper kick); the body's own speed into the road is the real one.
@@ -846,7 +885,7 @@ func _physics_process(dt: float) -> void:
 		# rear under power, the front under braking, the outside wheels in a bend).
 		var axle_grip := front_grip if w.front else 2.0 - front_grip
 		var transfer := g_transfer / 9.81 * (_acc.y * (-0.5 if w.front else 0.5) + _acc.x * (-0.5 if w.left else 0.5))
-		var mu := 1.25 * grip * axle_grip * (1.0 - _wear) * surface_grip * (0.5 if flat else 1.0)
+		var mu := 1.25 * grip * axle_grip * (1.0 - _wear) * surface_grip * feel[0] * (0.5 if flat else 1.0)
 		mu *= clampf(1.0 + transfer, 0.3, 1.7)
 		var lat_grip := 1.0
 		if handbrake and not w.front:
@@ -880,11 +919,22 @@ func _physics_process(dt: float) -> void:
 			# and nearly stopped the car stays put (as if in Park) rather than rolling down the slope.
 			var hold_f := max_f if abs_speed < 1.0 else mass * 0.5 * ENGINE_BRAKE * gas_off / 0.35 * driven
 			f_long -= clampf(v_long * mass * 0.25 / dt, -hold_f, hold_f)
-		# Rolling resistance.
-		f_long -= v_long * 4.0
+		# Rolling resistance, and loose ground dragging at the tyres (a quarter each).
+		f_long -= v_long * 4.0 + v_long * mass * feel[1] * 0.25
 		var f := Vector2(f_lat, f_long)
 		var ws_slip := 0.0
-		if f.length() > max_f:
+		if progressive_grip and max_f > 0.0 and abs_speed > 3.0:
+			# The demand eases into the limit on a soft knee rather than hitting a wall.
+			var demand := f.length() / max_f
+			if demand > GRIP_KNEE:
+				var eased := GRIP_KNEE + (1.0 - GRIP_KNEE) * tanh((demand - GRIP_KNEE) / (1.0 - GRIP_KNEE))
+				ws_slip = clampf((demand - 1.0) / 2.0, 0.0, 1.0)
+				# Past the peak slip angle a sliding tyre gives up grip gradually as the angle
+				# grows, by the slide multiplier [38]: a slide builds and can be caught.
+				var angle := atan2(absf(v_lat), maxf(absf(v_long), 1.0))
+				var fade := smoothstep(SLIP_PEAK, SLIP_FULL, angle)
+				f = f / demand * eased * (1.0 - 0.15 * slide_mult * maxf(fade, ws_slip * ws_slip))
+		elif f.length() > max_f:
 			ws_slip = clampf((f.length() - max_f) / max_f, 0.0, 1.0)
 			# A sliding tyre grips less than one on the limit, by the slide multiplier [38].
 			f = f.normalized() * max_f * (1.0 - 0.15 * slide_mult * ws_slip)
@@ -893,6 +943,7 @@ func _physics_process(dt: float) -> void:
 		apply_force(ws * f.x + wf * f.y, offset)
 		w.spin += v_long / w.radius * dt
 	slip = total_slip / 4.0
+	off_road = float(loose_wheels) / grounded_wheels if grounded_wheels > 0 else 0.0
 	_wear = minf(_wear + tyre_wear_rate * slip * dt * 0.01, 0.3)
 
 	# --- aero: drag (see _calibrate_drag) and downforce [31], more with an active spoiler
@@ -960,7 +1011,23 @@ func is_stuck_upside_down() -> bool:
 
 func _process(dt: float) -> void:
 	# The body leans back under power, dips under braking and rolls out of a bend [45].
-	_body_tilt.rotation = Vector3(-_acc.y, 0.0, _acc.x) * pitch_roll * 0.005
+	var lean := Vector2(-_acc.y, _acc.x) * pitch_roll
+	if body_sway:
+		# On its springs: a softer-damped car [46] wallows more before it settles.
+		var target := (lean * SWAY_GAIN).limit_length(SWAY_MAX)
+		var omega := TAU * SWAY_HZ
+		var zeta := SWAY_DAMPING * lerpf(1.2, 0.8, clampf(bumpiness, 0.0, 1.0))
+		var h := minf(dt, 1.0 / 30.0)
+		_tilt_vel += ((target - _tilt) * omega * omega - _tilt_vel * 2.0 * zeta * omega) * h
+		_tilt += _tilt_vel * h
+		_tilt = _tilt.limit_length(SWAY_MAX * 1.2)
+	else:
+		_tilt = lean * 0.005
+		_tilt_vel = Vector2.ZERO
+	# Leaning about the roll centre at axle height, so the roof swings out rather than the
+	# sills digging in; it's the identity at rest, which keeps the parts car-local (CarDamage).
+	var tilt_basis := Basis.from_euler(Vector3(_tilt.x, 0.0, _tilt.y))
+	_body_tilt.transform = Transform3D(tilt_basis, _tilt_pivot - tilt_basis * _tilt_pivot)
 	for w in _wheels:
 		if not w.has("visual"):
 			continue

@@ -26,7 +26,7 @@ var path: TrackPath
 var _weather: Weather
 var _env: Environment
 var _track_mat: ShaderMaterial
-var _road_mat: StandardMaterial3D
+var _road_mat: ShaderMaterial
 var _mirror_mat: ShaderMaterial
 var _vp: SubViewport
 var _cam: Camera3D
@@ -115,8 +115,7 @@ func _process(dt: float) -> void:
 	if _track_mat:
 		_update_track(eye_cam, wet)
 	elif _road_mat and absf(wet - _wet) > 0.005:
-		_road_mat.roughness = lerpf(0.9, 0.15, wet)
-		_road_mat.albedo_color = Color.WHITE.lerp(Color(0.55, 0.55, 0.55), wet)
+		_road_mat.set_shader_parameter("wetness", wet)
 	_wet = wet
 	if _probe and _probe.update_mode == ReflectionProbe.UPDATE_ONCE and is_instance_valid(_probe_car):
 		_probe_t -= dt

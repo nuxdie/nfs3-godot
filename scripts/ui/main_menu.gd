@@ -39,6 +39,7 @@ var _status: Label
 var _fade: ColorRect
 var _photo_back: TextureRect
 var _photo_front: TextureRect
+var _photo_drift: Node2D       # carries the photos' drift: a Control's position snaps to whole pixels
 var _chips: Array[Control] = []
 
 var _preview: SubViewport
@@ -98,13 +99,15 @@ func _build_backdrop() -> void:
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
+	_photo_drift = Node2D.new()
+	add_child(_photo_drift)
 	for i in 2:
 		var tr := TextureRect.new()
 		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		tr.modulate.a = 0.0
-		add_child(tr)
+		_photo_drift.add_child(tr)
 		if i == 0:
 			_photo_back = tr
 		else:
@@ -827,9 +830,7 @@ func _process(dt: float) -> void:
 		_shadow.position = Vector3(xf.origin.x, PODIUM_TOP + 0.01, xf.origin.z)
 		_shadow.rotation.y = xf.basis.get_euler().y
 	# Slow drift on the backdrop and a breath of camera motion keep the scene alive.
-	var drift := Vector2(sin(_time * 0.07), cos(_time * 0.05)) * size * 0.02
-	for tr in [_photo_back, _photo_front]:
-		tr.position = -size * 0.04 + drift
+	_photo_drift.position = Vector2(sin(_time * 0.07), cos(_time * 0.05)) * size * 0.02
 	_cam.position.y = CAM_Y + sin(_time * 0.3) * 0.06
 	var hover: bool = _start_btn.get_meta("hover", false)
 	_start_hot = UiKit.damp(_start_hot, 1.0 if hover else 0.0, 12.0, dt)

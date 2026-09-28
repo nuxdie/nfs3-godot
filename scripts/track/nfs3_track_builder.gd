@@ -34,6 +34,15 @@ const FENCE_KNOCK_WIDTH := 10.0
 ## Knockable panels are separate draw calls (hundreds on a track): drawn nearer than the
 ## blocks, which a thin fence barely shows beyond anyway.
 const FENCE_DRAW_DISTANCE := 300.0
+## Upright cut-out quads within these heights (m) and at least RAIL_MIN_WIDTH wide, at the
+## road's edge and with a continuous rail along their top, are guardrails that bend when
+## hit (see Guardrails).
+const RAIL_HEIGHT := Vector2(0.4, 1.6)
+const RAIL_MIN_WIDTH := 1.5
+## Guardrail panels are cut into columns about this wide (m) so they bend in a curve.
+const RAIL_COLUMN := 0.5
+## Track blocks per guardrail mesh.
+const RAIL_CHUNK_BLOCKS := 4
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
@@ -71,6 +80,11 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 	for bd in [body, terrain]:
 		TrackSurface.set_images(bd, t.images)
 
+	var rails := Guardrails.new()
+	rails.name = "Guardrails"
+	root.add_child(rails)
+	var rail_mesh := _rail_arrays()
+
 	var road_quads := _drivable_quads(t)
 	var foliage := {}
 	var fence_faces := PackedVector3Array()
@@ -80,7 +94,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		# Fence panels: short ones leave the block mesh to be knocked over, long ones stay
 		# in it and are made solid.
 		var knocked := {}
-		for panel in _fence_panels(t, b, road_quads, foliage):
+		for panel in _fence_panels(t, b, road_quads, foliage, false):
 			if panel.width <= FENCE_KNOCK_WIDTH:
 				props.add_child(_make_panel(t, panel, mats[0]))
 				for m in panel.members:
@@ -88,6 +102,15 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			else:
 				var c: PackedVector3Array = panel.corners
 				fence_faces.append_array([c[0], c[1], c[2], c[0], c[2], c[3]])
+		# Guardrails leave it to be bent.
+		for panel in _fence_panels(t, b, road_quads, foliage, true):
+			_add_rail(t, panel, rail_mesh)
+			for m in panel.members:
+				knocked[m[0][0]] = true
+		if (bi % RAIL_CHUNK_BLOCKS == RAIL_CHUNK_BLOCKS - 1 or bi == t.blocks.size() - 1) \
+				and rail_mesh[0][Mesh.ARRAY_VERTEX].size() > 0:
+			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[0], DRAW_DISTANCE)
+			rail_mesh = _rail_arrays()
 		var standing := func(p: Nfs3Track.Poly) -> bool: return not knocked.has(p)
 		# The road's drivable polys are flagged so the shader can wet them in the rain.
 		var groups := [[b.road, b.verts, b.shading, Vector3.ZERO, false, b.road_flags], [b.lanes, b.verts, b.shading, Vector3.ZERO, false]]
@@ -364,12 +387,14 @@ static func _foot_columns(t: Nfs3Track, ti: Nfs3Track.TexInfo, ia: int, reach: f
 
 
 ## The block's fence panels (see FENCE_HEIGHT) that stand on the drivable surface, with
-## road on both sides: those at its edge are backed by the invisible walls already. Each is
+## road on both sides: those at its edge are backed by the invisible walls already. With
+## `rail`, those guardrails at its edge instead (see RAIL_HEIGHT). Each is
 ## {members: [[polys, verts, shading, offset, mirrored]], corners: bottom edge first, width};
 ## a panel drawn as a front and a back quad over the same corners is one panel. `drivable`
 ## is from _drivable_quads; `foliage` caches _is_foliage per image.
 static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
-		foliage: Dictionary) -> Array:
+		foliage: Dictionary, rail: bool) -> Array:
+	var heights := RAIL_HEIGHT if rail else FENCE_HEIGHT
 	var sources := []
 	for obj in b.objects:
 		sources.append([obj, b.verts, b.shading, Vector3.ZERO, false])
@@ -395,32 +420,39 @@ static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
 			var lo := minf(minf(pos[0].y, pos[1].y), minf(pos[2].y, pos[3].y))
 			var height := maxf(maxf(pos[0].y, pos[1].y), maxf(pos[2].y, pos[3].y)) - lo
 			var normal := (pos[2] - pos[0]).cross(pos[1] - pos[0]).normalized()
-			if height < FENCE_HEIGHT.x or height > FENCE_HEIGHT.y or absf(normal.y) > 0.3:
+			if height < heights.x or height > heights.y or absf(normal.y) > 0.3:
 				continue
 			var ia := _bottom_edge(pos)
 			var width := pos[ia].distance_to(pos[(ia + 1) % 4])
-			if width < FENCE_MIN_WIDTH or not _road_both_sides(drivable, pos[ia], pos[(ia + 1) % 4]) \
+			var n := FOOT_COLUMNS
+			if rail:
+				# Road on one side and a continuous rail along the top.
+				if width < RAIL_MIN_WIDTH or _road_sides(drivable, pos[ia], pos[(ia + 1) % 4]) != 1 \
+						or _is_foliage(t, ti.qfs_index, foliage) \
+						or _foot_columns(t, ti, (ia + 2) % 4, 0.3, 0.5).count(true) < n * 3 / 4:
+					continue
+			elif width < FENCE_MIN_WIDTH or _road_sides(drivable, pos[ia], pos[(ia + 1) % 4]) != 2 \
 					or _is_foliage(t, ti.qfs_index, foliage):
 				continue
-			# Opaque at both ends of its foot and, between them, mostly opaque (rails, planks,
-			# lattice) or barred: a bush's foot is one run short of the edges.
-			var solid := _foot_columns(t, ti, ia, minf(1.0 / height, 1.0), 1.0 / 3.0)
-			var n := FOOT_COLUMNS
-			if not (solid[0] or solid[1] or solid[2]) or not (solid[n - 1] or solid[n - 2] or solid[n - 3]):
-				continue
-			var count := 0
-			var runs := 0
-			for c in n:
-				if solid[c]:
-					count += 1
-					if c == 0 or not solid[c - 1]:
-						runs += 1
-			if count < n / 2 and runs < 3:
-				continue
-			# And a rail, plank or frame along its top: a grass or dirt fringe along the
-			# foot of a field is see-through above it.
-			if _foot_columns(t, ti, (ia + 2) % 4, 0.25, 1.0 / 3.0).count(true) < n / 4:
-				continue
+			else:
+				# Opaque at both ends of its foot and, between them, mostly opaque (rails,
+				# planks, lattice) or barred: a bush's foot is one run short of the edges.
+				var solid := _foot_columns(t, ti, ia, minf(1.0 / height, 1.0), 1.0 / 3.0)
+				if not (solid[0] or solid[1] or solid[2]) or not (solid[n - 1] or solid[n - 2] or solid[n - 3]):
+					continue
+				var count := 0
+				var runs := 0
+				for c in n:
+					if solid[c]:
+						count += 1
+						if c == 0 or not solid[c - 1]:
+							runs += 1
+				if count < n / 2 and runs < 3:
+					continue
+				# And a rail, plank or frame along its top: a grass or dirt fringe along the
+				# foot of a field is see-through above it.
+				if _foot_columns(t, ti, (ia + 2) % 4, 0.25, 1.0 / 3.0).count(true) < n / 4:
+					continue
 			var keys := []
 			for v in pos:
 				var r := (v * 100.0).round()
@@ -439,18 +471,16 @@ static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
 	return panels
 
 
-## Whether there is drivable surface on both sides of the upright quad standing on `a`-`b`.
-static func _road_both_sides(drivable: Array, a: Vector3, b: Vector3) -> bool:
+## On how many sides (0-2) of the upright quad standing on `a`-`b` there is drivable surface.
+static func _road_sides(drivable: Array, a: Vector3, b: Vector3) -> int:
 	var side := Vector3(b.z - a.z, 0.0, a.x - b.x).normalized() * 1.5
+	var sides := 0
 	for s in [side, -side]:
-		var found := false
 		for f: float in [0.25, 0.5, 0.75]:
 			if _road_near(drivable[0], drivable[1], a.lerp(b, f) + s, 1.5):
-				found = true
+				sides += 1
 				break
-		if not found:
-			return false
-	return true
+	return sides
 
 
 ## Whether an image is plant life (a bush, hedge or grass fringe): its opaque texels are
@@ -504,6 +534,68 @@ static func _make_panel(t: Nfs3Track, panel: Dictionary, material: Material) -> 
 	prop.transform = Transform3D(basis, foot)
 	prop.setup(_mesh(t, groups, false), material, box, hull, FENCE_DRAW_DISTANCE)
 	return prop
+
+
+## Empty guardrail mesh data: [arrays (Mesh.ARRAY_MAX), lean per vertex] (see Guardrails).
+static func _rail_arrays() -> Array:
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array()
+	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array()
+	arrays[Mesh.ARRAY_COLOR] = PackedColorArray()
+	arrays[Mesh.ARRAY_TEX_UV] = PackedVector2Array()
+	arrays[Mesh.ARRAY_TEX_UV2] = PackedVector2Array()
+	return [arrays, PackedFloat32Array()]
+
+
+## Appends a guardrail panel to `out` (from _rail_arrays), drawn as _add_polys would but cut
+## into RAIL_COLUMN wide columns so it can bend.
+static func _add_rail(t: Nfs3Track, panel: Dictionary, out: Array) -> void:
+	var arrays: Array = out[0]
+	var c: PackedVector3Array = panel.corners
+	var lo := minf(minf(c[0].y, c[1].y), minf(c[2].y, c[3].y))
+	var height := maxf(maxf(c[0].y, c[1].y), maxf(c[2].y, c[3].y)) - lo
+	var cols := maxi(ceili(panel.width / RAIL_COLUMN), 1)
+	# A front and a back quad over the same corners: cull each one's back face.
+	var one_sided := 1.0 if panel.members.size() > 1 else 0.0
+	for m: Array in panel.members:
+		var p: Nfs3Track.Poly = m[0][0]
+		var verts: PackedVector3Array = m[1]
+		var shading: PackedColorArray = m[2]
+		var ti: Nfs3Track.TexInfo = t.textures[p.tex]
+		var order: Array = [1, 0, 3, 2] if m[4] else [0, 1, 2, 3]
+		var pos: Array[Vector3] = []
+		var cols_of: Array[Color] = []
+		for k in 4:
+			var vi: int = p.v[order[k]]
+			pos.append(verts[vi] + m[3])
+			var sc: Color = shading[vi] if vi < shading.size() else Color.WHITE
+			sc.a = 0.0
+			cols_of.append(sc)
+		var ia := _bottom_edge(pos)
+		var ib := (ia + 1) % 4
+		var ic := (ia + 2) % 4
+		var id := (ia + 3) % 4
+		var frames := _anim_frames(t, p)
+		var uv2 := Vector2(ti.qfs_index, one_sided + (2.0 * frames + 16.0 * p.anim_period if frames > 1 else 0.0))
+		for col in cols:
+			# The column's corners in the quad's own winding: foot, foot, top, top.
+			var cp: Array[Vector3] = []
+			var cuv: Array[Vector2] = []
+			var cc: Array[Color] = []
+			for e in [[ia, ib, float(col) / cols], [ia, ib, float(col + 1) / cols],
+					[id, ic, float(col + 1) / cols], [id, ic, float(col) / cols]]:
+				cp.append(pos[e[0]].lerp(pos[e[1]], e[2]))
+				cuv.append(ti.uv[e[0]].lerp(ti.uv[e[1]], e[2]))
+				cc.append(cols_of[e[0]].lerp(cols_of[e[1]], e[2]))
+			var normal := (cp[2] - cp[0]).cross(cp[1] - cp[0]).normalized()
+			for k in Nfs3Track.QUAD:
+				arrays[Mesh.ARRAY_VERTEX].append(cp[k])
+				arrays[Mesh.ARRAY_NORMAL].append(normal)
+				arrays[Mesh.ARRAY_COLOR].append(cc[k])
+				arrays[Mesh.ARRAY_TEX_UV].append(cuv[k])
+				arrays[Mesh.ARRAY_TEX_UV2].append(uv2)
+				out[1].append(clampf((cp[k].y - lo) / height, 0.0, 1.0) if height > 0.0 else 1.0)
 
 
 ## Sign-sized extra objects drawn only with opaque textures (foliage cut-outs are left

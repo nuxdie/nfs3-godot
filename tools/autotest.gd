@@ -29,6 +29,11 @@ func _ready() -> void:
 		if arg.begins_with("--duration="):
 			duration = float(arg.trim_prefix("--duration="))
 	Game.weather = "--weather" in args
+	# --classic: the plain NFS3 handling, without body sway and progressive grip (F6 in game).
+	if "--no-traffic" in args:
+		Game.traffic = false
+	Car.body_sway = not "--classic" in args
+	Car.progressive_grip = Car.body_sway
 	Game.laps = 2
 	Game.opponents = 3
 	process_mode = Node.PROCESS_MODE_ALWAYS

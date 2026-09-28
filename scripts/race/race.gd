@@ -12,6 +12,11 @@ const ESCAPE_DISTANCE := 380.0
 const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
 const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
+const RB_HALF := 2.4              # m, half a cruiser's length (they park across the road)
+const RB_TRACK_RANGE := 80.0      # m short of a roadblock where its cruisers start covering your line
+const RB_COMMIT := 18.0           # m: closer than this they hold still, so a late juke gets through
+const RB_SLIDE := 4.5             # m/s the pair shuffles sideways at
+const RB_MIN_WAY := 3.0           # m, an opening narrower than this makes a racer switch sides
 const MAX_LIGHT_CONES := 16   # MAX_BEAMS in track.gdshader
 const MAX_SHADOWS := 16       # MAX_SHADOWS in track.gdshader
 const TICKET_FINES := [150, 400]   # the third ticket in Hot Pursuit is an arrest; Free Roam keeps fining
@@ -33,6 +38,7 @@ var heat := 0              # 0 no chase; 1..3 as it drags on: backup units, road
 var _block_t := 0.0        # until the next roadblock may go up
 var _backup_t := 0.0       # until the next backup unit may join
 var _gap := Vector3.INF    # the way through the current roadblock
+var _rb := {}              # roadblock geometry: node, side (+1 gap to the right), w, shift range, shift
 var _finish_order: Array = []
 var _results_dirty := false   # a car finished behind the results screen; refresh the table
 var _reset_check_t := 0.0
@@ -300,6 +306,11 @@ func _unhandled_input(e: InputEvent) -> void:
 		player.set_headlights(not player.headlights_on)
 	elif e.is_action_pressed("high_beam") and player:
 		player.set_high_beam(not player.high_beam)
+	elif e.is_action_pressed("handling_feel"):
+		# A/B the body sway and progressive grip against the plain NFS3 handling (all cars).
+		Car.body_sway = not Car.body_sway
+		Car.progressive_grip = Car.body_sway
+		hud.flash("Handling: " + ("sway + progressive grip" if Car.body_sway else "classic"), 1.5)
 
 
 ## Hands the track shader the drop shadows of the MAX_SHADOWS cars nearest the camera.
@@ -549,6 +560,7 @@ func _update_pursuit(dt: float) -> void:
 					_bust_rival(r)
 		else:
 			r.bust_t = 0.0
+	_update_roadblock(dt)
 	_clear_roadblock()
 
 
@@ -693,15 +705,28 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 		var xf := path.transform_at(n, off, 0.0).rotated_local(Vector3.UP, PI * 0.5)
 		cop.reset_to(xf)
 		cop.enable_siren(true)
+		# Kinematic, so it shoves whatever it slides into rather than passing through.
+		cop.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 		cop.freeze = true
 		cop.set_meta("node", n)
+		cop.set_meta("off", off)
+		cop.set_meta("lift", (cop.global_position - xf.origin).dot(xf.basis.y))
 		roadblock.append(cop)
+	# How far the pair can shuffle across (along the road's right, times gap_side) while
+	# staying on the tarmac: towards the gap until the inner cruiser meets the edge, away
+	# until the outer one does. Measured on the ground, as the walls can sit far out.
+	var reach_gap := absf(_ground_offset(n, w * gap_side))
+	var reach_far := absf(_ground_offset(n, -w * gap_side))
+	_rb = {"node": n, "side": gap_side, "w": w, "shift": 0.0, "vel": 0.0,
+		"gap_edge": reach_gap, "far_edge": reach_far,
+		"max": maxf(reach_gap - 0.05 * w - RB_HALF, 0.0), "min": minf(-(reach_far - 0.55 * w - RB_HALF), 0.0)}
 	# Racers head for the gap: just past the inner cruiser (parked sideways, ~2.4 m either side of
 	# its centre), where there's road even when the walls are far apart. They also steer around
 	# the cruisers like any other car.
 	var gap_lane := (0.05 * w + 3.9) * gap_side
 	_add_obstacles(roadblock)
 	for r in racers:
+		r.erase("rb_pick")
 		var ai := _controller(r.car)
 		if ai:
 			ai.lane = gap_lane
@@ -725,6 +750,71 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 	hud.flash("Roadblock ahead!" if not with_spikes else "Roadblock - spikes!", 2.0, "alert")
 
 
+## The roadblock pair shuffles across the road to cover the line of the racer bearing down
+## on it, as in Most Wanted: commit to the gap early and it closes, leaving an opening on
+## the other side. Close in, the cruisers hold still, so a late juke gets through.
+## Racers and chasing cops keep re-picking whichever opening is left.
+func _update_roadblock(dt: float) -> void:
+	if _rb.is_empty() or roadblock.is_empty():
+		return
+	var n: int = _rb.node
+	var side: float = _rb.side
+	var w: float = _rb.w
+	var fwd := path.forward(n)
+	var origin: Vector3 = path.points[n]
+	# The racer closing fastest on the block, and how far off it is.
+	var threat: Dictionary = {}
+	var near := INF
+	for r in racers:
+		var c: Car = r.car
+		if r.finished or not is_instance_valid(c):
+			continue
+		var along := (c.global_position - origin).dot(fwd)   # - short of the block
+		var closing := -signf(along) * c.linear_velocity.dot(fwd)
+		var d := absf(along)
+		if closing > 3.0 and d < RB_TRACK_RANGE and d < near:
+			near = d
+			threat = r
+	var target: float = _rb.shift
+	if not threat.is_empty() and near > RB_COMMIT:
+		var c: Car = threat.car
+		# Where it'll be across the road a moment from now: sit the pair's middle on that.
+		var cn: int = threat.node
+		var lat := path.lateral(c.global_position, cn) + c.linear_velocity.dot(path.rights[cn]) * 0.5
+		target = clampf(lat * side + 0.25 * w, _rb.min, _rb.max)
+	var want := clampf((target - _rb.shift) * 3.0, -RB_SLIDE, RB_SLIDE)
+	if near <= RB_COMMIT:
+		want = 0.0
+	_rb.vel = move_toward(_rb.vel, want, RB_SLIDE * 3.0 * dt)
+	_rb.shift += _rb.vel * dt
+	for cop in roadblock:
+		var xf := path.transform_at(n, cop.get_meta("off") + _rb.shift * side, 0.0).rotated_local(Vector3.UP, PI * 0.5)
+		cop.global_transform = xf.translated_local(Vector3.UP * cop.get_meta("lift"))
+
+	# The two ways through, as [width, centre] across the road (times side): by the gap-side
+	# edge past the inner cruiser, and by the far edge past the outer one.
+	var inner: float = _rb.shift + 0.05 * w + RB_HALF
+	var outer: float = _rb.shift - 0.55 * w - RB_HALF
+	var ways := [[_rb.gap_edge - inner, (inner + _rb.gap_edge) * 0.5], [outer + _rb.far_edge, (outer - _rb.far_edge) * 0.5]]
+	var best := 0 if ways[0][0] >= ways[1][0] else 1
+	for r in racers:
+		var ai := _controller(r.car)
+		if ai == null or r.finished:
+			continue
+		var along := (r.car.global_position - origin).dot(fwd)
+		if along > 0.0 or along < -RB_TRACK_RANGE * 1.6:
+			continue
+		# Stick with the chosen way until it's closing up, then switch.
+		var pick: int = r.get("rb_pick", best)
+		if ways[pick][0] < RB_MIN_WAY and ways[1 - pick][0] > ways[pick][0]:
+			pick = 1 - pick
+		r.rb_pick = pick
+		ai.lane = ways[pick][1] * side
+	_gap = path.transform_at(path.idx(n + 2), ways[best][1] * side, 0.0).origin
+	for cop in cops:
+		_controller(cop).gap = _gap
+
+
 ## Takes the roadblock down once it's well behind the player.
 func _clear_roadblock() -> void:
 	if roadblock.is_empty():
@@ -741,6 +831,7 @@ func _clear_roadblock() -> void:
 			sp.queue_free()
 		roadblock.clear()
 		spikes.clear()
+		_rb = {}
 		_gap = Vector3.INF
 		for cop in cops:
 			_controller(cop).gap = _gap
@@ -775,7 +866,7 @@ func _check_resets(dt: float) -> void:
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
 		# A shortcut can run further out than the virtual road's walls, so only off the
 		# drivable surface.
-		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + 5.0 and not _on_road(c)
+		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + path.lost_margin and not _on_road(c)
 		# AI wedged against scenery that backing up hasn't cleared. A cop out of the player's
 		# sight gets put back on the road sooner: nobody sees it jump.
 		var give_up := 3.0 if c.is_cop and c.global_position.distance_to(player.global_position) > 150.0 else 7.0

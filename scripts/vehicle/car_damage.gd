@@ -73,6 +73,10 @@ func _physics_process(dt: float) -> void:
 	if inward != Vector3.ZERO:
 		_cooldown = 0.12   # one crash reports over several steps and contact points
 		hit(at, inward, best)
+		# And whatever the car ran into gives too, if it's a guardrail.
+		if absf(inward.y) < 0.5:
+			var s := clampf((best - MIN_HIT) / (FULL_HIT - MIN_HIT), 0.0, 1.0)
+			get_tree().call_group("guardrails", "hit", at, -inward, s)
 
 
 ## A crash at world point `at`, pushing along `inward` (into the car) with `strength` m/s.
