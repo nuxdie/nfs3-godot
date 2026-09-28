@@ -165,7 +165,7 @@ func _update_stranded(dt: float, desired: float, dir: int) -> void:
 ## right once the car is already in a long bend such as a hairpin.
 func _speed_limit(dir: int) -> float:
 	var worst := car.top_speed
-	var a_brake := car.brake_decel * 0.6 * car.surface_grip
+	var a_brake := car.brake_decel * 0.6 * _ground_grip()
 	var dist := 0.0
 	var prev := node
 	for k in range(0, 64, 2):
@@ -184,7 +184,7 @@ func _speed_limit(dir: int) -> float:
 ## surface_grip on the weaker axle, see Car), with the extra grip that downforce gives at speed, plus a little for the line
 ## cutting across the inside of the bend.
 func _corner_speed(r: float) -> float:
-	var k := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * car.surface_grip * r
+	var k := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * _ground_grip() * r
 	# Car's downforce adds 0.5 * min(downforce_k v^2, 0.9) g-units of load: v^2 = k (1 + c v^2).
 	var c := car.downforce_k * 0.5
 	var v2 := k * 1.45
@@ -315,3 +315,9 @@ func _avoid(dt: float) -> void:
 			lane = clampf(lane + (4.0 if randf() < 0.5 else -4.0), -w, w)
 			_lane_change_t = 2.0
 			return
+
+
+## The grip under the car: the weather's, less on loose ground (see TrackSurface.FEEL) when
+## it has run wide off the road.
+func _ground_grip() -> float:
+	return car.surface_grip * lerpf(1.0, 0.68, car.off_road)

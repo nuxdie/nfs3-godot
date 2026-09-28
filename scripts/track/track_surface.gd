@@ -19,12 +19,12 @@ const PAVED := [1.0, 0.0, 0.0]
 const FEEL := {
 	10: [0.97, 0.0, 0.006],    # road edge: rumble strip
 	7: [0.95, 0.0, 0.004], 12: [0.95, 0.0, 0.004],   # bridge planks
-	5: [0.72, 0.09, 0.022],    # gravel / dirt verge
-	13: [0.66, 0.14, 0.02],    # sand
-	2: [0.68, 0.12, 0.018], 3: [0.68, 0.12, 0.018],   # grass verges
-	11: [0.8, 0.05, 0.01],     # leaves
-	14: [0.6, 0.16, 0.03],     # off-road terrain
-	15: [0.55, 0.1, 0.015],    # snow
+	5: [0.72, 0.045, 0.022],    # gravel / dirt verge
+	13: [0.66, 0.08, 0.02],    # sand
+	2: [0.68, 0.065, 0.018], 3: [0.68, 0.065, 0.018],   # grass verges
+	11: [0.8, 0.03, 0.01],     # leaves
+	14: [0.6, 0.09, 0.03],     # off-road terrain
+	15: [0.55, 0.06, 0.015],    # snow
 }
 
 static var _colours := {}   # body instance id * 4096 + texture -> dust Color

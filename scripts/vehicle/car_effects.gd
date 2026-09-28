@@ -23,6 +23,8 @@ var _dust: Array[CPUParticles3D] = []    # per rear wheel
 var _sparks: CPUParticles3D
 var _spark_t := 0.0
 var _crash_t := 0.0         # a crash was reported; spark at its contact once physics has it
+var _crash_v := 0.0         # ... and how fast the car was going into it, m/s
+var _prev_v := 0.0          # the car's speed last step: by the time a crash is reported it's stopped
 
 
 func _init(skid_marks: SkidMarks) -> void:
@@ -44,8 +46,8 @@ func _ready() -> void:
 	_sparks = _spark_emitter()
 	add_child(_sparks)
 	_car.crashed.connect(func(_i: float) -> void:
-		print("DBG crashed ", _i)
-		_crash_t = 0.1)
+		_crash_t = 0.1
+		_crash_v = maxf(_prev_v, _i))
 
 
 func _physics_process(dt: float) -> void:
@@ -97,17 +99,19 @@ func _physics_process(dt: float) -> void:
 	_crash_t = maxf(_crash_t - dt, 0.0)
 	# A crash sparks at any contact; otherwise only a fast enough slide along one does.
 	var scrape := _scrape_point(0.0 if _crash_t > 0.0 else SPARK_SPEED)
-	var _st := PhysicsServer3D.body_get_direct_state(_car.get_rid())
-	if OS.has_environment("FXDEBUG") and _car.kmh() > 0:
-		print("DBG %d kmh %d contacts %d crash_t %.2f scrape %s" % [Engine.get_physics_frames(), _car.kmh(), _st.get_contact_count(), _crash_t, scrape.size() > 0])
 	if scrape.size() > 0:
+		var crash := _crash_t > 0.0
+		# A slide throws a tight jet along the wall; a hit bursts wide, as hard as it landed.
+		var v: float = maxf(scrape[2], clampf(_crash_v * 0.4, 5.0, 14.0)) if crash else scrape[2]
 		_sparks.global_position = scrape[0]
 		_sparks.direction = scrape[1]
-		_sparks.initial_velocity_min = scrape[2] * 0.4
-		_sparks.initial_velocity_max = scrape[2]
-		_spark_t = maxf(_spark_t, 0.2 if _crash_t > 0.0 else 0.05)
+		_sparks.spread = 70.0 if crash else 25.0
+		_sparks.initial_velocity_min = v * 0.4
+		_sparks.initial_velocity_max = v
+		_spark_t = maxf(_spark_t, 0.2 if crash else 0.05)
 		_crash_t = 0.0
 	_sparks.emitting = _spark_t > 0.0
+	_prev_v = _car.linear_velocity.length()
 
 
 ## Puffs leave with a share of the car's speed, dragged along in its wake, and the damping

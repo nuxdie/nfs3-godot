@@ -798,10 +798,11 @@ func _update_roadblock(dt: float) -> void:
 	var ways := [[_rb.gap_edge - inner, (inner + _rb.gap_edge) * 0.5], [outer + _rb.far_edge, (outer - _rb.far_edge) * 0.5]]
 	var best := 0 if ways[0][0] >= ways[1][0] else 1
 	for r in racers:
-		var ai := _controller(r.car)
+		var c: Car = r.car
+		var ai := _controller(c)
 		if ai == null or r.finished:
 			continue
-		var along := (r.car.global_position - origin).dot(fwd)
+		var along := (c.global_position - origin).dot(fwd)
 		if along > 0.0 or along < -RB_TRACK_RANGE * 1.6:
 			continue
 		# Stick with the chosen way until it's closing up, then switch.

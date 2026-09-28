@@ -57,8 +57,6 @@ func _ready() -> void:
 	if "--carshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/car_shots.gd").new())
 	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
-	if "--repro" in OS.get_cmdline_user_args():
-		add_child(load("res://tools/_tmp/" + OS.get_environment("REPRO") + ".gd").new())
 	if "--fxshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/fx_shots.gd").new())
 
@@ -126,7 +124,7 @@ func has_game_data() -> bool:
 
 func track_name(id: String) -> String:
 	if id == PROCEDURAL_TRACK:
-		return "Procedural Circuit"
+		return ProcPlaces.names(ProceduralTrack.SEED).town
 	return TRACK_NAMES.get(id, id)
 
 

@@ -11,9 +11,13 @@ class_name ProceduralTrack
 ##              nodes are open road, tunnel or bridge
 ##   ProcGround the road, verges, terrain, far mountains, water, tunnel and bridges
 ##   ProcScenery trees, rails, fences, poles, signs, buildings, lamps, the start gantry
+##   ProcPlaces  the named places (town, gas station, diner, farm, campground, motel) and
+##              the signs and billboards that name and point to them
 
 ## Bump when the look changes, so the menu re-renders its postcard.
-const VERSION := 2
+const VERSION := 3
+## The seed the game builds the lap from.
+const SEED := 1998
 
 const STEP := 6.0            # m between path nodes
 const ROAD_HALF := 7.0       # two lanes
@@ -169,7 +173,7 @@ class Layout:
 			_grid[c].append(i)
 
 
-static func build(root: Node3D, seed_value := 1998) -> TrackPath:
+static func build(root: Node3D, seed_value := SEED) -> TrackPath:
 	var lay := make_layout(seed_value)
 	var path := TrackPath.new()
 	for i in lay.n:
@@ -188,7 +192,7 @@ static func build(root: Node3D, seed_value := 1998) -> TrackPath:
 
 
 ## The lap's centreline, without building the track (for the menu's map).
-static func outline(seed_value := 1998) -> PackedVector3Array:
+static func outline(seed_value := SEED) -> PackedVector3Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
 	var pts := _centreline(rng)

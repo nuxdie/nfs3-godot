@@ -1,10 +1,11 @@
 class_name ProcScenery
 extends RefCounted
 ## What stands along the procedural track, stretch by stretch: shops, houses and street
-## lamps in town; fields, barns, silos, fences, telephone lines and billboards on the farms;
-## forest, guardrails, chevrons and bend warnings through the hills and the mountain pass;
-## rocks on the cuttings; lamps over the bridges; the start/finish gantry. Plus forest over
-## the land beyond, thinning out up the mountains.
+## lamps in town; fields, barns, silos, fences and telephone lines on the farms; forest,
+## guardrails, chevrons and bend warnings through the hills and the mountain pass; rocks on
+## the cuttings; lamps over the bridges; the start/finish gantry. Plus forest over the land
+## beyond, thinning out up the mountains. The named places and every sign that names or
+## points to one are ProcPlaces'; they are laid out first, and the rest keeps off them.
 ##
 ## Everything is low-poly and drawn through MultiMeshes bucketed by CELL-sized squares, so
 ## each bucket is culled on its own and far ones drop out. There are no invisible walls, so
@@ -27,6 +28,14 @@ var _pools: Array[Transform3D] = []   # under the street lamps
 var _body: StaticBody3D
 var _solid_shapes := {}   # kind -> [Shape3D, offset up the instance's local Y (m)]
 var _faces := PackedVector3Array()   # rails and fences
+var _keep := {}       # Vector2i cell -> Array of Vector3(x, z, radius): ground a place took
+const KEEP_CELL := 50.0
+var no_fence := {}    # node * 2 + (1 on the right): a driveway or lot along the road
+var places: ProcPlaces
+var facade_mat: Material
+var store_mat: Material
+var motel_mat: Material
+var plain_mat: Material
 
 
 static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int) -> void:
@@ -37,6 +46,7 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._density = [0.45, 0.75, 1.0][clampi(Game.quality, 0, 2)]
 	s._make_meshes()
 	s._make_shapes()
+	s.places = ProcPlaces.build(s, seed_value)
 	s._town()
 	s._gantry()
 	s._farms()
@@ -44,7 +54,8 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._fences()
 	s._poles()
 	s._bend_signs()
-	s._billboards()
+	s.places.billboards()
+	s.places = null   # they refer to each other: let both go
 	s._bridge_lamps()
 	s._rocks()
 	s._roadside_trees()
@@ -94,6 +105,10 @@ func _make_shapes() -> void:
 		"block": [box.call(Vector3(12, 10.8, 12)), 5.4],
 		"house": [box.call(Vector3(9, 5.2, 7.5)), 2.6],
 		"barn": [box.call(Vector3(18, 8.0, 11)), 4.0],
+		"diner": [box.call(Vector3(17, 4.6, 9)), 2.3],
+		"motel": [box.call(Vector3(26, 4.0, 8)), 2.0],
+		"kiosk": [box.call(Vector3(10, 4.2, 7)), 2.1],
+		"cabin": [box.call(Vector3(6, 3.4, 5)), 1.7],
 		"silo": [cyl.call(2.8, 14.0), 7.0],
 		"pole": [cyl.call(0.15, 9.6), 4.8],
 		"lamp_post": [cyl.call(0.13, 8.0), 4.0],
@@ -155,7 +170,7 @@ func _beside(i: int, s: float, d: float, along := 0.0) -> Vector3:
 ## Whether a prop of radius `r` at `p` would stand clear of every stretch of road (outside
 ## its walls), above the water and on ground no steeper than `max_slope`.
 func _clear(p: Vector3, r: float, max_slope := 0.8) -> bool:
-	if p.y < lay.water + 0.5:
+	if p.y < lay.water + 0.5 or kept(p, r):
 		return false
 	for i in lay.nearby(p.x, p.z):
 		var v := Vector3(p.x - lay.pts[i].x, 0.0, p.z - lay.pts[i].z)
@@ -171,6 +186,25 @@ func _clear(p: Vector3, r: float, max_slope := 0.8) -> bool:
 		if Vector2(hx, hz).length() / 3.0 > max_slope:
 			return false
 	return true
+
+
+## Keeps everything else `r` m round `p` off the ground (a place's building, lot or yard).
+func keep_out(p: Vector3, r: float) -> void:
+	# Registered in every cell a prop standing in the circle's reach could be in.
+	var pad := r + 8.0
+	for cx in range(floori((p.x - pad) / KEEP_CELL), floori((p.x + pad) / KEEP_CELL) + 1):
+		for cz in range(floori((p.z - pad) / KEEP_CELL), floori((p.z + pad) / KEEP_CELL) + 1):
+			var c := Vector2i(cx, cz)
+			if not _keep.has(c):
+				_keep[c] = []
+			_keep[c].append(Vector3(p.x, p.z, r))
+
+
+func kept(p: Vector3, r: float) -> bool:
+	for k: Vector3 in _keep.get(Vector2i(floori(p.x / KEEP_CELL), floori(p.z / KEEP_CELL)), []):
+		if Vector2(p.x - k.x, p.z - k.y).length() < k.z + r:
+			return true
+	return false
 
 
 func _straight(i: int, span: int) -> bool:
@@ -412,10 +446,41 @@ func _buildings() -> void:
 	plain.uv1_triplanar = true
 	plain.uv1_world_triplanar = true
 	plain.uv1_scale = Vector3.ONE * 0.5
+	var store := facade.duplicate() as StandardMaterial3D
+	store.albedo_texture = _storefront_texture()
+	# Shops under two floors of flats.
+	var above := Image.create(128, 192, false, Image.FORMAT_RGBA8)
+	var bay := _facade_image()
+	for k in 4:
+		above.blit_rect(bay, Rect2i(0, 0, 64, 64), Vector2i((k % 2) * 64, (k / 2) * 64))
+	above.blit_rect(_storefront_image(), Rect2i(0, 0, 128, 64), Vector2i(0, 128))
+	above.generate_mipmaps()
+	var block_front := facade.duplicate() as StandardMaterial3D
+	block_front.albedo_texture = ImageTexture.create_from_image(above)
+	var rooms := facade.duplicate() as StandardMaterial3D
+	rooms.albedo_texture = _motel_texture()
+	facade_mat = facade
+	store_mat = store
+	motel_mat = rooms
+	plain_mat = plain
 	var roof_grey := Color(0.38, 0.37, 0.36)
 	var roof_red := Color(0.48, 0.2, 0.15)
-	_mesh("shop", _house(Vector3(14, 4.4, 10), 0.0, facade, plain, roof_grey, true), 700.0, true)
-	_mesh("block", _house(Vector3(12, 10.2, 12), 0.0, facade, plain, roof_grey, true), 900.0, true)
+	var one := Vector2(2.0, 1.0)
+	_mesh("shop", _house(Vector3(14, 4.4, 10), 0.0, facade, plain, roof_grey, true, store, one), 700.0, true)
+	_mesh("diner", _house(Vector3(17, 4.0, 9), 0.0, facade, plain, Color(0.5, 0.52, 0.55), true, store, one), 700.0, true)
+	_mesh("kiosk", _house(Vector3(10, 3.6, 7), 0.0, plain, plain, roof_grey, true, store, one), 600.0, true)
+	_mesh("motel", _house(Vector3(26, 3.4, 8), 1.4, plain, plain, Color(0.33, 0.36, 0.4), false, rooms, Vector2.ONE), 700.0, true)
+	_mesh("cabin", _house(Vector3(6, 2.8, 5), 1.9, plain, plain, Color(0.28, 0.3, 0.26), false), 450.0, true)
+	# Over each shop's front: an awning and the board its sign is painted on.
+	var awning := SurfaceTool.new()
+	awning.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var slope := Basis(Vector3.RIGHT, 0.36)
+	_append(awning, _box(Vector3(12.0, 0.06, 1.7)), Transform3D(slope, Vector3(0, 2.95, 5.8)), Color.WHITE)
+	_append(awning, _box(Vector3(12.0, 0.3, 0.05)), Transform3D(Basis(), Vector3(0, 2.52, 6.6)), Color(0.85, 0.85, 0.85))
+	awning.set_material(_paint)
+	_mesh("awning", awning.commit(), 350.0, true)
+	_mesh("shop_sign", _merge([[_box(Vector3(8.4, 0.95, 0.1)), Vector3(0, 3.8, 5.05), Color.WHITE]], _paint), 400.0, false)
+	_mesh("block", _house(Vector3(12, 10.2, 12), 0.0, facade, plain, roof_grey, true, block_front, Vector2(2.0, 3.0)), 900.0, true)
 	_mesh("house", _house(Vector3(9, 3.3, 7.5), 2.6, facade, plain, roof_red, false), 600.0, true)
 	_mesh("barn", _house(Vector3(18, 5.0, 11), 4.2, plain, plain, Color(0.3, 0.3, 0.32), false), 800.0, true)
 	var silo := SurfaceTool.new()
@@ -442,10 +507,14 @@ func _buildings() -> void:
 
 ## `size` (width along X, wall height, depth along Z) with a gable `roof` m high along X
 ## (0: flat, with a parapet); the front faces +Z.
+## `front`, when given, dresses the front wall instead, its texture spanning `front_span`
+## (bays, floors).
 static func _house(size: Vector3, roof: float, walls: Material, plain: Material, roof_c: Color,
-		parapet: bool) -> ArrayMesh:
+		parapet: bool, front: Material = null, front_span := Vector2.ONE) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var fst := SurfaceTool.new()
+	fst.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var hx := size.x * 0.5
 	var hz := size.z * 0.5
 	var h := size.y
@@ -457,9 +526,15 @@ static func _house(size: Vector3, roof: float, walls: Material, plain: Material,
 		var bays := maxf(roundf(w / 4.0), 1.0)
 		var floors := maxf(roundf(h / 3.3), 1.0)
 		var out := (a + b).normalized()
-		_wall(st, a, b, h, Vector2(bays, floors), out)
+		if k == 0 and front:
+			_wall(fst, a, b, h, Vector2(bays, floors) / front_span, out)
+		else:
+			_wall(st, a, b, h, Vector2(bays, floors), out)
 	st.set_material(walls)
 	var mesh := st.commit()
+	if front:
+		fst.set_material(front)
+		fst.commit(mesh)
 	var top := SurfaceTool.new()
 	top.begin(Mesh.PRIMITIVE_TRIANGLES)
 	top.set_color(roof_c)
@@ -515,6 +590,12 @@ static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, out: Vecto
 
 ## One window bay: wall, a framed window with a sill, a sky glint in the glass.
 static func _facade_texture() -> ImageTexture:
+	var img := _facade_image()
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+
+static func _facade_image() -> Image:
 	var img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0.9, 0.88, 0.84))
 	img.fill_rect(Rect2i(0, 60, 64, 4), Color(0.75, 0.73, 0.7))
@@ -523,6 +604,45 @@ static func _facade_texture() -> ImageTexture:
 	img.fill_rect(Rect2i(14, 14, 36, 9), Color(0.33, 0.4, 0.48))
 	img.fill_rect(Rect2i(31, 14, 2, 30), Color(0.93, 0.93, 0.92))
 	img.fill_rect(Rect2i(10, 46, 44, 3), Color(0.7, 0.68, 0.65))
+	return img
+
+
+## Two bays of shopfront: a sign band, a display window, then a window and a glazed door.
+static func _storefront_texture() -> ImageTexture:
+	var img := _storefront_image()
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+
+static func _storefront_image() -> Image:
+	var img := Image.create(128, 64, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.9, 0.88, 0.84))
+	var frame := Color(0.3, 0.26, 0.22)
+	var glass := Color(0.14, 0.18, 0.23)
+	var sky := Color(0.3, 0.37, 0.45)
+	img.fill_rect(Rect2i(0, 58, 128, 6), Color(0.55, 0.52, 0.5))
+	for r: Rect2i in [Rect2i(5, 20, 54, 38), Rect2i(69, 20, 34, 38), Rect2i(107, 20, 17, 44)]:
+		img.fill_rect(r, frame)
+		img.fill_rect(r.grow(-2), glass)
+		img.fill_rect(Rect2i(r.position + Vector2i(2, 2), Vector2i(r.size.x - 4, 8)), sky)
+	# Glazing bars and the door's handle.
+	img.fill_rect(Rect2i(31, 20, 2, 38), frame)
+	img.fill_rect(Rect2i(109, 40, 13, 2), frame)
+	img.fill_rect(Rect2i(119, 44, 2, 6), Color(0.8, 0.75, 0.5))
+	return img
+
+
+## One motel room: its door, number plate and window.
+static func _motel_texture() -> ImageTexture:
+	var img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.92, 0.9, 0.85))
+	img.fill_rect(Rect2i(0, 58, 64, 6), Color(0.6, 0.58, 0.55))
+	img.fill_rect(Rect2i(6, 18, 16, 40), Color(0.25, 0.42, 0.5))
+	img.fill_rect(Rect2i(19, 38, 2, 3), Color(0.85, 0.75, 0.4))
+	img.fill_rect(Rect2i(10, 22, 8, 3), Color(0.85, 0.8, 0.6))
+	img.fill_rect(Rect2i(28, 20, 30, 24), Color(0.95, 0.95, 0.94))
+	img.fill_rect(Rect2i(30, 22, 26, 20), Color(0.18, 0.22, 0.28))
+	img.fill_rect(Rect2i(30, 22, 26, 20).grow_individual(0, 0, -13, 0), Color(0.55, 0.3, 0.25))
 	img.generate_mipmaps()
 	return ImageTexture.create_from_image(img)
 
@@ -564,7 +684,9 @@ func _town() -> void:
 			var gap := int(ceilf((width + rng.randf_range(2.0, 7.0)) / ProceduralTrack.STEP))
 			if rng.randf() < 0.85 and _clear(p, depth * 0.5, 10.0):
 				p.y = minf(p.y, _beside(i, s, d - depth * 0.5).y) - 0.3
-				_put(kind, _upright(p, -lay.flat_right[i] * s), tints[rng.randi() % tints.size()])
+				var xf := _upright(p, -lay.flat_right[i] * s)
+				_put(kind, xf, tints[rng.randi() % tints.size()])
+				places.dress(kind, xf, i, s)
 			i += gap
 	# Street lamps over the pavements, staggered.
 	for i in range(0, lay.n, 5):
@@ -820,7 +942,7 @@ func _fences() -> void:
 			# Runs of a few hundred metres with gaps (gates, driveways).
 			if i % 25 == 0:
 				on = rng.randf() < 0.7
-			if not farm or not on:
+			if not farm or not on or no_fence.has(i * 2 + int(s > 0.0)):
 				continue
 			var d := walls[i] + 1.5
 			var a := _beside(i, s, d)
@@ -916,61 +1038,6 @@ func _bend_signs() -> void:
 			var p := _beside(w, 1.0, lay.wall_r[w] + 1.2)
 			_put("sign_post", _upright(p, -lay.fwd[w]))
 			_put("curve_sign", _upright(p, -lay.fwd[w], Vector3(turn, 1, 1)))
-
-
-## Billboards on the straights out in the country.
-func _billboards() -> void:
-	var texts := ["DRIVE-IN DINER  ·  NEXT RIGHT", "MOTEL  ·  VACANCY", "FRESH PEACHES  2 MI",
-		"LAKESIDE RESORT", "TIRES & SERVICE", "SUNSET MOTOR INN", "ROADHOUSE BBQ", "SCENIC OVERLOOK AHEAD"]
-	var colors := [Color(0.75, 0.12, 0.1), Color(0.1, 0.3, 0.6), Color(0.95, 0.55, 0.1), Color(0.15, 0.45, 0.3),
-		Color(0.2, 0.2, 0.22), Color(0.55, 0.15, 0.45)]
-	var font: Font = load("res://fonts/BarlowCondensed-BoldItalic.ttf")
-	var placed := 0
-	var i := 30
-	while i < lay.n and placed < texts.size():
-		var z := lay.zone[i]
-		if (z == Zone.FARM or z == Zone.LAKE or z == Zone.FOREST) and lay.kind[i] == Kind.OPEN and _straight(i, 8):
-			var s := 1.0 if rng.randf() < 0.5 else -1.0
-			var wall := lay.wall_r[i] if s > 0.0 else lay.wall_l[i]
-			var p := _beside(i, s, wall + 9.0)
-			if _clear(p, 4.0, 0.6):
-				var face := (-lay.fwd[i] - lay.flat_right[i] * s * 0.6).normalized()
-				_billboard(_upright(p, face), texts[placed], colors[placed % colors.size()], font)
-				placed += 1
-				i += 60
-				continue
-		i += 5
-
-
-func _billboard(xf: Transform3D, text: String, color: Color, font: Font) -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var wood := Color(0.35, 0.27, 0.2)
-	for x: float in [-3.0, 3.0]:
-		_append(st, _box(Vector3(0.3, 6.5, 0.3)), Transform3D(Basis(), Vector3(x, 3.0, -0.2)), wood)
-	_append(st, _box(Vector3(9.0, 3.6, 0.2)), Transform3D(Basis(), Vector3(0, 5.0, 0)), color)
-	_append(st, _box(Vector3(9.2, 0.2, 0.25)), Transform3D(Basis(), Vector3(0, 6.9, 0)), Color(0.9, 0.9, 0.88))
-	_append(st, _box(Vector3(9.2, 0.2, 0.25)), Transform3D(Basis(), Vector3(0, 3.1, 0)), Color(0.9, 0.9, 0.88))
-	st.set_material(_paint)
-	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
-	mi.transform = xf
-	mi.visibility_range_end = 600.0
-	root.add_child(mi)
-	var label := Label3D.new()
-	label.text = text.replace("  ·  ", "\n") if text.length() > 18 else text
-	label.font = font
-	label.font_size = 128
-	label.pixel_size = 0.009
-	label.width = 900.0
-	label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	label.modulate = Color(1.0, 0.97, 0.88)
-	label.outline_size = 0
-	label.double_sided = false
-	label.shaded = true
-	label.position = Vector3(0, 5.0, 0.13)
-	label.visibility_range_end = 400.0
-	mi.add_child(label)
 
 
 ## Boulders on the cuttings and scattered off the road in the hills and by the lake.

@@ -1,9 +1,10 @@
 extends Node
 ## Photographs a track from the road at points round the lap, without a race:
 ##   godot --path . -- --trackshots <track> [lap fraction ...] [--night] [--weather]
-##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--tag=NAME]
+##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--lookside=M] [--tag=NAME]
 ## Saves shots/track_<tag><fraction>.png. The eye stands --back m behind the node and --up m
-## over the road, --side m to the right, and looks at the road --ahead m on.
+## over the road, --side m to the right, and looks at the road --ahead m on (--lookside m to
+## the right of it).
 
 
 func _ready() -> void:
@@ -15,7 +16,7 @@ func _run() -> void:
 	get_tree().current_scene.queue_free()
 	var args := Array(OS.get_cmdline_user_args())
 	var pos := args.filter(func(a: String) -> bool: return not a.begins_with("--"))
-	var opt := {"up": 2.2, "back": 7.0, "ahead": 45.0, "side": 0.0}
+	var opt := {"up": 2.2, "back": 7.0, "ahead": 45.0, "side": 0.0, "lookside": 0.0}
 	var tag := ""
 	for a: String in args:
 		for k in opt:
@@ -30,7 +31,7 @@ func _run() -> void:
 	if fracs.is_empty():
 		fracs = [0.0, 0.2, 0.4, 0.6, 0.8]
 	if id == Game.PROCEDURAL_TRACK:
-		var lay := ProceduralTrack.make_layout(1998)
+		var lay := ProceduralTrack.make_layout(ProceduralTrack.SEED)
 		for k in [ProceduralTrack.Kind.TUNNEL, ProceduralTrack.Kind.BRIDGE]:
 			for r in ProceduralTrack._runs(lay.kind, k):
 				print("%s at %.3f..%.3f" % ["tunnel" if k == ProceduralTrack.Kind.TUNNEL else "bridge",
@@ -51,7 +52,7 @@ func _run() -> void:
 		var back: int = int(opt.back / 6.0)
 		var ahead: int = int(opt.ahead / 6.0)
 		var at: Vector3 = path.points[path.idx(i - back)] + path.rights[i] * opt.side + Vector3.UP * opt.up
-		var look: Vector3 = path.points[path.idx(i + ahead)] + Vector3.UP * 1.0
+		var look: Vector3 = path.points[path.idx(i + ahead)] + path.rights[path.idx(i + ahead)] * opt.lookside + Vector3.UP * 1.0
 		cam.global_position = at
 		cam.look_at(look, Vector3.UP)
 		for k in 8:

@@ -842,16 +842,19 @@ func _physics_process(dt: float) -> void:
 		# at them and it's bumpy, where the road is smooth.
 		var surface := TrackSurface.code(hit.collider, hit.shape, hit.get("face_index", -1))
 		var feel := TrackSurface.feel(surface)
+		var ground_grip: float = feel[0]
+		var ground_drag: float = feel[1]
+		var rough: float = feel[2]
 		if surface in TrackSurface.LOOSE:
 			loose_wheels += 1
 		var dist := origin.distance_to(hit.position)
 		w.compression = ray_len - dist
-		if feel[2] > 0.0:
+		if rough > 0.0:
 			# Bumps fixed to the ground (so they come faster the faster the car goes), a
 			# different pattern under each wheel.
 			var gp: Vector3 = hit.position
-			w.compression += feel[2] * (sin(gp.x * 1.9 + gp.z * 0.7) * sin(gp.z * 2.3 - gp.x * 0.4) \
-					+ 0.5 * sin((gp.x + gp.z) * 5.1)) + feel[2]
+			w.compression += rough * (sin(gp.x * 1.9 + gp.z * 0.7) * sin(gp.z * 2.3 - gp.x * 0.4) \
+					+ 0.5 * sin((gp.x + gp.z) * 5.1))
 		var offset: Vector3 = hit.position - global_position
 		# On first contact the finite difference from zero would read as a huge compression
 		# speed (and a huge damper kick); the body's own speed into the road is the real one.
@@ -885,7 +888,7 @@ func _physics_process(dt: float) -> void:
 		# rear under power, the front under braking, the outside wheels in a bend).
 		var axle_grip := front_grip if w.front else 2.0 - front_grip
 		var transfer := g_transfer / 9.81 * (_acc.y * (-0.5 if w.front else 0.5) + _acc.x * (-0.5 if w.left else 0.5))
-		var mu := 1.25 * grip * axle_grip * (1.0 - _wear) * surface_grip * feel[0] * (0.5 if flat else 1.0)
+		var mu := 1.25 * grip * axle_grip * (1.0 - _wear) * surface_grip * ground_grip * (0.5 if flat else 1.0)
 		mu *= clampf(1.0 + transfer, 0.3, 1.7)
 		var lat_grip := 1.0
 		if handbrake and not w.front:
@@ -920,7 +923,7 @@ func _physics_process(dt: float) -> void:
 			var hold_f := max_f if abs_speed < 1.0 else mass * 0.5 * ENGINE_BRAKE * gas_off / 0.35 * driven
 			f_long -= clampf(v_long * mass * 0.25 / dt, -hold_f, hold_f)
 		# Rolling resistance, and loose ground dragging at the tyres (a quarter each).
-		f_long -= v_long * 4.0 + v_long * mass * feel[1] * 0.25
+		f_long -= v_long * 4.0 + v_long * mass * ground_drag * 0.25
 		var f := Vector2(f_lat, f_long)
 		var ws_slip := 0.0
 		if progressive_grip and max_f > 0.0 and abs_speed > 3.0:

@@ -79,6 +79,9 @@ scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, wal
                    procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges),
                    proc_ground.gd (its road, cuttings and banks, terrain, mountains, water, tunnel,
                    bridges), proc_scenery.gd (its town, farms, forest, rails, signs, lamps),
+                   proc_places.gd (its named places - the town's shops, hotel and water tower,
+                   gas station, diner, farm stand, campground, motel - and the road signs and
+                   billboards that name them and point to them with real distances),
                    track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd,
