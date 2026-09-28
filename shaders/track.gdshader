@@ -14,8 +14,11 @@ void vertex() {
 
 void fragment() {
 	vec4 c = texture(textures, vec3(UV, layer));
-	if (c.a < 0.5) {
-		discard;
-	}
 	ALBEDO = c.rgb * COLOR.rgb * brightness;
+	// Alpha-tested foliage and fences, with alpha-to-coverage under MSAA so the cut-out
+	// edges of the low-res textures aren't stair-stepped.
+	ALPHA = c.a;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+	ALPHA_ANTIALIASING_EDGE = 0.25;
+	ALPHA_TEXTURE_COORDINATE = UV * vec2(textureSize(textures, 0).xy);
 }

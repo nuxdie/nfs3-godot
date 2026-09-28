@@ -44,6 +44,7 @@ var max_steer := deg_to_rad(32.0)
 var hood_z := 0.8          # front bumper, local z (bumper camera sits here)
 
 var _wheels: Array[Dictionary] = []
+var _wheelbase := 2.6
 var _shift_timer := 0.0
 var _upside_timer := 0.0
 var _body_visual: Node3D
@@ -139,6 +140,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		w.mount = center + Vector3.UP * SUSPENSION_TRAVEL
 		_wheels.append(w)
 
+	_wheelbase = maxf(_wheels[0].center.z - _wheels[2].center.z, 1.5)
+
 	# Many traffic cars list all-zero gear ratios; derive them from the speed-to-rpm table
 	# (rpm per m/s = ratio * final drive * 60 / (2 pi r)).
 	ratios = ratios.duplicate()
@@ -165,8 +168,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	for side: float in [-1.0, 1.0]:
 		var bl := OmniLight3D.new()
 		bl.light_color = Color(1, 0.05, 0.02)
-		bl.omni_range = 2.5
-		bl.light_energy = 2.0
+		bl.omni_range = 2.0
+		bl.light_energy = 1.2
 		bl.visible = false
 		bl.position = Vector3(side * hs.x * 0.7, 0.0, -hs.z - 0.2)
 		add_child(bl)
@@ -340,6 +343,10 @@ func _physics_process(dt: float) -> void:
 			f_long += drive * 0.5
 		if braking > 0.0:
 			var b := brake_decel * mass * 0.25 * braking * 1.25
+			# ABS: braking only gets the grip that cornering leaves over, so the car still
+			# turns while braking instead of ploughing on into the outside wall.
+			var lat_used := minf(absf(f_lat), max_f * 0.9)
+			b = minf(b, sqrt(max_f * max_f - lat_used * lat_used))
 			f_long -= clampf(v_long * mass * 0.25 / dt, -b, b)
 		if handbrake and not w.front:
 			f_long -= clampf(v_long * mass * 0.25 / dt, -max_f * 0.8, max_f * 0.8)
@@ -361,10 +368,15 @@ func _physics_process(dt: float) -> void:
 	apply_central_force(-fwd * drag)
 	if grounded_wheels > 0:
 		apply_central_force(-up * mass * clampf(abs_speed * abs_speed * 0.00035, 0.0, 0.9) * 9.81 * 0.5)
-	# Keep yaw from running away when grip is lost (arcade assist).
+	# Keep yaw from running away when grip is lost (arcade assist). Only rotation beyond what
+	# the steering asks for is damped; damping all of it makes the car plough wide in bends.
 	var yaw := angular_velocity.dot(up)
 	if not handbrake:
-		apply_torque(-up * yaw * inertia.y * 1.2)
+		var yaw_ref := speed * tan(steer_angle) / _wheelbase
+		var excess := yaw
+		if yaw * yaw_ref > 0.0:
+			excess = signf(yaw) * maxf(absf(yaw) - absf(yaw_ref), 0.0)
+		apply_torque(-up * excess * inertia.y * 1.2)
 	# Gentle self-righting in the air so jumps land on the wheels.
 	if grounded_wheels == 0:
 		var axis := up.cross(Vector3.UP)

@@ -34,6 +34,7 @@ static func load_dir(dir: String) -> Nfs3Car:
 			# undo the flip Godot applies for those files or the UVs land on the wrong rows.
 			if tga.size() > 17 and tga[17] & 0x20:
 				img.flip_y()
+			_bleed_cutout(img)
 			img.generate_mipmaps()
 			c.texture = ImageTexture.create_from_image(img)
 	var fce := viv.get_file("car.fce")
@@ -105,7 +106,11 @@ func _parse_fce(d: PackedByteArray) -> void:
 	var n_pri := d.decode_u32(2044)
 	for i in mini(n_pri, 16):
 		var q := 2048 + i * 16
-		colours.append(Color.from_hsv(d.decode_u32(q) / 255.0, d.decode_u32(q + 4) / 255.0, d.decode_u32(q + 8) / 255.0))
+		# Hue/saturation/brightness (a 4th byte, usually ~128, is ignored). The paint areas of
+		# the skin are mid-grey, so the colour is applied at double strength to come out true.
+		var col := Color.from_hsv(d.decode_u32(q) / 255.0, d.decode_u32(q + 4) / 255.0, d.decode_u32(q + 8) / 255.0)
+		col = Color(col.r * 2.0, col.g * 2.0, col.b * 2.0)
+		colours.append(col)
 	# Parts come in LOD groups: body, then its four wheels, then the next LOD down. Part 0 is the
 	# most detailed body ("high body", or "medium body" on traffic), so its wheels are parts 1-4.
 	# Wheel names in the data are unreliable (left/right swapped, a "left front" at the back), so
@@ -157,6 +162,57 @@ func _parse_fce(d: PackedByteArray) -> void:
 			# Without a clean set of four wheels, draw them as part of the body.
 			body_parts.append(part)
 	wheels.sort_custom(func(a, b): return a.slot < b.slot)
+
+
+## Cut-out texels hold a key colour (often pure blue) that texture filtering smears onto
+## the visible edges. Give them the colour of an opaque neighbour instead (alpha stays 0).
+static func _bleed_cutout(img: Image) -> void:
+	if img.get_format() != Image.FORMAT_RGBA8:
+		img.convert(Image.FORMAT_RGBA8)
+	var w := img.get_width()
+	var h := img.get_height()
+	var px := img.get_data()
+	var alpha := PackedByteArray()
+	alpha.resize(w * h)
+	var todo := PackedInt32Array()
+	for i in w * h:
+		alpha[i] = px[i * 4 + 3]
+		if alpha[i] < 20:
+			todo.append(i)
+			px[i * 4 + 3] = 0
+	# A few rings outwards from the visible texels are enough for the mip levels in use.
+	for pass_i in 3:
+		var filled := PackedInt32Array()
+		var left := PackedInt32Array()
+		for i in todo:
+			var x := i % w
+			var src := -1
+			if x > 0 and px[(i - 1) * 4 + 3] != 0:
+				src = i - 1
+			elif x < w - 1 and px[(i + 1) * 4 + 3] != 0:
+				src = i + 1
+			elif i >= w and px[(i - w) * 4 + 3] != 0:
+				src = i - w
+			elif i + w < w * h and px[(i + w) * 4 + 3] != 0:
+				src = i + w
+			if src < 0:
+				left.append(i)
+			else:
+				filled.append(i)
+				filled.append(src)
+		for k in range(0, filled.size(), 2):
+			var o := filled[k] * 4
+			var so := filled[k + 1] * 4
+			px[o] = px[so]
+			px[o + 1] = px[so + 1]
+			px[o + 2] = px[so + 2]
+		# Mark this ring as a source for the next one only after it is complete.
+		for k in range(0, filled.size(), 2):
+			px[filled[k] * 4 + 3] = 1
+		todo = left
+	for i in w * h:
+		px[i * 4 + 3] = alpha[i]
+	img.set_data(w, h, false, Image.FORMAT_RGBA8, px)
 
 
 static func _part_name(d: PackedByteArray, pi: int) -> String:

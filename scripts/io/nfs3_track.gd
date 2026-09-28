@@ -30,6 +30,7 @@ class TexInfo:
 	var uv: PackedVector2Array
 	var is_lane: bool
 	var additive: bool      # glows, fire, light shafts: drawn additively over the scene
+	var cutout: bool        # alpha-tested (foliage, fences, railings)
 	var qfs_index: int
 
 class VRoad:
@@ -277,6 +278,7 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		ti.uv = PackedVector2Array([Vector2(c[0], c[1]), Vector2(c[2], c[3]), Vector2(c[4], c[5]), Vector2(c[6], c[7])])
 		# Low byte of the flags word: 0x04 = alpha cut-out, 0x02 = additive.
 		ti.additive = (d[p + 40] & 0x02) != 0
+		ti.cutout = (d[p + 40] & 0x04) != 0
 		ti.is_lane = d[p + 44] != 0
 		ti.qfs_index = d.decode_u16(p + 45)
 		textures.append(ti)

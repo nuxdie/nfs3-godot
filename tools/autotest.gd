@@ -1,6 +1,6 @@
 extends Node
-## Scripted play-through: starts a race, holds throttle, steers with a simple
-## lane-keeper, saves screenshots to shots/ and prints telemetry, then quits.
+## Scripted play-through: starts a race, drives the player's car through the input
+## actions, saves screenshots to shots/ and prints telemetry, then quits.
 
 var t := 0.0
 var shots := [3.0, 8.0, 14.0, 22.0, 32.0]
@@ -8,7 +8,13 @@ var duration := 34.0
 var race: Node
 
 
+var _ai: AIController
+
+
 func _ready() -> void:
+	# Runs after the ghost AI (-20) has written its decisions to the car and before the
+	# PlayerController (-10) reads the input actions back.
+	process_physics_priority = -15
 	var args := OS.get_cmdline_user_args()
 	var i := args.find("--autotest")
 	if args.size() > i + 1:
@@ -38,19 +44,9 @@ func _physics_process(dt: float) -> void:
 		return
 	t += dt
 	var p: Car = race.player
-	# Let a hidden AI steer, but feed its decisions through the real input actions.
 	var r: Dictionary = race.player_racer()
 	if race.path and r.size() > 0:
-		var n: int = race.path.idx(r.node + 10)
-		var local: Vector3 = p.global_transform.affine_inverse() * race.path.points[n]
-		var ang: float = atan2(-local.x, maxf(local.z, 0.1))
-		Input.action_release("steer_left")
-		Input.action_release("steer_right")
-		if ang > 0.05:
-			Input.action_press("steer_right", clampf(ang * 2.0, 0.0, 1.0))
-		elif ang < -0.05:
-			Input.action_press("steer_left", clampf(-ang * 2.0, 0.0, 1.0))
-		Input.action_press("accelerate")
+		_drive(p)
 	if int(t * 2) != int((t - dt) * 2):
 		print("t=%.1f state=%d kmh=%d gear=%d rpm=%d wheels=%d lap=%d node=%d pos=%d slip=%.2f" % [t, race.state, p.kmh(), p.gear, p.rpm, p.grounded_wheels, r.get("lap", -9), r.get("node", -1), race.position_of(p), p.slip])
 	if shots.size() > 0 and t >= shots[0]:
@@ -63,3 +59,31 @@ func _physics_process(dt: float) -> void:
 		shots.pop_front()
 	if t > duration:
 		get_tree().quit()
+
+
+## Let a ghost AIController pick throttle/brake/steer (it brakes for bends and backs off
+## walls), then feed those decisions through the real input actions so the player's
+## controls path is what actually drives the car.
+func _drive(p: Car) -> void:
+	if _ai == null:
+		_ai = AIController.new()
+		_ai.role = AIController.Role.RACER
+		_ai.path = race.path
+		_ai.others = race.racers.map(func(x): return x.car) + race.traffic_cars + race.cops
+		_ai.process_physics_priority = -20
+		p.add_child(_ai)
+		# add_child ran _ready, which resets the priority to -10.
+		_ai.process_physics_priority = -20
+	_ai.enabled = race.state == 2
+	for a in ["accelerate", "brake", "steer_left", "steer_right", "handbrake"]:
+		Input.action_release(a)
+	if not _ai.enabled:
+		return
+	if p.throttle > 0.01:
+		Input.action_press("accelerate", p.throttle)
+	if p.brake > 0.01:
+		Input.action_press("brake", p.brake)
+	if p.steer > 0.01:
+		Input.action_press("steer_right", p.steer)
+	elif p.steer < -0.01:
+		Input.action_press("steer_left", -p.steer)

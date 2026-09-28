@@ -7,6 +7,8 @@ const TEX_SIZE := 256
 const DRAW_DISTANCE := 700.0
 const WALL_HEIGHT := 6.0
 const WALL_DEPTH := 3.0
+## Physics layer of the solid scenery that only the chase camera collides with.
+const CAMERA_LAYER := 8
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
@@ -98,9 +100,60 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		gmi.material_override = mats[pass_i]
 		geo.add_child(gmi)
 
+	root.add_child(_camera_blockers(t))
 	var path := _make_path(t)
 	root.add_child(make_walls(path))
 	return path
+
+
+## Cars drive through roadside scenery (NFS3 fences them in with the virtual road's walls
+## instead), but the chase camera must not end up inside a building and show its back
+## faces. Large solid objects (buildings, walls, bridges) block the camera; foliage, glows
+## and small props would only make it jump, so they are left out.
+static func _camera_blockers(t: Nfs3Track) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "CameraBlockers"
+	body.collision_layer = CAMERA_LAYER
+	body.collision_mask = 0
+	var faces := PackedVector3Array()
+	for b in t.blocks:
+		for obj in b.objects:
+			_blocker_faces(t, obj, b.verts, Vector3.ZERO, faces)
+		for x in b.xobjs:
+			if not x.has("anim"):
+				_blocker_faces(t, x.polys, x.verts, x.ref, faces)
+	for o in t.col_objects:
+		_blocker_faces(t, o.polys, o.verts, o.ref, faces)
+	if faces.size() > 0:
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(faces)
+		shape.backface_collision = true
+		var cs := CollisionShape3D.new()
+		cs.shape = shape
+		body.add_child(cs)
+	return body
+
+
+static func _blocker_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, offset: Vector3,
+		out: PackedVector3Array) -> void:
+	var tris := PackedVector3Array()
+	var box := AABB()
+	for p in polys:
+		if p.tex >= t.textures.size():
+			continue
+		var ti: Nfs3Track.TexInfo = t.textures[p.tex]
+		if ti.is_lane or ti.additive or ti.cutout:
+			continue
+		if p.v[0] >= verts.size() or p.v[1] >= verts.size() or p.v[2] >= verts.size() or p.v[3] >= verts.size():
+			continue
+		for k in Nfs3Track.QUAD:
+			var v: Vector3 = verts[p.v[k]] + offset
+			box = AABB(v, Vector3.ZERO) if tris.is_empty() else box.expand(v)
+			tris.append(v)
+	if tris.is_empty():
+		return
+	if maxf(box.size.x, box.size.z) >= 6.0 and box.size.y >= 2.5:
+		out.append_array(tris)
 
 
 ## One mesh from [polys, verts, shading, offset] groups, keeping only the polys whose

@@ -8,6 +8,7 @@ var ups := PackedVector3Array()
 var left_width := PackedFloat32Array()  # distance from centre to left wall
 var right_width := PackedFloat32Array()
 var cumulative := PackedFloat32Array()  # distance along the path at each node
+var radius := PackedFloat32Array()      # bend radius around each node (m), for AI speeds
 var length := 0.0
 
 
@@ -23,6 +24,15 @@ func finalize() -> void:
 		cumulative[i] = d
 		d += points[i].distance_to(points[(i + 1) % n])
 	length = d
+	# Bend radius from the change of heading across a few nodes either side (on the ground
+	# plane, so crests and dips don't count as bends).
+	radius.resize(n)
+	for i in n:
+		var a := points[idx(i - 2)] - points[idx(i - 3)]
+		var b := points[idx(i + 3)] - points[idx(i + 2)]
+		var ang := Vector2(a.x, a.z).angle_to(Vector2(b.x, b.z))
+		var arc := fposmod(cumulative[idx(i + 3)] - cumulative[idx(i - 3)], length)
+		radius[i] = minf(arc / maxf(absf(ang), 0.001), 2000.0)
 
 
 func idx(i: int) -> int:

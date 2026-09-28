@@ -84,9 +84,11 @@ func _physics_process(dt: float) -> void:
 	elif fwd_speed < desired - 1.0:
 		car.throttle = clampf((desired - fwd_speed) / 6.0, 0.25, 1.0)
 		car.brake = 0.0
-	elif fwd_speed > desired + 2.0:
+	elif fwd_speed > desired + 1.0:
+		# Brake firmly: the limit already allows for the braking distance, so a gentle
+		# proportional brake arrives at the bend too fast.
 		car.throttle = 0.0
-		car.brake = clampf((fwd_speed - desired) / 8.0, 0.2, 1.0)
+		car.brake = clampf((fwd_speed - desired) / 3.0, 0.35, 1.0)
 	else:
 		car.throttle = 0.35
 		car.brake = 0.0
@@ -129,23 +131,38 @@ func _update_stranded(dt: float, desired: float, dir: int) -> void:
 		stranded_t += dt
 
 
-## Max speed for the upcoming bend: v = sqrt(a_lat * r).
+## Max speed now: every bend in the next few hundred metres must still be reachable at
+## its cornering speed (v = sqrt(a_lat * r)) after braking over the distance to it.
+## Measuring each bend where it is (not by the heading change from here) keeps the limit
+## right once the car is already in a long bend such as a hairpin.
 func _speed_limit(dir: int) -> float:
 	var worst := car.top_speed
-	var here := path.forward(node) * dir
-	for k in [6, 12, 20, 30]:
+	var a_brake := car.brake_decel * 0.6
+	var dist := 0.0
+	var prev := node
+	for k in range(0, 64, 2):
 		var i := path.idx(node + k * dir)
-		var f := path.forward(i) * dir
-		var ang := here.angle_to(f)
-		if ang < 0.02:
-			continue
-		var dist := path.points[node].distance_to(path.points[i])
-		var radius := dist / ang
-		var v := sqrt(9.0 * skill * car.grip * radius) + 4.0
-		# Allow for braking distance to that bend.
-		v = sqrt(v * v + 2.0 * car.brake_decel * 0.7 * maxf(dist - 8.0, 0.0))
+		dist += path.points[prev].distance_to(path.points[i])
+		prev = i
+		var v := _corner_speed(path.radius[i])
+		v = sqrt(v * v + 2.0 * a_brake * maxf(dist - 6.0, 0.0))
 		worst = minf(worst, v)
+		if dist > 320.0:
+			break
 	return worst * (0.97 if role == Role.RACER else 0.8)
+
+
+## Cornering speed for a bend of radius r: 85% of what the tyres hold (mu = 1.25 * grip,
+## see Car), with the extra grip that downforce gives at speed, plus a little for the line
+## cutting across the inside of the bend.
+func _corner_speed(r: float) -> float:
+	var k := 1.25 * 9.81 * 0.85 * skill * car.grip * r
+	# Car's downforce adds 0.5 * min(0.00035 v^2, 0.9) g-units of load: v^2 = k (1 + c v^2).
+	var c := 0.000175
+	var v2 := k * 1.45
+	if k * c < 1.0:
+		v2 = minf(k / (1.0 - k * c), v2)
+	return sqrt(v2) + 1.5
 
 
 ## Traffic: pull out around a car stopped in its lane (a parked cruiser, a wreck), then

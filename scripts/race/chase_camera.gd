@@ -48,10 +48,11 @@ func _physics_process(dt: float) -> void:
 		_pos = desired
 	else:
 		desired = target.global_position - _fwd * m.dist + up * m.height
-		# Stay inside the track's walls: swinging wide on a hairpin or with the car against a wall
-		# otherwise puts the camera inside the scenery.
+		# Stay inside the track's walls and out of buildings: swinging wide on a hairpin or with
+		# the car against a wall otherwise puts the camera inside the scenery.
 		var from := target.global_position + up * 1.2
-		var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(from, desired, 1))
+		var hit := get_world_3d().direct_space_state.intersect_ray(
+				PhysicsRayQueryParameters3D.create(from, desired, 1 | Nfs3TrackBuilder.CAMERA_LAYER))
 		var blocked := not hit.is_empty()
 		if blocked:
 			desired = hit.position + (from - desired).normalized() * 0.4
