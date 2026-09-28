@@ -991,10 +991,13 @@ func _fences() -> void:
 				continue
 			var d := walls[i] + 1.5
 			var a := _beside(i, s, d)
+			if lay.on_branch(a.x, a.z, 0.3):
+				continue
 			_put("fence_post", _upright(a, lay.fwd[i]))
 			var j := lay.idx(i + 1)
 			var b := _beside(j, s, walls[j] + 1.5) if j < lay.n else a
-			if absf(b.y - a.y) > 2.0:
+			var mid := (a + b) * 0.5
+			if absf(b.y - a.y) > 2.0 or lay.on_branch(b.x, b.z, 0.3) or lay.on_branch(mid.x, mid.z, 0.3):
 				continue
 			_solid_strip(a, b, 1.3)
 			for h: float in [0.45, 0.8, 1.15]:

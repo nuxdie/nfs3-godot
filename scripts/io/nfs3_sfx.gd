@@ -1,18 +1,20 @@
 class_name Nfs3Sfx
 ## The game's shared effect sprites, gamedata/render/pc/sfx.fsh. Used here:
 ##   skd0-skd3  skid marks: 0/1 dense tread (hard slides), 2/3 streaky (light ones)
-##   SP10       pale puff: tyre smoke and, tinted, dust off loose ground
-## Also in the file, not used yet: SP06/SP09 dark smoke (reads as a black blob on a young,
-## opaque particle), SP02 dust, SP03 (an opaque 8x8 yellow square: square
-## sparks close up, so sparks stay procedural), SP07/SP08 fire, SP01/SP04/SP05 debris,
+##   SP06       soft grey cloud: tyre smoke
+##   SP10       speckled spray: dust off loose ground, tinted (as smoke it reads as a splash)
+## Also in the file, not used yet: SP09 (SP06 with a dark core: damage smoke), SP02 dust,
+## SP03 (an opaque 8x8 yellow square: square sparks close up, so sparks stay procedural),
+## SP07/SP08 fire, SP01/SP04/SP05 debris,
 ## SN* (snow versions of SP*), glw* lamp glows, lin* light bars, spk8/spkb (spike strip),
 ## shad (car shadow; the track shader draws the same rounded rectangle itself).
 
 ## Four skid textures side by side (128x32), or null.
 var skid_atlas: ImageTexture
-## SP10 brightened to near white, so the particle colour sets its shade: grey-white smoke,
-## ground-coloured dust (vertex colours above 1 are clamped, so it can't be brightened
-## there). Null without game data.
+## SP06 and SP10 brightened to near white, so the particle colour sets their shade:
+## grey-white smoke, ground-coloured dust (vertex colours above 1 are clamped, so they can't
+## be brightened there). Null without game data.
+var smoke: ImageTexture
 var puff: ImageTexture
 
 static var _cached: Nfs3Sfx
@@ -30,6 +32,8 @@ static func shared(data_root: String) -> Nfs3Sfx:
 		return null
 	var s := Nfs3Sfx.new()
 	s.skid_atlas = _strip(fsh, ["skd0", "skd1", "skd2", "skd3"])
+	if fsh.by_name.has("SP06"):
+		s.smoke = _whitened(fsh.by_name["SP06"])
 	if fsh.by_name.has("SP10"):
 		s.puff = _whitened(fsh.by_name["SP10"])
 	_cached = s

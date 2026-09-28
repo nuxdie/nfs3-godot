@@ -312,37 +312,50 @@ static func _add_shape(body: StaticBody3D, faces: PackedVector3Array, surf: Pack
 # --- Roads off the lap -----------------------------------------------------------------------
 
 ## The roads off the lap (ProceduralTrack.Branch): a strip along each one's centre line over
-## its levelled corridor, draped onto the road's verge at its mouth(s), solid to drive on.
-## Streets are asphalt (the road's own material, its marking drawn for a side street) between
-## kerbed pavements; the rest gravel, two wheel ruts with grass up the middle, on shoulders
-## that slope down to the land.
+## its levelled corridor, its end cut square onto the road's edge line, and at each mouth a
+## fillet filling both corners. Streets are asphalt (the road's own material, drawn with a
+## side street's markings) between kerbed pavements that turn the corners into Main Street's;
+## the rest gravel, two ruts with grass up the middle, on shoulders that slope down to the
+## land and follow the fillets round. All of it solid to drive on, merged by material and
+## square into a few meshes.
 static func _branch_roads(root: Node3D, lay: ProceduralTrack.Layout, road_mat: Material, ground_mat: Material,
 		body: StaticBody3D) -> void:
 	var faces := PackedVector3Array()
 	var surf := PackedByteArray()
-	var gravel := Color(1, 0, 0)
-	var paved := Color(0, 1, 0)
-	var grass := Color(0, 0, 0)
+	var buckets := {}
 	for b in lay.branches:
-		var street: Array = []
-		var sides: Array = []
-		# Across (m from the centre, its half width scaled in), up (m), colour, surface.
+		var cell := Vector2i(floori(b.pts[0].x / 300.0), floori(b.pts[0].z / 300.0))
+		var road := _mesh_bucket(buckets, road_mat if b.paved else ground_mat, cell)
+		var land := _mesh_bucket(buckets, ground_mat, cell)
+		_carriageway(lay, b, road, faces, surf)
+		# The shoulder out from each edge: [m out, m up, colour, surface].
+		var shoulder: Array
 		if b.paved:
-			street = [[-1.0, 0.0, 0.0, Color.WHITE, S_ASPHALT], [1.0, 0.0, 0.0, Color.WHITE, S_ASPHALT]]
-			sides = [[-1.0, -3.0, -0.3, grass, S_GRASS], [-1.0, -2.6, 0.13, paved, S_CONCRETE],
-				[-1.0, -0.35, 0.13, paved, S_CONCRETE], [-1.0, 0.0, 0.0, paved, S_CONCRETE]]
+			shoulder = [[0.0, 0.0, Color(0, 1, 0), S_CONCRETE], [0.05, 0.13, Color(0, 1, 0), S_CONCRETE],
+				[2.6, 0.13, Color(0, 1, 0), S_CONCRETE], [3.0, -0.3, Color(0, 0, 0), S_GRASS]]
 		else:
-			street = [[-1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL], [-0.4, 0.0, 0.0, gravel, S_GRAVEL],
-				[0.0, 0.0, 0.03, Color(0.3, 0, 0), S_GRAVEL], [0.4, 0.0, 0.0, gravel, S_GRAVEL],
-				[1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL]]
-			sides = [[-1.0, -1.5, -0.35, grass, S_GRASS], [-1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL]]
-		var mirrored := []
-		for c: Array in sides:
-			mirrored.push_front([-c[0], -c[1], c[2], c[3], c[4]])
-		var mat := road_mat if b.paved else ground_mat
-		_branch_strip(root, lay, b, street, mat, faces, surf, true)
-		for cols: Array in [sides, mirrored]:
-			_branch_strip(root, lay, b, cols, ground_mat, faces, surf, false)
+			shoulder = [[0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL], [1.5, -0.35, Color(0, 0, 0), S_GRASS]]
+		for sg: float in [-1.0, 1.0]:
+			_shoulder(lay, b, sg, shoulder, land, faces, surf)
+		for m in b.mouths:
+			for corner: Dictionary in m.corners:
+				_fillet(lay, b, m, corner, shoulder, road, land, faces, surf)
+	for key: String in buckets:
+		var k: Dictionary = buckets[key]
+		if k[Mesh.ARRAY_INDEX].is_empty():
+			continue
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		for a: int in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_COLOR, Mesh.ARRAY_INDEX]:
+			arrays[a] = k[a]
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.material_override = k.mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = 900.0
+		root.add_child(mi)
 	if faces.is_empty():
 		return
 	var tex := PackedInt32Array()
@@ -351,67 +364,309 @@ static func _branch_roads(root: Node3D, lay: ProceduralTrack.Layout, road_mat: M
 	_add_shape(body, faces, surf, tex)
 
 
-## One strip along branch `b`, its columns [scale of the half width, m beyond it, m up,
-## colour, surface] left to right; the carriageway's UVs are the road shader's (m across, m
-## along), with UV2.y set to draw a side street's markings.
-static func _branch_strip(root: Node3D, lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, cols: Array,
-		mat: Material, faces: PackedVector3Array, surf: PackedByteArray, carriageway: bool) -> void:
+static func _mesh_bucket(buckets: Dictionary, mat: Material, cell: Vector2i) -> Dictionary:
+	var key := "%d|%d|%d" % [mat.get_instance_id(), cell.x, cell.y]
+	if not buckets.has(key):
+		buckets[key] = {"mat": mat, Mesh.ARRAY_VERTEX: PackedVector3Array(), Mesh.ARRAY_NORMAL: PackedVector3Array(),
+			Mesh.ARRAY_TEX_UV: PackedVector2Array(), Mesh.ARRAY_TEX_UV2: PackedVector2Array(),
+			Mesh.ARRAY_COLOR: PackedColorArray(), Mesh.ARRAY_INDEX: PackedInt32Array()}
+	return buckets[key]
+
+
+## The branch's own surface: a row across it every BSTEP m, the rows at its mouth(s) slid
+## along it onto the road's edge line so its end is cut square to the road.
+static func _carriageway(lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, into: Dictionary,
+		faces: PackedVector3Array, surf: PackedByteArray) -> void:
+	var cols: Array   # [scale of the half width, m up, colour, surface]
+	if b.paved:
+		cols = []
+		for k in 7:
+			cols.append([-1.0 + k / 3.0, 0.0, Color.WHITE, S_ASPHALT])
+	else:
+		cols = [[-1.0, 0.0, Color(0.8, 0, 0), S_GRAVEL], [-0.4, 0.0, Color(1, 0, 0), S_GRAVEL],
+			[0.0, 0.03, Color(0.3, 0, 0), S_GRAVEL], [0.4, 0.0, Color(1, 0, 0), S_GRAVEL],
+			[1.0, 0.0, Color(0.8, 0, 0), S_GRAVEL]]
 	var m := b.pts.size()
-	var w := cols.size()
-	var verts := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var uv2 := PackedVector2Array()
-	var colors := PackedColorArray()
+	var rows: Array[PackedVector3Array] = []
+	var uvs: Array[PackedVector2Array] = []
+	var colours: Array[PackedColorArray] = []
 	for k in m:
+		var along := k * ProceduralTrack.BSTEP
+		var fr: Array = b.frame(along)
 		var p := b.pts[k]
-		var t := b.pts[mini(k + 1, m - 1)] - b.pts[maxi(k - 1, 0)]
-		t.y = 0.0
-		var r := t.normalized().cross(Vector3.UP).normalized()
-		var h := b.half_at(k * ProceduralTrack.BSTEP)
+		var r: Vector3 = fr[2]
+		var h := b.half_at(along)
+		var mouth: ProceduralTrack.Mouth = null
+		for mo in b.mouths:
+			if (k == 0 and not mo.at_end) or (k == m - 1 and mo.at_end):
+				mouth = mo
+		var row := PackedVector3Array()
+		var uv := PackedVector2Array()
+		var col := PackedColorArray()
 		for c: Array in cols:
-			var x: float = c[0] * h + c[1]
+			var x: float = c[0] * h
 			var q := p + r * x
-			q.y = p.y + c[2]
-			# Onto the road where it meets it.
-			var deck := lay.deck_y(q.x, q.z)
+			var v := along
+			if mouth:
+				# Slid along the branch onto the road's edge line.
+				var q2 := _onto_edge(lay, mouth, Vector2(q.x, q.z))
+				v += (q2 - Vector2(q.x, q.z)).dot(mouth.t) * (-1.0 if mouth.at_end else 1.0)
+				q = Vector3(q2.x, _mouth_y(lay, b, mouth, q2), q2.y)
+			else:
+				q.y = p.y + c[1]
+				q = _off_road(lay, b, q, c[1])
+				# Near a mouth, eased from the road's edge heights as the fillets are.
+				for mo in b.mouths:
+					var out := along if not mo.at_end else b.length() - along
+					if out < 14.0:
+						q.y = maxf(_mouth_y(lay, b, mo, Vector2(q.x, q.z)) + c[1], q.y if out > 10.0 else -INF)
+			row.append(q)
+			uv.append(Vector2(x, v))
+			col.append(c[2])
+		rows.append(row)
+		uvs.append(uv)
+		colours.append(col)
+	# Across the road's verge the first stretch in from each mouth is cut finer, so it rides
+	# over the verge (and a kerb dropping away) rather than bridging it.
+	for mo in b.mouths:
+		var a := rows.size() - 2 if mo.at_end else 0
+		var fine_rows: Array[PackedVector3Array] = []
+		var fine_uvs: Array[PackedVector2Array] = []
+		var fine_cols: Array[PackedColorArray] = []
+		for step in range(1, 4):
+			var u := step / 4.0
+			var row := PackedVector3Array()
+			var uv := PackedVector2Array()
+			for j in rows[a].size():
+				var q := rows[a][j].lerp(rows[a + 1][j], u)
+				q.y = _mouth_y(lay, b, mo, Vector2(q.x, q.z))
+				row.append(q)
+				uv.append(uvs[a][j].lerp(uvs[a + 1][j], u))
+			fine_rows.append(row)
+			fine_uvs.append(uv)
+			fine_cols.append(colours[a])
+		for step in 3:
+			rows.insert(a + 1 + step, fine_rows[step])
+			uvs.insert(a + 1 + step, fine_uvs[step])
+			colours.insert(a + 1 + step, fine_cols[step])
+	var codes: Array = cols.map(func(c: Array) -> int: return c[3])
+	_emit_rows(into, rows, uvs, colours, codes, b.paved, faces, surf)
+
+
+## Where the line through `q` along the mouth's branch meets the road's edge line.
+static func _onto_edge(lay: ProceduralTrack.Layout, m: ProceduralTrack.Mouth, q: Vector2) -> Vector2:
+	var i := m.node
+	var out := Vector2(lay.flat_right[i].x, lay.flat_right[i].z) * m.side
+	var e0 := Vector2(lay.pts[i].x, lay.pts[i].z) + out * ProceduralTrack.ROAD_HALF
+	var den := m.t.dot(out)
+	return q if absf(den) < 0.05 else q - m.t * ((q - e0).dot(out) / den)
+
+
+## A point of a branch's strips `up` m over it, kept off the road's carriageway (pushed out to
+## its edge) and on its verge where it crosses it.
+static func _off_road(lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, q: Vector3, up: float) -> Vector3:
+	var ci := lay.closest(q.x, q.z)
+	if ci >= 0:
+		var lat := (q - lay.pts[ci]).dot(lay.flat_right[ci])
+		if absf(lat) < ProceduralTrack.ROAD_HALF and signf(lat) == b.side:
+			q += lay.flat_right[ci] * b.side * (ProceduralTrack.ROAD_HALF - absf(lat))
+	var deck := lay.deck_y(q.x, q.z)
+	if not is_nan(deck):
+		# Over the verge, a shoulder lies on it rather than sloping down under it (where the
+		# verge would show through in teeth).
+		q.y = maxf(q.y, deck + 0.03)
+	return q
+
+
+## The surface height at `q` round a mouth: the road's edge height (following its grade and
+## banking) where it meets the road, easing into the branch's own over the next 10 m; never
+## under the road's verge or its kerb.
+static func _mouth_y(lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, m: ProceduralTrack.Mouth, q: Vector2) -> float:
+	var i := lay.closest(q.x, q.y)
+	if i < 0:
+		i = m.node
+	var p := Vector2(lay.pts[i].x, lay.pts[i].z)
+	var fr := Vector2(lay.flat_right[i].x, lay.flat_right[i].z)
+	var fw := Vector2(lay.fwd[i].x, lay.fwd[i].z)
+	var rel := q - p
+	var lat := rel.dot(fr)
+	var e := p + fr * signf(lat if lat != 0.0 else m.side) * (ProceduralTrack.ROAD_HALF - 0.01) + fw * rel.dot(fw)
+	var eh := lay.deck_y(e.x, e.y)
+	if is_nan(eh):
+		eh = lay.road_y(i, m.side, ProceduralTrack.ROAD_HALF)
+	eh += 0.02
+	var out := (q - m.p0).dot(m.t)
+	var along := b.length() - out if m.at_end else out
+	var bh: float = b.frame(clampf(along, 0.0, b.length()))[0].y
+	var d_road := maxf(absf(lat) - ProceduralTrack.ROAD_HALF, 0.0)
+	var y := lerpf(eh, bh, smoothstep(0.0, 10.0, d_road))
+	# The verge under it, read at the top of its kerb (whose ramp is steeper than this
+	# surface's triangles can follow).
+	var dq := q
+	var sl := signf(lat if lat != 0.0 else m.side)
+	if d_road < 0.45:
+		dq += fr * sl * (0.45 - d_road)
+	# ...and just past the verge's outer edge as at it, so a triangle reaching over that edge
+	# from outside still clears it.
+	var e_out := lay.edge[i] - ProceduralTrack.ROAD_HALF
+	if d_road > e_out and d_road < e_out + 1.5:
+		dq -= fr * sl * (d_road - e_out + 0.01)
+	var deck := lay.deck_y(dq.x, dq.y)
+	return maxf(y, deck + 0.03) if not is_nan(deck) else y
+
+
+## The shoulder along side `sg` of branch `b`, from where each mouth's fillet reaches it.
+static func _shoulder(lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, sg: float, prof: Array, into: Dictionary,
+		faces: PackedVector3Array, surf: PackedByteArray) -> void:
+	var a0 := 0.0
+	var a1 := b.length()
+	for m in b.mouths:
+		for corner: Dictionary in m.corners:
+			if corner.sign == sg * (-1.0 if m.at_end else 1.0):
+				var d: float = (corner.t1 - m.p0).dot(m.t)
+				if m.at_end:
+					a1 = b.length() - d
+				else:
+					a0 = d
+	var alongs := PackedFloat32Array([a0])
+	var a := (floorf(a0 / ProceduralTrack.BSTEP) + 1.0) * ProceduralTrack.BSTEP
+	while a < a1 - 0.5:
+		alongs.append(a)
+		a += ProceduralTrack.BSTEP
+	alongs.append(a1)
+	var rows: Array[PackedVector3Array] = []
+	var uvs: Array[PackedVector2Array] = []
+	var colours: Array[PackedColorArray] = []
+	for al in alongs:
+		var fr: Array = b.frame(al)
+		var p: Vector3 = fr[0]
+		var r: Vector3 = fr[2]
+		var h := b.half_at(al)
+		var row := PackedVector3Array()
+		var col := PackedColorArray()
+		for c: Array in prof:
+			var q: Vector3 = p + r * sg * (h + c[0])
+			q.y = p.y + c[1]
+			q = _off_road(lay, b, q, c[1])
+			row.append(q)
+			col.append(c[2] if is_nan(lay.deck_y(q.x, q.z)) else (Color(0, 1, 0) if b.paved else Color(0.8, 0, 0)))
+		if sg < 0.0:
+			row.reverse()
+			col.reverse()
+		rows.append(row)
+		var uv := PackedVector2Array()
+		uv.resize(prof.size())
+		uvs.append(uv)
+		colours.append(col)
+	# Each gap between columns takes the surface of its outer column.
+	var codes: Array = prof.map(func(c: Array) -> int: return c[3])
+	if sg < 0.0:
+		codes.reverse()
+		codes = codes.slice(0, codes.size() - 1)
+	else:
+		codes = codes.slice(1)
+	_emit_rows(into, rows, uvs, colours, codes, false, faces, surf)
+
+
+## A mouth's fillet in `corner`: the road-coloured fan from the corner to the arc, and the
+## shoulder (kerbed pavement, or gravel sloping to the land) following the arc round.
+static func _fillet(lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, m: ProceduralTrack.Mouth, corner: Dictionary,
+		prof: Array, road: Dictionary, land: Dictionary, faces: PackedVector3Array, surf: PackedByteArray) -> void:
+	var n := maxi(int(ceilf(float(corner.l) * 0.8)), 4)
+	var arc := ProceduralTrack.Mouth.arc(corner, n)
+	var c: Vector2 = corner.c
+	var rows: Array[PackedVector3Array] = []
+	var uvs: Array[PackedVector2Array] = []
+	var colours: Array[PackedColorArray] = []
+	var fill := Color.WHITE if b.paved else Color(1, 0, 0)
+	var code := S_ASPHALT if b.paved else S_GRAVEL
+	# A fan from the corner, its spokes cut every metre or so so it follows the ground (and the
+	# road's kerb where it drops) rather than bridging over it.
+	var spokes := maxi(int(ceilf(float(corner.l) / 1.5)), 2)
+	for k in n + 1:
+		var q: Vector2 = arc[k]
+		var row := PackedVector3Array()
+		var uv := PackedVector2Array()
+		var col := PackedColorArray()
+		for j in spokes + 1:
+			var p := c.lerp(q, float(j) / spokes)
+			row.append(Vector3(p.x, _mouth_y(lay, b, m, p), p.y))
+			uv.append(Vector2(40, 0))   # far off the side street's markings
+			col.append(fill)
+		rows.append(row)
+		uvs.append(uv)
+		colours.append(col)
+	_emit_rows(road, rows, uvs, colours, [code], b.paved, faces, surf)
+	# The shoulder: rings inside the arc's radius, towards its centre.
+	rows = []
+	uvs = []
+	colours = []
+	var rings := []
+	for pc: Array in prof:
+		rings.append(ProceduralTrack.Mouth.arc(corner, n, pc[0]))
+	for k in n + 1:
+		var row := PackedVector3Array()
+		var col := PackedColorArray()
+		var base := _mouth_y(lay, b, m, arc[k])
+		for j in prof.size():
+			var q: Vector2 = rings[j][k]
+			var p3 := Vector3(q.x, base + prof[j][1], q.y)
+			var deck := lay.deck_y(q.x, q.y)
+			var colour: Color = prof[j][2]
 			if not is_nan(deck):
-				q.y = maxf(q.y, deck + 0.03) if c[2] >= 0.0 else minf(q.y, deck - 0.1)
-			verts.append(q)
-			uvs.append(Vector2(x, k * ProceduralTrack.BSTEP))
-			uv2.append(Vector2(0.0, 1.0))
-			colors.append(c[3])
-	var nrms := PackedVector3Array()
+				p3.y = maxf(p3.y, deck + 0.03)
+				colour = Color(0, 1, 0) if b.paved else Color(0.8, 0, 0)   # the verge it lies on
+			row.append(p3)
+			col.append(colour)
+		rows.append(row)
+		var uv := PackedVector2Array()
+		uv.resize(prof.size())
+		uvs.append(uv)
+		colours.append(col)
+	var codes: Array = prof.map(func(pc: Array) -> int: return pc[3])
+	_emit_rows(land, rows, uvs, colours, codes.slice(1), false, faces, surf)
+
+
+## A grid of `rows` (each the same width) into mesh bucket `into`, front faces up, and into
+## the collision `faces` with surface `codes` per column gap. `street` sets UV2.y (the road
+## shader's side-street markings).
+static func _emit_rows(into: Dictionary, rows: Array[PackedVector3Array], uvs: Array[PackedVector2Array],
+		colours: Array[PackedColorArray], codes: Array, street: bool, faces: PackedVector3Array, surf: PackedByteArray) -> void:
+	var m := rows.size()
+	if m < 2:
+		return
+	var w := rows[0].size()
+	var base: int = into[Mesh.ARRAY_VERTEX].size()
+	var verts := PackedVector3Array()
+	for row in rows:
+		verts.append_array(row)
 	for k in m:
 		for j in w:
 			var along := verts[mini(k + 1, m - 1) * w + j] - verts[maxi(k - 1, 0) * w + j]
 			var across := verts[k * w + mini(j + 1, w - 1)] - verts[k * w + maxi(j - 1, 0)]
 			var nrm := across.cross(along).normalized()
-			nrms.append(nrm if nrm.y >= 0.0 else -nrm)
-	var idx := PackedInt32Array()
+			if nrm == Vector3.ZERO:
+				nrm = Vector3.UP
+			into[Mesh.ARRAY_NORMAL].append(nrm if nrm.y >= 0.0 else -nrm)
+			into[Mesh.ARRAY_TEX_UV].append(uvs[k][j])
+			into[Mesh.ARRAY_TEX_UV2].append(Vector2(0.0, 1.0 if street else 0.0))
+			into[Mesh.ARRAY_COLOR].append(colours[k][j])
+	into[Mesh.ARRAY_VERTEX].append_array(verts)
 	for k in m - 1:
 		for j in w - 1:
 			var a := k * w + j
-			_quad_up(idx, verts, a, a + 1, a + w + 1, a + w)
-			var code: int = cols[j][4] if cols[j][4] == cols[j + 1][4] else cols[j + 1][4]
-			surf.append_array([code, code])
-	for k in idx:
-		faces.append(verts[k])
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	arrays[Mesh.ARRAY_NORMAL] = nrms
-	arrays[Mesh.ARRAY_TEX_UV] = uvs
-	arrays[Mesh.ARRAY_TEX_UV2] = uv2
-	arrays[Mesh.ARRAY_COLOR] = colors
-	arrays[Mesh.ARRAY_INDEX] = idx
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.visibility_range_end = 900.0
-	root.add_child(mi)
+			var tri := PackedInt32Array()
+			_quad_up(tri, verts, a, a + 1, a + w + 1, a + w)
+			for t in range(0, 6, 3):
+				var p0 := verts[tri[t]]
+				var p1 := verts[tri[t + 1]]
+				var p2 := verts[tri[t + 2]]
+				if (p1 - p0).cross(p2 - p0).length_squared() < 1e-6:
+					continue   # the fan's point
+				for q in 3:
+					into[Mesh.ARRAY_INDEX].append(base + tri[t + q])
+				faces.append_array([p0, p1, p2])
+				surf.append(codes[mini(j, codes.size() - 1)])
 
 
 ## Where the road's paint changes for the branches: its edge line broken across each mouth,
@@ -420,19 +675,16 @@ static func _road_marks(lay: ProceduralTrack.Layout, road_mat: ShaderMaterial) -
 	var gaps: Array[Vector4] = []
 	var crossings: Array[float] = []
 	for b in lay.branches:
-		for c: int in [b.from, b.to]:
-			if c < 0 or gaps.size() >= 32:
-				continue
-			var v := c * ProceduralTrack.STEP
-			var r := b.half + 5.0
-			gaps.append(Vector4(v - r, v + r, b.side, 0.0))
-		if b.kind == "street":
-			var v := b.from * ProceduralTrack.STEP - b.half - 4.0
-			var dup := false
-			for c in crossings:
-				dup = dup or absf(c - v) < 10.0
-			if not dup and crossings.size() < 16:
-				crossings.append(v)
+		for m in b.mouths:
+			if gaps.size() < 32:
+				gaps.append(Vector4(m.v_from, m.v_to, m.side, 0.0))
+			if b.kind == "street":
+				var v := m.v_from - 2.0
+				var dup := false
+				for c in crossings:
+					dup = dup or absf(c - v) < 12.0
+				if not dup and crossings.size() < 16:
+					crossings.append(v)
 	while gaps.size() < 32:
 		gaps.append(Vector4(-1e6, -1e6, 0.0, 0.0))
 	while crossings.size() < 16:

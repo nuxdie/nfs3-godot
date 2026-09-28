@@ -1,7 +1,7 @@
 class_name Hud
 extends CanvasLayer
 ## Race HUD in the front end's style (see UiKit): segmented tach with speed and
-## gear, position/lap/time blocks, minimap, framed rear-view mirror, banner
+## gear, timing tower, lap counter, minimap, framed rear-view mirror, banner
 ## messages and countdown, plus the pause and results screens.
 
 const RED := UiKit.COP_RED
@@ -42,6 +42,10 @@ var _map_pts := PackedVector2Array()
 var _map_origin := Vector2.ZERO
 var _map_max := Vector2.ZERO
 var _map_scale := 1.0
+
+## When the leader passed each SPLIT metres of race distance, for the tower's time gaps.
+const SPLIT := 10.0
+var _splits := PackedFloat64Array()
 
 
 func _ready() -> void:
@@ -264,7 +268,22 @@ func _process(dt: float) -> void:
 		if _cam_name != "" and n != _cam_name:
 			_cam_toast_t = 1.6
 		_cam_name = n
+	_record_splits()
 	_draw.queue_redraw()
+
+
+func _record_splits() -> void:
+	if race == null or race.path == null or race.racers.is_empty():
+		return
+	if race.race_time <= 0.0:
+		_splits.clear()
+		return
+	var lead: float = race.racers[0].total
+	for rr in race.racers:
+		lead = maxf(lead, rr.total)
+	var i := int((lead + race.path.length) / SPLIT)
+	while _splits.size() <= i:
+		_splits.append(race.race_time)
 
 
 func _on_draw() -> void:
@@ -273,14 +292,9 @@ func _on_draw() -> void:
 	if _pause.visible or _results:
 		return
 	var size := _draw.size
-	# Soft scrims behind the corner readouts so they hold up against a bright sky.
-	_scrim(Vector2.ZERO, Vector2(420, 230))
-	_scrim(Vector2(size.x, 0), Vector2(-360, 200))
-	_scrim(Vector2(size.x, size.y), Vector2(-380, -300))
 	if _mirror.visible:
 		var mr := _mirror.get_rect()
 		_draw.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
-		UiKit.draw_slant(_draw, Rect2(mr.position.x + mr.size.x * 0.5 - 30, mr.end.y + 3, 60, 3), UiKit.ACCENT, 1.0)
 	_draw_tach(Vector2(size.x - M - 118, size.y - M - 104))
 	_draw_info(size)
 	_draw_map(Rect2(M, size.y - M - 190, 190, 190))
@@ -293,18 +307,6 @@ func _on_draw() -> void:
 
 # ------------------------------------------------------------------ drawing
 
-## A dark wash fading out from a screen corner; `ext` points into the screen.
-func _scrim(corner: Vector2, ext: Vector2) -> void:
-	var n := 20
-	var pts := PackedVector2Array([corner])
-	var cols := PackedColorArray([Color(0, 0, 0, 0.38)])
-	for i in n + 1:
-		var a := PI * 0.5 * i / n
-		pts.append(corner + Vector2(cos(a) * ext.x, sin(a) * ext.y))
-		cols.append(Color(0, 0, 0, 0.0))
-	_draw.draw_polygon(pts, cols)
-
-
 func _str(s: String, pos: Vector2, kind: String, fsize: int, color: Color, align := HORIZONTAL_ALIGNMENT_LEFT,
 		width := -1.0, tracking := 0, tabular := false) -> void:
 	# A soft dark outline keeps text legible over bright sky without looking 1998.
@@ -315,8 +317,6 @@ func _str(s: String, pos: Vector2, kind: String, fsize: int, color: Color, align
 
 func _draw_tach(c: Vector2) -> void:
 	var r := 104.0
-	for k in 3:
-		_draw.draw_circle(c, r + 26 - k * 10, Color(0, 0, 0, 0.14))
 	# One scale for every car, so a lazy V12's redline sits well short of a racer's.
 	var max_rpm := maxf(10000.0, ceilf(player.redline / 1000.0 + 1.0) * 1000.0)
 	var a0 := deg_to_rad(140)
@@ -355,66 +355,95 @@ func _draw_tach(c: Vector2) -> void:
 
 func _draw_info(size: Vector2) -> void:
 	var r: Dictionary = race.player_racer()
-	if r.is_empty():
+	if r.is_empty() or Game.mode == Game.Mode.FREE_ROAM:
 		return
-	var x := M
-	var y := M + 12
-	var free_roam: bool = Game.mode == Game.Mode.FREE_ROAM
-	if not free_roam:
-		if Game.mode != Game.Mode.TIME_TRIAL:
-			var pos: int = race.position_of(player)
-			_str("POSITION", Vector2(x, y), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-			_str(str(pos), Vector2(x - 2, y + 58), "display", 66, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
-			var pw := UiKit.text_width("display", str(pos), 66)
-			_str("/%d" % race.racers.size(), Vector2(x + pw + 2, y + 58), "display", 26, UiKit.INK_DIM)
-			x += 130
-		var lap := clampi(r.lap + 1, 1, Game.laps)
-		_str("LAP", Vector2(x, y), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-		_str(str(lap), Vector2(x - 2, y + 58), "display", 66, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
-		var lw := UiKit.text_width("display", str(lap), 66)
-		_str("/%d" % Game.laps, Vector2(x + lw + 2, y + 58), "display", 26, UiKit.INK_DIM)
-		# Lap progress under the whole block.
-		var pr := Rect2(M, y + 72, x + 90 - M, 4)
-		var frac := clampf(float(r.node) / maxf(race.path.size(), 1.0), 0.0, 1.0) if r.lap >= 0 else 0.0
-		_draw.draw_rect(pr, Color(1, 1, 1, 0.15))
-		_draw.draw_rect(Rect2(pr.position, Vector2(pr.size.x * frac, pr.size.y)), UiKit.ACCENT)
+	var y := _draw_tower(Vector2(M, M))
 	if Game.mode == Game.Mode.HOT_PURSUIT:
-		var ty := y + 104
-		_str("TICKETS", Vector2(M, ty), "cond", 12, RED, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-		for k in race.MAX_TICKETS:
-			var pr := Rect2(M + 72 + k * 26, ty - 11, 22, 12)
-			UiKit.draw_slant(_draw, pr, RED if k < race.tickets else Color(1, 1, 1, 0.18), 0.5)
-	# Timers, right-aligned. Nothing to time in free roam.
-	if free_roam:
-		return
-	var rx := size.x - M
-	var tw := 220.0
-	_str("TIME", Vector2(rx - tw, y), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_RIGHT, tw, 3)
-	_str(fmt_time(race.race_time), Vector2(rx - tw, y + 44), "display", 44, UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, tw, 0, true)
-	var lap_t: float = race.race_time - r.lap_start if r.lap >= 0 else 0.0
-	_str("LAP  " + fmt_time(lap_t), Vector2(rx - tw, y + 68), "cond", 17, UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, tw, 1, true)
-	_str("BEST  " + fmt_time(r.best), Vector2(rx - tw, y + 90), "cond", 17, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_RIGHT, tw, 1, true)
+		_draw_cop_block(y + 26)
+	# Lap counter and progress, over the minimap.
+	var map_y := size.y - M - 190
+	var lap := clampi(r.lap + 1, 1, Game.laps)
+	_str("LAP", Vector2(M, map_y - 52), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+	_str(str(lap), Vector2(M - 2, map_y - 12), "display", 40, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
+	var lw := UiKit.text_width("display", str(lap), 40)
+	_str("/%d" % Game.laps, Vector2(M + lw + 2, map_y - 12), "display", 20, UiKit.INK_DIM)
+	if r.best < INF:
+		_str("BEST  " + fmt_time(r.best), Vector2(M, map_y - 12), "cond", 15, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_RIGHT, 190, 1, true)
+	var pr := Rect2(M, map_y - 4, 190, 3)
+	var frac := clampf(float(r.node) / maxf(race.path.size(), 1.0), 0.0, 1.0) if r.lap >= 0 else 0.0
+	_draw.draw_rect(pr, Color(1, 1, 1, 0.15))
+	_draw.draw_rect(Rect2(pr.position, Vector2(pr.size.x * frac, pr.size.y)), UiKit.ACCENT)
 
 
+## Timing tower: every racer in order, the leader with the race clock, the rest with their
+## gap to the leader. Returns the y below it.
+func _draw_tower(at: Vector2) -> float:
+	var w := 290.0
+	var h := 26.0
+	var L: float = race.path.length
+	var lead: Dictionary = race.racers[0]
+	var y := at.y
+	for i in race.racers.size():
+		var rr: Dictionary = race.racers[i]
+		var you: bool = rr.car == player
+		var ink := UiKit.BG if you else UiKit.INK
+		if you:
+			UiKit.draw_slant(_draw, Rect2(at.x - 8, y, w + 16, h - 2), UiKit.ACCENT, 0.3)
+		var base := y + h - 7
+		_str(str(i + 1), Vector2(at.x, base), "display", 20, ink, HORIZONTAL_ALIGNMENT_RIGHT, 22, 0, true)
+		var nm: String = rr.name.to_upper()
+		if nm.length() > 16:
+			nm = nm.left(15) + "."
+		_str(nm, Vector2(at.x + 34, base), "cond", 16, ink, HORIZONTAL_ALIGNMENT_LEFT, -1, 1)
+		_str(_gap(rr, lead, L), Vector2(at.x, base), "cond", 16, Color(ink, 1.0 if i == 0 or you else 0.7),
+			HORIZONTAL_ALIGNMENT_RIGHT, w, 0, true)
+		y += h
+	return y
+
+
+func _gap(rr: Dictionary, lead: Dictionary, L: float) -> String:
+	if is_same(rr, lead):
+		return fmt_time(rr.time if rr.finished else race.race_time)
+	if race.race_time <= 0.0:
+		return ""
+	if rr.finished:
+		return "+%.1f" % (rr.time - lead.time)
+	if not lead.finished:
+		var laps := int((lead.total - rr.total) / L)
+		if laps >= 1:
+			return "+%d LAP%s" % [laps, "" if laps == 1 else "S"]
+	var i := int((rr.total + L) / SPLIT)
+	if i < 0 or i >= _splits.size():
+		return ""
+	var g: float = race.race_time - _splits[i]
+	return "+%.1f" % g if g < 60.0 else "+" + fmt_time(g)
+
+
+## Everything about the police in one block under the tower: chase status and heat while
+## they're after you, tickets always, flat tyres once spiked.
+func _draw_cop_block(y: float) -> void:
+	var bx := M + 84.0
+	if pursuit:
+		var on := fmod(_time * 4.0, 2.0) < 1.0
+		_draw.draw_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
+		_str("PURSUIT", Vector2(M + 14, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+		for k in 3:
+			UiKit.draw_slant(_draw, Rect2(bx + k * 26, y - 11, 22, 10), RED if k < race.heat else Color(1, 1, 1, 0.18), 0.5)
+		_str("HEAT", Vector2(bx + 84, y), "cond", 11, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_LEFT, -1, 2)
+		y += 22
+	_str("TICKETS", Vector2(M, y), "cond", 13, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+	for k in race.MAX_TICKETS:
+		UiKit.draw_slant(_draw, Rect2(bx + k * 26, y - 11, 22, 10), RED if k < race.tickets else Color(1, 1, 1, 0.18), 0.5)
+	if player and player.tyres_flat():
+		_str("FLAT TYRES", Vector2(M, y + 22), "cond", 13, RED, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+
+
+## While chased: a thin light bar along the top edge, red and blue halves taking turns.
 func _draw_pursuit(size: Vector2) -> void:
 	var on := fmod(_time * 4.0, 2.0) < 1.0
-	var col := RED if on else UiKit.COP_BLUE
-	# Light bar washing in from both top corners.
-	var a := 0.55
-	var w := size.x * 0.35
-	_draw.draw_polygon(PackedVector2Array([Vector2(0, 0), Vector2(w, 0), Vector2(0, 90)]),
-		PackedColorArray([Color(RED, a if on else 0.0), Color(RED, 0), Color(RED, 0)]))
-	_draw.draw_polygon(PackedVector2Array([Vector2(size.x, 0), Vector2(size.x - w, 0), Vector2(size.x, 90)]),
-		PackedColorArray([Color(UiKit.COP_BLUE, 0.0 if on else a), Color(UiKit.COP_BLUE, 0), Color(UiKit.COP_BLUE, 0)]))
-	var br := Rect2(size.x * 0.5 - 80, 132, 160, 30)
-	UiKit.draw_slant(_draw, br, col)
-	_draw.draw_string(UiKit.font("display", 3), br.position + Vector2(0, 24), "PURSUIT", HORIZONTAL_ALIGNMENT_CENTER, br.size.x, 24, UiKit.INK)
-	# Heat level: one bar per level, like the ticket row.
-	for k in 3:
-		var hr := Rect2(size.x * 0.5 - 40 + k * 28, br.end.y + 8, 24, 8)
-		UiKit.draw_slant(_draw, hr, RED if k < race.heat else Color(1, 1, 1, 0.18), 0.5)
-	if player and player.tyres_flat():
-		_str("FLAT TYRES", Vector2(size.x * 0.5 - 80, br.end.y + 36), "cond", 14, RED, HORIZONTAL_ALIGNMENT_CENTER, 160, 3)
+	var h := size.x * 0.5
+	_draw.draw_rect(Rect2(0, 0, h, 3), Color(RED, 0.85 if on else 0.15))
+	_draw.draw_rect(Rect2(h, 0, h, 3), Color(UiKit.COP_BLUE, 0.15 if on else 0.85))
 
 
 func _draw_banner(size: Vector2) -> void:
@@ -486,8 +515,6 @@ func _to_map(p: Vector3) -> Vector2:
 
 func _draw_map(rect: Rect2) -> void:
 	var path: TrackPath = race.path
-	_draw.draw_rect(rect, Color(0.03, 0.035, 0.05, 0.45))
-	_draw.draw_rect(Rect2(rect.position, Vector2(rect.size.x, 3)), UiKit.ACCENT)
 	# The outline only depends on the track and the map rect; build it once, not every frame.
 	if _map_path != path or _map_rect != rect:
 		_map_path = path

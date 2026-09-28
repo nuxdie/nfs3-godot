@@ -241,6 +241,7 @@ func flush(root: Node3D) -> void:
 		st.set_material(mat)
 		var mi := MeshInstance3D.new()
 		mi.mesh = st.commit()
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF   # thin: not worth the draw calls
 		mi.visibility_range_end = 500.0
 		mi.visibility_range_end_margin = 40.0
 		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF

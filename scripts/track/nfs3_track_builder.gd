@@ -7,6 +7,9 @@ const TEX_SIZE := 256
 const DRAW_DISTANCE := 700.0
 const WALL_HEIGHT := 6.0
 const WALL_DEPTH := 3.0
+## The longest run of road edge (m, across) that is taken for the end of a ledge, left
+## open to drop off, rather than the side of a raised road.
+const LEDGE_END_MAX := 16.0
 ## Physics layer of the solid scenery that only the chase camera collides with.
 const CAMERA_LAYER := 8
 ## Physics layer of solid scenery (buildings, signs, posts, rocks) that cars hit. Kept off
@@ -929,8 +932,10 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 			else:
 				edges[e] = [q[k], q[(k + 1) % 4], 1]
 
-	var faces := PackedVector3Array()
-	for e: Array in edges.values():
+	var walled: Array[Vector2i] = []
+	var drops := {}   # edge -> true: where the surface ends in a drop onto the road below
+	for key: Vector2i in edges:
+		var e: Array = edges[key]
 		if e[2] != 1:
 			continue
 		var a: Vector3 = e[0]
@@ -942,6 +947,28 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 		# the odd bow-tie quad).
 		if side == Vector3.ZERO or (_road_near(quads, quad_grid, m + side, 1.5) and _road_near(quads, quad_grid, m - side, 1.5)):
 			continue
+		walled.append(key)
+		if _drop_off(quads, quad_grid, m, -side if _road_near(quads, quad_grid, m + side, 1.5) else side):
+			drops[key] = true
+	# The end of a ledge that drops onto the road below (the Redrock Ridge skeleton path,
+	# the Empire City rooftops): the car should fall off it, not hit a wall. A drop along
+	# the side of a raised road, longer than a road is wide, keeps its wall.
+	var open := {}
+	for run in _runs(drops.keys()):
+		var length := 0.0
+		for key: Vector2i in run:
+			var ab: Vector3 = edges[key][1] - edges[key][0]
+			length += Vector2(ab.x, ab.z).length()
+		if length <= LEDGE_END_MAX:
+			for key: Vector2i in run:
+				open[key] = true
+
+	var faces := PackedVector3Array()
+	for key in walled:
+		if open.has(key):
+			continue
+		var a: Vector3 = edges[key][0]
+		var b: Vector3 = edges[key][1]
 		# Short of any other road above or below (bridges, overpasses, tunnels).
 		var down := WALL_DEPTH
 		var up := WALL_HEIGHT
@@ -967,6 +994,51 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 		cs.shape = shape
 		body.add_child(cs)
 	return body
+
+
+## Edges (Vector2i of corner ids) grouped into runs that share corners.
+static func _runs(keys: Array) -> Array:
+	var by_corner := {}
+	for key: Vector2i in keys:
+		for c in [key.x, key.y]:
+			if not by_corner.has(c):
+				by_corner[c] = []
+			by_corner[c].append(key)
+	var runs := []
+	var seen := {}
+	for key: Vector2i in keys:
+		if seen.has(key):
+			continue
+		var run: Array[Vector2i] = []
+		var todo: Array[Vector2i] = [key]
+		seen[key] = true
+		while not todo.is_empty():
+			var k: Vector2i = todo.pop_back()
+			run.append(k)
+			for c in [k.x, k.y]:
+				for n: Vector2i in by_corner[c]:
+					if not seen.has(n):
+						seen[n] = true
+						todo.append(n)
+		runs.append(run)
+	return runs
+
+
+## Whether the road edge at `m`, facing `out`, is where the drivable surface ends in a
+## sheer drop onto more road: road right below beyond it (a cliff road above a lower one
+## has a slope or a verge between them, and keeps its wall) but none below short of it (a
+## bridge's side has the road it crosses on both sides).
+static func _drop_off(quads: Array, quad_grid: Dictionary, m: Vector3, out: Vector3) -> bool:
+	var dir := out.normalized()
+	return _road_below(quads, quad_grid, m + dir) and not _road_below(quads, quad_grid, m - dir * 1.5)
+
+
+## Whether there is drivable surface more than 3 m under `p`.
+static func _road_below(quads: Array, quad_grid: Dictionary, p: Vector3) -> bool:
+	for qi: int in quad_grid.get(_edge_cell(p), []):
+		if _height_in_quad(quads[qi], p) - p.y < -3.0:
+			return true
+	return false
 
 
 ## Whether there is drivable surface under `p` within `reach` metres of its height.

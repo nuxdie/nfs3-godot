@@ -1,7 +1,7 @@
 extends Node
 ## Photographs a track from the road at points round the lap, without a race:
 ##   godot --path . -- --trackshots <track> [lap fraction ...] [--night] [--weather]
-##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--lookside=M] [--tag=NAME]
+##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--lookside=M] [--tag=NAME] [--hazards]
 ## Saves shots/track_<tag><fraction>.png. The eye stands --back m behind the node and --up m
 ## over the road, --side m to the right, and looks at the road --ahead m on (--lookside m to
 ## the right of it).
@@ -36,10 +36,15 @@ func _run() -> void:
 			for r in ProceduralTrack._runs(lay.kind, k):
 				print("%s at %.3f..%.3f" % ["tunnel" if k == ProceduralTrack.Kind.TUNNEL else "bridge",
 					float(r[0]) / lay.n, float(r[0] + r[1]) / lay.n])
+		for b in lay.branches:
+			print("%s at %.4f%s, %s" % [b.kind, float(b.from) / lay.n,
+				"..%.4f" % (float(b.to) / lay.n) if b.to >= 0 else "", "right" if b.side > 0.0 else "left"])
 	var t0 := Time.get_ticks_msec()
 	var w := TrackWorld.load_track(id)
 	print("built %s in %d ms: %d nodes, %.0f m" % [id, Time.get_ticks_msec() - t0, w.path.size(), w.path.length])
 	add_child(w.root)
+	if "--hazards" in args and id == Game.PROCEDURAL_TRACK:
+		_hazards(w.root)
 	w.light(self, "--night" in args, "--weather" in args, get_viewport())
 	var cam := Camera3D.new()
 	cam.far = 6000.0
@@ -64,3 +69,29 @@ func _run() -> void:
 			Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000,
 			Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)])
 	get_tree().quit()
+
+
+## Lists the procedural track's solid scenery standing inside the walls the AI drives between
+## (what a racer on its line could hit).
+func _hazards(root: Node3D) -> void:
+	var lay := ProceduralTrack.make_layout(ProceduralTrack.SEED)
+	var body: StaticBody3D = root.get_node("Scenery")
+	var count := 0
+	for o in body.get_shape_owners():
+		var p := body.shape_owner_get_transform(o).origin
+		var i := lay.closest(p.x, p.z)
+		if i < 0 or lay.kind[i] != ProceduralTrack.Kind.OPEN:
+			continue
+		var lat := (Vector3(p.x, 0, p.z) - Vector3(lay.pts[i].x, 0, lay.pts[i].z)).dot(lay.flat_right[i])
+		var wall := lay.wall_r[i] if lat > 0.0 else lay.wall_l[i]
+		var shape := body.shape_owner_get_shape(o, 0)
+		var r := 0.0
+		if shape is BoxShape3D:
+			r = maxf(shape.size.x, shape.size.z) * 0.5
+		elif shape is CylinderShape3D or shape is SphereShape3D:
+			r = shape.radius
+		if absf(lat) - r < wall:
+			count += 1
+			print("hazard at node %d (%.3f): %s %.1f m out (r %.1f), wall %.1f" % [i, float(i) / lay.n,
+				shape.get_class(), lat, r, wall])
+	print("%d hazards" % count)

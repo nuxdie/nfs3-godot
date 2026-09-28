@@ -48,17 +48,57 @@ class Branch:
 	var side := 1.0                       # of the lap, at `from`
 	var closed := -1.0                    # m along it to the barricade; -1 open
 	var widen := 0.0                      # m wider over its last 20 m (the lookout's car park)
+	var mouths: Array[Mouth] = []         # where it meets the lap (a shortcut: both ends)
 
-	## Half its width `along` m from its start: flared into the mouth(s) it meets the lap at.
+	## Half its width `along` m from its start.
 	func half_at(along: float) -> float:
 		var total := (pts.size() - 1) * BSTEP
-		var h := half + maxf(0.0, 7.0 - along) * 0.5
-		if to >= 0:
-			h = maxf(h, half + maxf(0.0, 7.0 - (total - along)) * 0.5)
 		if widen > 0.0:
-			h += widen * smoothstep(total - 26.0, total - 10.0, along)
-		return h
+			return half + widen * smoothstep(total - 26.0, total - 10.0, along)
+		return half
 
+	func length() -> float:
+		return (pts.size() - 1) * BSTEP
+
+	## Its centre `along` m from its start, and level unit vectors on along it and to its right.
+	func frame(along: float) -> Array:
+		var k := clampi(int(along / BSTEP), 0, pts.size() - 2)
+		var u := clampf(along / BSTEP - k, 0.0, 1.0)
+		var t := pts[k + 1] - pts[k]
+		t.y = 0.0
+		t = t.normalized()
+		return [pts[k].lerp(pts[k + 1], u), t, t.cross(Vector3.UP).normalized()]
+
+
+## Where a branch meets the lap: its end cut square along the road's edge line, and a curved
+## fillet filling each corner between the two (with a kerbed pavement round it in town, a
+## gravel shoulder elsewhere), the radius eased for the angle they meet at.
+class Mouth:
+	var node := 0                         # of the lap
+	var side := 1.0                       # of the lap the branch leaves on
+	var at_end := false                   # the branch's last point (a shortcut rejoining)
+	var p0 := Vector2.ZERO                # the branch's centre on the road's edge line
+	var t := Vector2.ZERO                 # level, from the road out along the branch
+	## Each corner, the branch's left (-1) then right (+1) edge: {sign, c (where the branch's
+	## edge meets the road's), t0 (the fillet leaves the road's edge), t1 (reaches the branch's),
+	## o (its centre), r (radius), l (m from c to t0 and t1)}. Level points (x, z).
+	var corners: Array = []
+	var v_from := 0.0                     # m along the lap the mouth spans (from one fillet
+	var v_to := 0.0                       # to the other): the edge line's gap, the dropped kerb
+
+	## The fillet's arc from t0 to t1 of `corner`, `n` + 1 points, at `inset` m inside its radius.
+	static func arc(corner: Dictionary, n: int, inset := 0.0) -> PackedVector2Array:
+		var o: Vector2 = corner.o
+		var t0: Vector2 = corner.t0
+		var t1: Vector2 = corner.t1
+		var r: float = corner.r
+		var a0 := (t0 - o).angle()
+		var da := wrapf((t1 - o).angle() - a0, -PI, PI)
+		var out := PackedVector2Array()
+		for k in n + 1:
+			var a := a0 + da * k / n
+			out.append(o + Vector2(cos(a), sin(a)) * maxf(r - inset, 0.05))
+		return out
 
 const BSTEP := 4.0           # m between a branch's points
 
@@ -95,9 +135,12 @@ class Layout:
 	var branches: Array[Branch] = []
 	var gap_l := PackedByteArray()      # 1 where a branch leaves that side of the road
 	var gap_r := PackedByteArray()
-	var _bgrid := {}                    # Vector2i cell -> [[branch, segment], ...]
+	var _bgrid := {}                    # Vector2i cell -> [Vector2i(corridor, segment), ...]
+	## The corridors the land is levelled along: each branch's centre line, and along the road's
+	## edge across each mouth. [points (y their surface), half width].
+	var _corridors: Array = []
 	const BGRID := 40.0
-	const BREACH := 26.0                # m out from a branch that the land is shaped to it
+	const BREACH := 34.0                # m out from a branch that the land is shaped to it
 
 	var _lo := FastNoiseLite.new()
 	var _mid := FastNoiseLite.new()
@@ -140,21 +183,28 @@ class Layout:
 			h -= lake_depth * exp(-dl / (150.0 * 150.0))
 		if river_on:
 			h = minf(h, lerpf(river_bed, h, river_t(x, z)))
-		if not _bgrid.is_empty():
-			# Levelled across the branches' corridors, easing back to the land either side.
-			var b := branch_at(x, z)
-			if b.x < BREACH:
-				var band := branches[int(b.z)].half + 5.0
-				h = lerpf(h, b.y - 0.15, 1.0 - smoothstep(band, BREACH, b.x))
-		return h
+		return levelled(x, z, h)
 
-	## The nearest branch within BREACH of (x, z): (distance, its surface height there,
-	## index), distance INF if none.
+	## Land of height `h` at (x, z) levelled across the branches' corridors, easing back to it
+	## either side.
+	func levelled(x: float, z: float, h: float) -> float:
+		if _bgrid.is_empty():
+			return h
+		var b := branch_at(x, z)
+		if b.x >= BREACH:
+			return h
+		# Level well past its shoulders: the ground's meshes are 6 to 12 m apart, and a slope
+		# starting too close would rise between their points over the pavement.
+		var band: float = _corridors[int(b.z)][1] + 9.0
+		return lerpf(h, b.y - 0.15, 1.0 - smoothstep(band, BREACH, b.x))
+
+	## The nearest corridor (a branch, or a mouth's apron) within BREACH of (x, z): (distance,
+	## its surface height there, index), distance INF if none.
 	func branch_at(x: float, z: float) -> Vector3:
 		var best := Vector3(INF, 0.0, -1.0)
 		var q := Vector2(x, z)
 		for e: Vector2i in _bgrid.get(Vector2i(floori(x / BGRID), floori(z / BGRID)), []):
-			var pts := branches[e.x].pts
+			var pts: PackedVector3Array = _corridors[e.x][0]
 			var a := Vector2(pts[e.y].x, pts[e.y].z)
 			var b := Vector2(pts[e.y + 1].x, pts[e.y + 1].z)
 			var ab := b - a
@@ -166,10 +216,14 @@ class Layout:
 
 	func add_branch(b: Branch) -> void:
 		branches.append(b)
-		var bi := branches.size() - 1
-		for k in b.pts.size() - 1:
-			var a := b.pts[k]
-			var c := b.pts[k + 1]
+		add_corridor(b.pts, b.half)
+
+	func add_corridor(cpts: PackedVector3Array, half: float) -> void:
+		_corridors.append([cpts, half])
+		var bi := _corridors.size() - 1
+		for k in cpts.size() - 1:
+			var a := cpts[k]
+			var c := cpts[k + 1]
 			var pad := BREACH + 2.0
 			for cx in range(floori((minf(a.x, c.x) - pad) / BGRID), floori((maxf(a.x, c.x) + pad) / BGRID) + 1):
 				for cz in range(floori((minf(a.z, c.z) - pad) / BGRID), floori((maxf(a.z, c.z) + pad) / BGRID) + 1):
@@ -181,7 +235,7 @@ class Layout:
 	## Whether something `r` m round (x, z) would stand on a branch or its shoulders.
 	func on_branch(x: float, z: float, r: float) -> bool:
 		var b := branch_at(x, z)
-		return b.x < INF and b.x < branches[int(b.z)].half + r + 3.0
+		return b.x < INF and b.x < _corridors[int(b.z)][1] + r + 3.0
 
 	## Height of the road's own surface (the carriageway and its verges) at (x, z), or NAN off it.
 	func deck_y(x: float, z: float) -> float:
@@ -200,8 +254,11 @@ class Layout:
 		var j := idx(i + (1 if along > 0.0 else -1))
 		y += (road_y(j, s, minf(d, ROAD_HALF)) - road_y(i, s, minf(d, ROAD_HALF))) * absf(along)
 		if d > ROAD_HALF:
-			if zone[i] == Zone.TOWN and not (gap_r if s > 0.0 else gap_l)[i]:
-				y += 0.12 * clampf((d - ROAD_HALF) / 0.45, 0.0, 1.0)
+			if zone[i] == Zone.TOWN:
+				# The kerb, ramped from node to node as the verge's mesh is.
+				var gap := gap_r if s > 0.0 else gap_l
+				var k := lerpf(0.0 if gap[i] else 0.12, 0.0 if gap[j] or zone[j] != Zone.TOWN else 0.12, absf(along))
+				y += k * clampf((d - ROAD_HALF) / 0.45, 0.0, 1.0)
 			else:
 				y -= 0.12 * (d - ROAD_HALF) / (edge[i] - ROAD_HALF)
 		return y
@@ -237,8 +294,11 @@ class Layout:
 		var nat := natural(p.x + fr.x * d, p.z + fr.z * d)
 		if zone[i] == Zone.TOWN:
 			var t := maxf(dd - 14.0, 0.0)
-			return clampf(nat, edge_y - t * 0.5, edge_y + t * 0.6)
-		return clampf(nat, edge_y - dd * 0.62, edge_y + maxf(dd - 1.5, 0.0) * 1.5)
+			# (Its level strip gives way where a street crosses it.)
+			var level := levelled(p.x + fr.x * d, p.z + fr.z * d, edge_y)
+			return clampf(nat, level - t * 0.5, level + t * 0.6)
+		# A branch running close by has the last word: the bank steepens rather than burying it.
+		return levelled(p.x + fr.x * d, p.z + fr.z * d, clampf(nat, edge_y - dd * 0.62, edge_y + maxf(dd - 1.5, 0.0) * 1.5))
 
 	func lap_frac(i: int) -> float:
 		return float(i) / n
@@ -651,10 +711,10 @@ static func _widths(lay: Layout) -> void:
 			if drop > 2.4 or near_bridge or outside and lay.zone[i] != Zone.FARM:
 				rail[i] = 1
 		_close_gaps(rail, 1, 5)
-		# Open where a branch leaves.
+		# Open where a branch leaves, and a node either side.
 		var gap := lay.gap_r if s > 0.0 else lay.gap_l
 		for i in n:
-			if gap[i]:
+			if gap[i] or gap[lay.idx(i - 1)] or gap[lay.idx(i + 1)]:
 				rail[i] = 0
 		_drop_short(rail, 1, 6)
 		var walls := PackedFloat32Array()
@@ -699,14 +759,89 @@ static func _branches(lay: Layout, seed_value: int) -> void:
 	_streets(lay, rng)
 	_shortcuts(lay, rng)
 	_country_roads(lay, rng)
-	for b in lay.branches:
-		var gap := lay.gap_r if b.side > 0.0 else lay.gap_l
-		var span := int(ceilf((b.half + 5.0) / STEP))
-		for c: int in [b.from, b.to]:
-			if c < 0:
-				continue
-			for k in range(-span, span + 1):
-				gap[lay.idx(c + k)] = 1
+	for b in lay.branches.duplicate():
+		for at_end: bool in ([false, true] if b.to >= 0 else [false]):
+			var m := _mouth(lay, b, at_end)
+			b.mouths.append(m)
+			# The kerb dropped and the rails and fences open across it.
+			var gap := lay.gap_r if m.side > 0.0 else lay.gap_l
+			for k in range(-8, 9):
+				var j := lay.idx(m.node + k)
+				var v := m.node * STEP + k * STEP
+				# (Inside the fillets' ends: the kerb stays up where the pavement turns the corner.)
+				if (v > m.v_from + 0.5 and v < m.v_to - 0.5) or k == 0:
+					gap[j] = 1
+			# The land levelled along the road's edge across it, and round each fillet: to the
+			# lower of the road's edge and the branch's mouth (the surfaces ease between the two,
+			# so the land must stay under both; their shoulders slope down to meet it).
+			var y0: float = b.pts[b.pts.size() - 1 if at_end else 0].y
+			var edge := PackedVector3Array()
+			var f := Vector2(lay.fwd[m.node].x, lay.fwd[m.node].z)
+			var e0 := Vector2(lay.pts[m.node].x, lay.pts[m.node].z) \
+				+ Vector2(lay.flat_right[m.node].x, lay.flat_right[m.node].z) * m.side * (ROAD_HALF + 1.0)
+			var v := m.v_from - 3.0
+			while v <= m.v_to + 3.0:
+				var q := e0 + f * (v - m.node * STEP)
+				var y := lay.deck_y(q.x, q.y)
+				edge.append(Vector3(q.x, minf(lay.pts[m.node].y if is_nan(y) else y, y0) - 0.1, q.y))
+				v += 3.0
+			lay.add_corridor(edge, 1.0)
+			for corner: Dictionary in m.corners:
+				var arc := PackedVector3Array()
+				for q in Mouth.arc(corner, 8, 1.5):
+					var y := lay.deck_y(q.x, q.y)
+					arc.append(Vector3(q.x, minf(y0, y if not is_nan(y) else INF) - 0.1, q.y))
+				lay.add_corridor(arc, 3.0)
+
+
+## The mouth branch `b` meets the lap with at its start (or its end).
+static func _mouth(lay: Layout, b: Branch, at_end: bool) -> Mouth:
+	var m := Mouth.new()
+	m.at_end = at_end
+	m.node = b.to if at_end else b.from
+	m.side = b.side
+	var k0 := b.pts.size() - 1 if at_end else 0
+	var k1 := b.pts.size() - 3 if at_end else 2
+	m.p0 = Vector2(b.pts[k0].x, b.pts[k0].z)
+	m.t = (Vector2(b.pts[k1].x, b.pts[k1].z) - m.p0).normalized()
+	var i := m.node
+	var right := Vector2(-m.t.y, m.t.x)
+	var f := Vector2(lay.fwd[i].x, lay.fwd[i].z)
+	var out := Vector2(lay.flat_right[i].x, lay.flat_right[i].z) * m.side
+	var e0 := Vector2(lay.pts[i].x, lay.pts[i].z) + out * ROAD_HALF
+	var town := lay.zone[i] == Zone.TOWN
+	var base := 6.0 if town else 7.5
+	var vs := []
+	for sg: float in [-1.0, 1.0]:
+		var p1 := m.p0 + right * sg * b.half
+		var den := m.t.cross(f)
+		var c := p1 + m.t * ((e0 - p1).cross(f) / den) if absf(den) > 0.05 else p1
+		# Along the road's edge away from the branch, on this side of it.
+		var g := f if (right * sg).dot(f) > 0.0 else -f
+		var half_angle := absf(m.t.angle_to(g)) * 0.5
+		# (A shallow corner's fillet would run a long sliver down the road's verge: kept short.)
+		var l := minf(base / tan(half_angle), 8.0)
+		if town:
+			# In town the fillet ends on a node of the road, where its kerb is up and the
+			# corner's pavement meets Main Street's (the kerb drops only between the two).
+			var pi := Vector2(lay.pts[i].x, lay.pts[i].z)
+			var vc := (c - pi).dot(f)
+			var sdir := signf(g.dot(f))
+			var best := l
+			var best_d := INF
+			for k in [floorf((vc + sdir * l) / STEP), ceilf((vc + sdir * l) / STEP)]:
+				var lk: float = (k * STEP - vc) * sdir
+				if lk >= 3.0 and lk <= 12.0 and absf(lk - l) < best_d:
+					best = lk
+					best_d = absf(lk - l)
+			l = best
+		var rad := l * tan(half_angle)
+		var t0 := c + g * l
+		m.corners.append({"sign": sg, "c": c, "t0": t0, "t1": c + m.t * l, "o": t0 + out * rad, "r": rad, "l": l})
+		vs.append(i * STEP + (t0 - Vector2(lay.pts[i].x, lay.pts[i].z)).dot(f))
+	m.v_from = minf(vs[0], vs[1])
+	m.v_to = maxf(vs[0], vs[1])
+	return m
 
 
 ## Town streets: straight off the main street, both sides at a crossroads, closed a block in.

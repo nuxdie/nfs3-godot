@@ -874,9 +874,11 @@ func _church(p: Vector3, face: Vector3, along: Vector3) -> void:
 		_bx(Vector3(0.8, 0.12, 0.12), Vector3(0, 19.1, 9.6), Color(0.85, 0.75, 0.4)),
 		_bx(Vector3(1.6, 2.6, 0.1), Vector3(0, 1.3, 11.42), Color(0.45, 0.28, 0.18)),
 		_bx(Vector3(1.1, 1.6, 0.1), Vector3(0, 7.5, 11.42), Color(0.2, 0.25, 0.35))], 1200.0)
+	var windows := []
 	for x: float in [-2.0, 2.0]:
 		for z: float in [-5.0, 0.0, 5.0]:
-			_parts(h, [_bx(Vector3(0.1, 2.4, 1.0), Vector3(x * 2.52, 3.0, z), Color(0.25, 0.3, 0.4))], 400.0, false)
+			windows.append(_bx(Vector3(0.1, 2.4, 1.0), Vector3(x * 2.52, 3.0, z), Color(0.25, 0.3, 0.4)))
+	_parts(h, windows, 400.0, false)
 	_solid(h.transform, Vector3(10, 6, 18), Vector3(0, 3, 0))
 	_solid(h.transform, Vector3(3.6, 11, 3.6), Vector3(0, 5.5, 9.6))
 	var bh := Node3D.new()

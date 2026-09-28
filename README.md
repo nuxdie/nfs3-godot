@@ -76,12 +76,17 @@ What's read:
 scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd,
                    nfs3_horizon.gd (.hrz sky/fog), data_path.gd (case-insensitive lookups)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
-                   procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges),
-                   proc_ground.gd (its road, cuttings and banks, terrain, mountains, water, tunnel,
-                   bridges), proc_scenery.gd (its town, farms, forest, rails, signs, lamps),
-                   proc_places.gd (its named places - the town's shops, hotel and water tower,
-                   gas station, diner, farm stand, campground, motel - and the road signs and
+                   procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges,
+                   and the roads off it: town streets, farm lanes, forest roads, the campground's
+                   road, a lookout, gravel shortcuts across two big bends),
+                   proc_ground.gd (its road and side roads, cuttings and banks, terrain, mountains,
+                   water, tunnel, bridges), proc_scenery.gd (its town, farms, forest, rails, lamps),
+                   proc_places.gd (its named places - the town's shops, hotel, church and water
+                   tower, gas station, diner, farms, campground, lookout, motel - and the signs and
                    billboards that name them and point to them with real distances),
+                   proc_signs.gd (traffic signs: speed limits, warnings, stop signs, street names,
+                   route shields, guide signs, mile markers, barricades) painted into one atlas by
+                   sign_art.gd,
                    track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd,
@@ -108,7 +113,8 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
                    (--classic drops the body sway and progressive grip, --no-traffic empties the road)
 tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with
                    draw-call and triangle counts: godot --path . -- --trackshots <track> [0.25 ...]
-                   (--night / --weather; --up= --back= --ahead= --side= move the eye; --tag=NAME)
+                   (--night / --weather; --up= --back= --ahead= --side= --lookside= aim the eye;
+                   --tag=NAME; --hazards lists solid scenery inside the procedural track's walls)
 tools/postcards.gd re-render the menu's track pictures and copy them to shots/:
                    godot --path . -- --postcards [track ...]
 tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, front and rear, saved to shots/:

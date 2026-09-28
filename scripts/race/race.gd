@@ -874,7 +874,7 @@ func _check_resets(dt: float) -> void:
 		var give_up := 3.0 if c.is_cop and c.global_position.distance_to(player.global_position) > 150.0 else 7.0
 		var stranded: bool = ai != null and ai.stranded_t > give_up
 		if c.is_stuck_upside_down() or fell or lost or stranded:
-			_respawn(c)
+			_respawn(c, stranded)
 
 
 ## Whether the car is over the track's drivable surface (the "Road" body, not the terrain).
@@ -885,7 +885,7 @@ func _on_road(c: Car) -> bool:
 	return not hit.is_empty() and hit.collider.name == "Road"
 
 
-func _respawn(c: Car) -> void:
+func _respawn(c: Car, past_blockage := false) -> void:
 	var ai := _controller(c)
 	# Search near the node the car was last tracked at: a global search can pick a stretch of
 	# road on another level (bridges, overpasses) and skip part of the lap.
@@ -895,16 +895,30 @@ func _respawn(c: Car) -> void:
 			hint = r.node
 	var n := path.closest(c.global_position, hint)
 	var dir := -1 if ai and ai.reverse_dir else 1
+	# Wedged against something: put it down beyond it, or it drives straight back into it.
+	if past_blockage:
+		n = _node_ahead(n, dir, 12.0)
 	# Near the middle of the road: an overtaking line far out can be over a verge or a drop.
 	var lane := clampf(ai.lane, -3.5, 3.5) if ai else 0.0
-	# Put it down clear of other cars (a parked roadblock, a pile-up), moving up the road if need be.
-	var off := 0.0
-	for k in 8:
-		var m := path.idx(n + k * 3 * dir)
-		off = _ground_offset(m, lane)
-		if k == 7 or not _car_near(c, path.transform_at(m, off, 0.0).origin, 5.0):
-			n = m
+	# Put it down clear of other cars (a parked roadblock, a pile-up) and of solid scenery
+	# standing on the road, trying other lanes and moving up the road if need be.
+	var spot := n
+	var off := _ground_offset(n, lane)
+	var found := false
+	var m := n
+	for k in 12:
+		for l: float in [lane, 0.0, -3.0, 3.0]:
+			var o := _ground_offset(m, l)
+			var pos := path.transform_at(m, o, 0.0)
+			if not _car_near(c, pos.origin, 5.0) and not _blocked(c, pos):
+				spot = m
+				off = o
+				found = true
+				break
+		if found:
 			break
+		m = _node_ahead(m, dir, 4.0)
+	n = spot
 	if ai:
 		ai.stranded_t = 0.0
 		ai.lane = off
@@ -912,6 +926,35 @@ func _respawn(c: Car) -> void:
 	if dir < 0:
 		xf = xf.rotated_local(Vector3.UP, PI)
 	c.reset_to(xf, 0.3)
+
+
+## The node at least `metres` further along the road from `n` in direction `dir`.
+func _node_ahead(n: int, dir: int, metres: float) -> int:
+	var m := n
+	var start := path.cumulative[n]
+	for i in path.size():
+		m = path.idx(m + dir)
+		if fposmod((path.cumulative[m] - start) * dir, path.length) >= metres:
+			break
+	return m
+
+
+## Whether a car put down at `xf` (a point on the road surface) would be inside something
+## solid: a tree, pillar or building standing on the road. The box starts clear of the road
+## surface itself so it only catches things sticking up out of it.
+func _blocked(me: Car, xf: Transform3D) -> bool:
+	var box := BoxShape3D.new()
+	box.size = Vector3(2.6, 1.6, 5.5)
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = box
+	q.transform = xf.translated_local(Vector3.UP * 1.3)
+	q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
+	q.exclude = [me.get_rid()]
+	for hit in get_world_3d().direct_space_state.intersect_shape(q, 4):
+		var body := hit.collider as Node
+		if body and body.name != "Road":
+			return true
+	return false
 
 
 func _car_near(me: Car, pos: Vector3, radius: float) -> bool:

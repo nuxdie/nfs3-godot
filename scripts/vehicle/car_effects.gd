@@ -177,9 +177,9 @@ func _smoke_emitter(sfx: Nfs3Sfx) -> CPUParticles3D:
 	p.scale_amount_curve = sc
 	p.scale_amount_min = 2.0
 	p.scale_amount_max = 3.0
-	var textured := sfx != null and sfx.puff != null
+	var textured := sfx != null and sfx.smoke != null
 	# Unshaded, so it's toned down by hand at night rather than glowing in the dark.
-	# NFS3's puff has a thinner, speckled alpha than the procedural one.
+	# NFS3's cloud is densest in the middle and thins out to its edges on its own.
 	var shade := 0.9 * (1.0 if not Game.night else 0.27)
 	var peak := 1.0 if textured else 0.4
 	var ramp := Gradient.new()
@@ -190,7 +190,7 @@ func _smoke_emitter(sfx: Nfs3Sfx) -> CPUParticles3D:
 	p.color_ramp = ramp
 	var m := _sprite_material(false)
 	if textured:
-		m.albedo_texture = sfx.puff
+		m.albedo_texture = sfx.smoke
 	var q := QuadMesh.new()
 	q.size = Vector2.ONE
 	q.material = m
