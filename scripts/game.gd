@@ -60,8 +60,6 @@ func _ready() -> void:
 	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
 	if "--fxshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/fx_shots.gd").new())
-	if "--layouts" in OS.get_cmdline_user_args():
-		add_child(load("res://tools/_layouts.gd").new())
 
 
 # ------------------------------------------------------------------ data files
