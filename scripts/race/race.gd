@@ -26,6 +26,7 @@ var pursuit_time := 0.0
 var bust_t := 0.0
 var _cooldown := 0.0
 var _finish_order: Array = []
+var _reset_check_t := 0.0
 
 @onready var hud: Hud = $HUD
 @onready var cam: ChaseCamera = $Camera
@@ -92,9 +93,8 @@ func _build_world() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-55, -35, 0)
 	sun.light_energy = 1.1
-	sun.shadow_enabled = true
-	sun.directional_shadow_max_distance = 80.0
 	add_child(sun)
+	Game.apply_quality(get_viewport(), sun)
 
 
 func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
@@ -269,11 +269,11 @@ func _physics_process(dt: float) -> void:
 			race_time += dt
 			_update_progress()
 			_update_pursuit(dt)
-			_check_resets()
+			_check_resets(dt)
 		State.FINISHED:
 			# The rest of the field races on behind the results screen.
 			_update_progress()
-			_check_resets()
+			_check_resets(dt)
 	if Input.is_action_just_pressed("reset_car") and state == State.RACING:
 		_respawn(player)
 
@@ -495,7 +495,12 @@ func _spawn_roadblock() -> void:
 
 # ------------------------------------------------------------------ resets
 
-func _check_resets() -> void:
+func _check_resets(dt: float) -> void:
+	# Every trigger below is seconds-long, so a few checks a second is plenty.
+	_reset_check_t -= dt
+	if _reset_check_t > 0.0:
+		return
+	_reset_check_t = 0.1
 	for c: Car in racers.map(func(r): return r.car) + traffic_cars + cops:
 		if not is_instance_valid(c):
 			continue

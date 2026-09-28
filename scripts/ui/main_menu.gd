@@ -10,6 +10,7 @@ var _laps: SpinBox
 var _opp: SpinBox
 var _traffic: CheckBox
 var _kmh: CheckBox
+var _quality: OptionButton
 var _status: Label
 var _preview: SubViewport
 var _preview_pivot: Node3D
@@ -57,6 +58,10 @@ func _ready() -> void:
 	_car.item_selected.connect(func(_i): _update_preview())
 	_laps = _spin(col, "Laps", 1, 8, Game.laps)
 	_opp = _spin(col, "Opponents", 0, 7, Game.opponents)
+	_quality = _option(col, "Graphics")
+	for q in Game.QUALITY_NAMES:
+		_quality.add_item(q)
+	_quality.selected = Game.quality
 	_traffic = CheckBox.new()
 	_traffic.text = "Traffic"
 	_traffic.button_pressed = Game.traffic
@@ -226,5 +231,6 @@ func _start() -> void:
 	Game.opponents = int(_opp.value)
 	Game.traffic = _traffic.button_pressed
 	Game.units_kmh = _kmh.button_pressed
+	Game.quality = _quality.selected as Game.Quality
 	Game.save_settings()
 	get_tree().change_scene_to_file("res://scenes/race.tscn")

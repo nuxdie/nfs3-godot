@@ -166,7 +166,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 		var bl := OmniLight3D.new()
 		bl.light_color = Color(1, 0.05, 0.02)
 		bl.omni_range = 2.5
-		bl.light_energy = 0.0
+		bl.light_energy = 2.0
+		bl.visible = false
 		bl.position = Vector3(side * hs.x * 0.7, 0.0, -hs.z - 0.2)
 		add_child(bl)
 		_brake_lights.append(bl)
@@ -374,8 +375,10 @@ func _physics_process(dt: float) -> void:
 	else:
 		_upside_timer = 0.0
 
+	# Hidden rather than zero energy: an active light costs culling and shading even when dark.
+	var braking_lit := brake > 0.1 and gear > 0
 	for bl in _brake_lights:
-		bl.light_energy = 2.0 if brake > 0.1 and gear > 0 else 0.0
+		bl.visible = braking_lit
 
 
 func is_stuck_upside_down() -> bool:

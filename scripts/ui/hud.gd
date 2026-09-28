@@ -24,6 +24,12 @@ var _mirror: TextureRect
 var _mirror_vp: SubViewport
 var _mirror_cam: Camera3D
 var _font: Font
+var _map_path: TrackPath
+var _map_rect := Rect2()
+var _map_pts := PackedVector2Array()
+var _map_origin := Vector2.ZERO
+var _map_max := Vector2.ZERO
+var _map_scale := 1.0
 
 
 func _ready() -> void:
@@ -231,6 +237,8 @@ func _process(dt: float) -> void:
 		_msg.modulate.a = clampf(_msg_t * 2.0, 0.0, 1.0)
 		if _msg_t <= 0.0:
 			_msg.visible = false
+	# A hidden mirror must stop rendering too: it's a whole second view of the scene.
+	_mirror_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _mirror.visible else SubViewport.UPDATE_DISABLED
 	if player and is_instance_valid(player) and _mirror.visible:
 		var xf := player.global_transform
 		_mirror_cam.global_transform = Transform3D(xf.basis, xf * Vector3(0, 1.25, 0.2))
@@ -249,6 +257,11 @@ func _on_draw() -> void:
 		var on := fmod(Time.get_ticks_msec() / 250.0, 2.0) < 1.0
 		var c := RED if on else Color(0.2, 0.4, 1)
 		_text("PURSUIT", Vector2(size.x * 0.5, 155), 30, c, true)
+
+
+## Top-down view with +Z up the screen; +X (the driver's left when heading +Z) is then screen-left.
+func _to_map(p: Vector3) -> Vector2:
+	return _map_origin + Vector2(_map_max.x - p.x, _map_max.y - p.z) * _map_scale
 
 
 func _text(s: String, pos: Vector2, fsize: int, color := Color.WHITE, centered := false) -> void:
@@ -309,26 +322,28 @@ func _draw_info(size: Vector2) -> void:
 func _draw_map(rect: Rect2) -> void:
 	var path: TrackPath = race.path
 	_draw.draw_rect(rect, PANEL)
-	var mn := Vector2(INF, INF)
-	var mx := Vector2(-INF, -INF)
-	for p in path.points:
-		mn = mn.min(Vector2(p.x, p.z))
-		mx = mx.max(Vector2(p.x, p.z))
-	var span := maxf(mx.x - mn.x, mx.y - mn.y)
-	var scale := (rect.size.x - 20) / maxf(span, 1.0)
-	var off := rect.position + Vector2(10, 10) + (Vector2(span, span) - (mx - mn)) * 0.5 * scale
-	var to_map := func(p: Vector3) -> Vector2:
-		# Top-down view with +Z up the screen; +X (the driver's left when heading +Z) is then screen-left.
-		return off + Vector2(mx.x - p.x, mx.y - p.z) * scale
-	var pts := PackedVector2Array()
-	for i in range(0, path.size(), 2):
-		pts.append(to_map.call(path.points[i]))
-	pts.append(pts[0])
-	_draw.draw_polyline(pts, Color(1, 1, 1, 0.7), 3)
-	_draw.draw_circle(to_map.call(path.points[0]), 4, Color.WHITE)
+	# The outline only depends on the track and the map rect; build it once, not every frame.
+	if _map_path != path or _map_rect != rect:
+		_map_path = path
+		_map_rect = rect
+		var mn := Vector2(INF, INF)
+		var mx := Vector2(-INF, -INF)
+		for p in path.points:
+			mn = mn.min(Vector2(p.x, p.z))
+			mx = mx.max(Vector2(p.x, p.z))
+		var span := maxf(mx.x - mn.x, mx.y - mn.y)
+		_map_scale = (rect.size.x - 20) / maxf(span, 1.0)
+		_map_origin = rect.position + Vector2(10, 10) + (Vector2(span, span) - (mx - mn)) * 0.5 * _map_scale
+		_map_max = mx
+		_map_pts = PackedVector2Array()
+		for i in range(0, path.size(), 2):
+			_map_pts.append(_to_map(path.points[i]))
+		_map_pts.append(_map_pts[0])
+	_draw.draw_polyline(_map_pts, Color(1, 1, 1, 0.7), 3)
+	_draw.draw_circle(_to_map(path.points[0]), 4, Color.WHITE)
 	for c in race.cops:
 		if is_instance_valid(c):
-			_draw.draw_circle(to_map.call(c.global_position), 4, Color(0.3, 0.5, 1))
+			_draw.draw_circle(_to_map(c.global_position), 4, Color(0.3, 0.5, 1))
 	for rr in race.racers:
 		var col := ACCENT if rr.car == player else RED
-		_draw.draw_circle(to_map.call(rr.car.global_position), 6 if rr.car == player else 4, col)
+		_draw.draw_circle(_to_map(rr.car.global_position), 6 if rr.car == player else 4, col)

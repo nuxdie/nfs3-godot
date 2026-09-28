@@ -4,6 +4,8 @@ extends Node
 
 enum Mode { SINGLE_RACE, HOT_PURSUIT, TIME_TRIAL, FREE_ROAM }
 const MODE_NAMES := ["Single Race", "Hot Pursuit", "Time Trial", "Free Roam"]
+enum Quality { LOW, MEDIUM, HIGH }
+const QUALITY_NAMES := ["Low", "Medium", "High"]
 
 ## Friendly names for the stock NFS3 track folders.
 const TRACK_NAMES := {
@@ -27,6 +29,7 @@ var laps := 2
 var opponents := 3
 var traffic := true
 var units_kmh := true
+var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var last_results: Array = []
 
 var _car_cache := {}
@@ -34,6 +37,7 @@ var _car_cache := {}
 
 func _ready() -> void:
 	_setup_input()
+	quality = default_quality()
 	_load_settings()
 	scan_data()
 	# Developer hook: `godot --path . -- --autotest [track] [mode]` plays a scripted run.
@@ -166,6 +170,7 @@ func save_settings() -> void:
 	cf.set_value("game", "opponents", opponents)
 	cf.set_value("game", "traffic", traffic)
 	cf.set_value("game", "kmh", units_kmh)
+	cf.set_value("game", "quality", quality)
 	cf.save(SETTINGS_PATH)
 
 
@@ -182,6 +187,7 @@ func _load_settings() -> void:
 	opponents = clampi(_int(cf, "opponents", opponents), 0, 7)
 	traffic = _bool(cf, "traffic", traffic)
 	units_kmh = _bool(cf, "kmh", units_kmh)
+	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 
 
 func _int(cf: ConfigFile, key: String, fallback: int) -> int:
@@ -192,6 +198,43 @@ func _int(cf: ConfigFile, key: String, fallback: int) -> int:
 func _bool(cf: ConfigFile, key: String, fallback: bool) -> bool:
 	var v: Variant = cf.get_value("game", key, fallback)
 	return v if v is bool else fallback
+
+
+# ------------------------------------------------------------------ graphics
+
+## Integrated GPUs and dual-core CPUs start on Low: sun shadows and MSAA alone
+## cost ~35 ms a frame on e.g. a Haswell HD GT1.
+func default_quality() -> Quality:
+	var weak_gpu := RenderingServer.get_video_adapter_type() in [
+		RenderingDevice.DEVICE_TYPE_INTEGRATED_GPU, RenderingDevice.DEVICE_TYPE_CPU]
+	return Quality.LOW if weak_gpu or OS.get_processor_count() <= 2 else Quality.HIGH
+
+
+## Applies the quality preset to the race's main view and sun.
+func apply_quality(vp: Viewport, sun: DirectionalLight3D) -> void:
+	match quality:
+		Quality.LOW:
+			sun.shadow_enabled = false
+			# 3D at 75% resolution (the HUD stays sharp): fill rate is what a weak iGPU runs out of.
+			vp.scaling_3d_scale = 0.75
+			vp.msaa_3d = Viewport.MSAA_DISABLED
+			vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+		Quality.MEDIUM:
+			sun.shadow_enabled = true
+			sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+			sun.directional_shadow_max_distance = 50.0
+			RenderingServer.directional_shadow_atlas_set_size(2048, true)
+			vp.scaling_3d_scale = 1.0
+			vp.msaa_3d = Viewport.MSAA_DISABLED
+			vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+		Quality.HIGH:
+			sun.shadow_enabled = true
+			sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+			sun.directional_shadow_max_distance = 80.0
+			RenderingServer.directional_shadow_atlas_set_size(4096, true)
+			vp.scaling_3d_scale = 1.0
+			vp.msaa_3d = Viewport.MSAA_2X
+			vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 
 
 # ------------------------------------------------------------------ input

@@ -5,6 +5,7 @@ class_name ProceduralTrack
 const ROAD_HALF := 7.0
 const VERGE := 5.0
 const STEP := 6.0
+const TREE_DRAW_DISTANCE := 450.0
 
 
 static func build(root: Node3D, seed_value := 1998) -> TrackPath:
@@ -178,21 +179,26 @@ static func _build_terrain(root: Node3D, ground: float) -> void:
 
 
 static func _build_props(root: Node3D, path: TrackPath, rng: RandomNumberGenerator, ground: float) -> void:
+	# Low-poly on purpose: the default primitives (~4k tris per crown) times a few
+	# hundred trees, times every shadow cascade and the mirror, was millions of tris a frame.
 	var trunk := CylinderMesh.new()
 	trunk.top_radius = 0.25
 	trunk.bottom_radius = 0.35
 	trunk.height = 3.0
+	trunk.radial_segments = 6
+	trunk.rings = 0
+	trunk.cap_top = false
+	trunk.cap_bottom = false
 	var crown := SphereMesh.new()
 	crown.radius = 2.6
 	crown.height = 6.5
-	var trunk_mm := MultiMesh.new()
-	trunk_mm.transform_format = MultiMesh.TRANSFORM_3D
-	trunk_mm.mesh = trunk
-	var crown_mm := MultiMesh.new()
-	crown_mm.transform_format = MultiMesh.TRANSFORM_3D
-	crown_mm.use_colors = true
-	crown_mm.mesh = crown
-	var xforms: Array[Transform3D] = []
+	crown.radial_segments = 10
+	crown.rings = 5
+	var trunk_mat := _mat(Color(0.35, 0.22, 0.12))
+	var leaf := _mat(Color.WHITE)
+	leaf.vertex_color_use_as_albedo = true
+	var trees: Array[Transform3D] = []
+	var colors: Array[Color] = []
 	for i in range(0, path.size(), 2):
 		for side: float in [-1.0, 1.0]:
 			if rng.randf() < 0.35:
@@ -201,21 +207,33 @@ static func _build_props(root: Node3D, path: TrackPath, rng: RandomNumberGenerat
 			var p: Vector3 = path.points[i] + path.rights[i] * d * side
 			p.y = _ground_at(path.points[i].y, d, ground) - 0.2
 			var s := rng.randf_range(0.8, 1.5)
-			xforms.append(Transform3D(Basis().scaled(Vector3.ONE * s), p))
-	trunk_mm.instance_count = xforms.size()
-	crown_mm.instance_count = xforms.size()
-	for i in xforms.size():
-		var t := xforms[i]
-		trunk_mm.set_instance_transform(i, t.translated(Vector3.UP * 1.5 * t.basis.get_scale().y))
-		crown_mm.set_instance_transform(i, t.translated(Vector3.UP * 5.5 * t.basis.get_scale().y))
-		crown_mm.set_instance_color(i, Color.from_hsv(rng.randf_range(0.05, 0.3), 0.7, rng.randf_range(0.35, 0.6)))
-	var tm := MultiMeshInstance3D.new()
-	tm.multimesh = trunk_mm
-	tm.material_override = _mat(Color(0.35, 0.22, 0.12))
-	root.add_child(tm)
-	var cm := MultiMeshInstance3D.new()
-	cm.multimesh = crown_mm
-	var leaf := _mat(Color.WHITE)
-	leaf.vertex_color_use_as_albedo = true
-	cm.material_override = leaf
-	root.add_child(cm)
+			trees.append(Transform3D(Basis().scaled(Vector3.ONE * s), p))
+	for t in trees:
+		colors.append(Color.from_hsv(rng.randf_range(0.05, 0.3), 0.7, rng.randf_range(0.35, 0.6)))
+	# Consecutive trees along the road share a MultiMesh, so each chunk has a tight AABB
+	# and gets frustum-culled / distance-culled instead of the whole forest always drawing.
+	const CHUNK := 24
+	for start in range(0, trees.size(), CHUNK):
+		var n := mini(CHUNK, trees.size() - start)
+		var trunk_mm := MultiMesh.new()
+		trunk_mm.transform_format = MultiMesh.TRANSFORM_3D
+		trunk_mm.mesh = trunk
+		trunk_mm.instance_count = n
+		var crown_mm := MultiMesh.new()
+		crown_mm.transform_format = MultiMesh.TRANSFORM_3D
+		crown_mm.use_colors = true
+		crown_mm.mesh = crown
+		crown_mm.instance_count = n
+		for k in n:
+			var t := trees[start + k]
+			trunk_mm.set_instance_transform(k, t.translated(Vector3.UP * 1.5 * t.basis.get_scale().y))
+			crown_mm.set_instance_transform(k, t.translated(Vector3.UP * 5.5 * t.basis.get_scale().y))
+			crown_mm.set_instance_color(k, colors[start + k])
+		for pair in [[trunk_mm, trunk_mat], [crown_mm, leaf]]:
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = pair[0]
+			mmi.material_override = pair[1]
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mmi.visibility_range_end = TREE_DRAW_DISTANCE
+			mmi.visibility_range_end_margin = 30.0
+			root.add_child(mmi)
