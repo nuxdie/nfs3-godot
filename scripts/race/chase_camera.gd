@@ -86,7 +86,9 @@ func _physics_process(dt: float) -> void:
 	else:
 		# Orbit: looking down raises the camera over the car, looking up lowers it.
 		var elev := clampf(-_pitch, -0.3, 1.2)
-		desired = target.global_position + (-view * cos(elev) + up * sin(elev)) * m.dist + up * m.height
+		# The car's camera arm [56] sets how far back the chase views sit.
+		var arm: float = m.dist * target.camera_arm
+		desired = target.global_position + (-view * cos(elev) + up * sin(elev)) * arm + up * m.height
 		# Stay inside the track's walls and out of buildings: swinging wide on a hairpin or with
 		# the car against a wall otherwise puts the camera inside the scenery.
 		var from := target.global_position + up * 1.2

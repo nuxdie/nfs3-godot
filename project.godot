@@ -6,6 +6,7 @@ config_version=5
 config/name="NFS3 Revival"
 config/description="A Need for Speed III: Hot Pursuit style racer for Godot 4. Loads tracks and cars from your own NFS3 install."
 run/main_scene="res://scenes/main_menu.tscn"
+config/icon="res://icon.svg"
 config/features=PackedStringArray("4.7", "Mobile")
 
 [autoload]
@@ -22,7 +23,9 @@ window/stretch/aspect="expand"
 [physics]
 
 common/physics_ticks_per_second=60
+3d/physics_engine="Jolt Physics"
 3d/default_gravity=9.81
+jolt_physics_3d/queries/enable_ray_cast_face_index=true
 
 [rendering]
 

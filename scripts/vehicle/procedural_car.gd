@@ -15,6 +15,7 @@ var display_name := ""
 var texture: Texture2D = null
 var body_parts: Array[Dictionary] = []
 var wheels: Array[Dictionary] = []
+var popup_lights: Array[Dictionary] = []
 var half_size := Vector3.ONE
 var colours: Array[Color] = []
 var lights: Array[Dictionary] = []

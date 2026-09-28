@@ -155,6 +155,12 @@ func flash(text: String, secs: float, kind := "") -> void:
 	_count = 0.0
 
 
+## Swaps in fresh rows (cars finishing behind the results screen) without replaying the intro.
+func update_results(rows: Array) -> void:
+	if _results:
+		_results_data.rows = rows
+
+
 ## `rows`: [{name, time, best, you?, t?}] in finishing order.
 func show_results(title: String, rows: Array, extra: String) -> void:
 	_results_data = {"title": title, "rows": rows, "extra": extra}
@@ -311,7 +317,8 @@ func _draw_tach(c: Vector2) -> void:
 	var r := 104.0
 	for k in 3:
 		_draw.draw_circle(c, r + 26 - k * 10, Color(0, 0, 0, 0.14))
-	var max_rpm := ceilf(player.redline / 1000.0 + 1.0) * 1000.0
+	# One scale for every car, so a lazy V12's redline sits well short of a racer's.
+	var max_rpm := maxf(10000.0, ceilf(player.redline / 1000.0 + 1.0) * 1000.0)
 	var a0 := deg_to_rad(140)
 	var a1 := deg_to_rad(400)
 	var segs := 40
@@ -400,6 +407,12 @@ func _draw_pursuit(size: Vector2) -> void:
 	var br := Rect2(size.x * 0.5 - 80, 132, 160, 30)
 	UiKit.draw_slant(_draw, br, col)
 	_draw.draw_string(UiKit.font("display", 3), br.position + Vector2(0, 24), "PURSUIT", HORIZONTAL_ALIGNMENT_CENTER, br.size.x, 24, UiKit.INK)
+	# Heat level: one bar per level, like the ticket row.
+	for k in 3:
+		var hr := Rect2(size.x * 0.5 - 40 + k * 28, br.end.y + 8, 24, 8)
+		UiKit.draw_slant(_draw, hr, RED if k < race.heat else Color(1, 1, 1, 0.18), 0.5)
+	if player and player.tyres_flat():
+		_str("FLAT TYRES", Vector2(size.x * 0.5 - 80, br.end.y + 36), "cond", 14, RED, HORIZONTAL_ALIGNMENT_CENTER, 160, 3)
 
 
 func _draw_banner(size: Vector2) -> void:

@@ -18,8 +18,9 @@ const M := 48.0               # screen margin
 const PODIUM_TOP := -0.595
 const CAM_DIST := 14.0
 const CAM_Y := 2.6
+const DROP_HEIGHT := 0.6         # tyres this far above the podium when a car is dropped in
 
-enum Row { MODE, TRACK, CAR, LAPS, OPPONENTS, TRAFFIC, TIME }
+enum Row { MODE, TRACK, CAR, LAPS, OPPONENTS, TRAFFIC, TIME, WEATHER }
 
 var _rows: Array[SelectorRow] = []
 var _settings_rows: Array[SelectorRow] = []
@@ -42,16 +43,18 @@ var _chips: Array[Control] = []
 
 var _preview: SubViewport
 var _cam: Camera3D
-var _mover: Node3D            # slides a new car in along the camera's x
-var _pivot: Node3D            # turntable
+var _rig: Node3D              # camera and lights orbiting the car (a physics body can't ride a turntable)
 var _floor: MeshInstance3D
-var _preview_car: Node3D
-var _spin_vel := 0.5          # turntable speed, rad/s; a flick sets it, then it eases back
+var _preview_car: Car         # a real, simulated car dropped onto the podium, so it lands and sags
+var _shadow: MeshInstance3D
+var _spin_vel := 0.5          # orbit speed, rad/s; a flick sets it, then it eases back
 var _dragging := false
 var _last_drag_ms := 0
-var _car_slide := 0.0
+var _car_slide := 0.0          # start: how far the car has slid out
+var _slide_from := Vector3.ZERO
 
 var _photos := {}             # track id -> Texture2D (or null)
+var _postcards: TrackPostcards  # rendered stills of the tracks, filled in in the background
 var _outlines := {}           # track id -> PackedVector3Array
 var _time := 0.0
 var _start_hot := 0.0         # start-button hover/flash
@@ -75,7 +78,12 @@ func _ready() -> void:
 	add_child(_fade)
 	resized.connect(_layout)
 	_layout()
+	_postcards = TrackPostcards.new()
+	add_child(_postcards)
+	_postcards.rendered.connect(_on_postcard_rendered)
 	_on_track_changed(false)
+	for id in Game.tracks:
+		_postcards.request(id)
 	_on_car_changed(0)
 	_on_mode_changed()
 	_set_focus(0)
@@ -124,21 +132,23 @@ func _build_showroom() -> void:
 
 	var w := Node3D.new()
 	_preview.add_child(w)
+	_rig = Node3D.new()
+	w.add_child(_rig)
 	_cam = Camera3D.new()
 	_cam.fov = 30
 	_cam.position = Vector3(0, CAM_Y, CAM_DIST)
 	_cam.rotation_degrees = Vector3(-9.5, 0, 0)
-	w.add_child(_cam)
+	_rig.add_child(_cam)
 	var key := DirectionalLight3D.new()
 	key.rotation_degrees = Vector3(-38, 30, 0)
 	key.light_energy = 1.15
 	key.light_color = Color(1.0, 0.97, 0.92)
-	w.add_child(key)
+	_rig.add_child(key)
 	var rim := DirectionalLight3D.new()
 	rim.rotation_degrees = Vector3(-20, 160, 0)
 	rim.light_energy = 0.9
 	rim.light_color = Color(0.7, 0.8, 1.0)
-	w.add_child(rim)
+	_rig.add_child(rim)
 	var env := Environment.new()
 	env.background_mode = Environment.BG_CLEAR_COLOR
 	# A studio-softbox sky that only shows up in reflections: the backdrop stays transparent.
@@ -169,10 +179,27 @@ func _build_showroom() -> void:
 	_floor.mesh = plane
 	_floor.position.y = PODIUM_TOP
 	w.add_child(_floor)
-	_mover = Node3D.new()
-	w.add_child(_mover)
-	_pivot = Node3D.new()
-	_mover.add_child(_pivot)
+	# The podium top is solid ground (layer 1, what the wheel rays hit).
+	var ground := StaticBody3D.new()
+	ground.collision_layer = 1
+	var gs := CollisionShape3D.new()
+	var gb := BoxShape3D.new()
+	gb.size = Vector3(11, 1, 11)
+	gs.shape = gb
+	gs.position.y = PODIUM_TOP - 0.5
+	ground.add_child(gs)
+	w.add_child(ground)
+	_shadow = MeshInstance3D.new()
+	var q := PlaneMesh.new()
+	var sm := ShaderMaterial.new()
+	sm.shader = _shadow_shader()
+	# Both it and the floor are transparent and coplanar: depth sorting by AABB centre flips
+	# as the camera orbits and the floor would paint over it. Always draw it after the floor.
+	sm.render_priority = 1
+	q.material = sm
+	_shadow.mesh = q
+	_shadow.visible = false
+	w.add_child(_shadow)
 
 
 static func _floor_shader() -> Shader:
@@ -238,6 +265,7 @@ func _build_rows() -> void:
 		["Opponents", PackedStringArray(), 0],
 		["Traffic", PackedStringArray(["Off", "On"]), int(Game.traffic)],
 		["Time of day", PackedStringArray(["Day", "Night"]), int(Game.night)],
+		["Weather", PackedStringArray(["Clear", "Rain"]), int(Game.weather)],
 	]
 	for i in defs.size():
 		var r := SelectorRow.new(defs[i][0], defs[i][1])
@@ -295,6 +323,7 @@ func _build_settings() -> void:
 	var defs := [
 		["Graphics", PackedStringArray(Game.QUALITY_NAMES), Game.quality],
 		["Speed units", PackedStringArray(["km/h", "mph"]), 0 if Game.units_kmh else 1],
+		["Car damage", PackedStringArray(["Off", "On"]), int(Game.damage)],
 	]
 	for i in defs.size():
 		var r := SelectorRow.new(defs[i][0], defs[i][1])
@@ -340,7 +369,7 @@ func _layout() -> void:
 		x -= cw
 		c.position = Vector2(x, 44 - 16)
 		x -= 10
-	_settings_panel.size = Vector2(minf(640.0, W - 2 * M), minf(560.0, H - 80))
+	_settings_panel.size = Vector2(minf(640.0, W - 2 * M), minf(440.0 + _settings_rows.size() * SelectorRow.H, H - 40))
 	_settings_panel.position = (size - _settings_panel.size) * 0.5
 	for i in _settings_rows.size():
 		_settings_rows[i].position = Vector2(20, 92 + i * SelectorRow.H)
@@ -523,7 +552,6 @@ func _intro() -> void:
 	for c in [_overlay, _start_btn] + _chips:
 		c.modulate.a = 0.0
 		tw.tween_property(c, "modulate:a", 1.0, 0.45).set_delay(0.2)
-	_car_slide = 3.0
 
 
 func _set_focus(i: int) -> void:
@@ -558,6 +586,8 @@ func _on_row_changed(_v: int, row: int) -> void:
 		Row.OPPONENTS:
 			_opp_value = _rows[Row.OPPONENTS].index
 		Row.TIME:
+			_show_backdrop(true)
+		Row.WEATHER:
 			_tint_backdrop()
 	_overlay.queue_redraw()
 
@@ -587,7 +617,23 @@ func _on_track_changed(animate: bool) -> void:
 		_outlines[id] = ProceduralTrack.outline() if id == Game.PROCEDURAL_TRACK \
 			else Nfs3Track.peek_outline(Game.track_dir(id))
 	_track_map.set_outline(_outlines[id])
-	var tex := _track_photo(id)
+	_show_backdrop(animate)
+	# The weather is the track's own: rain on most, snow on some.
+	var snow := id != Game.PROCEDURAL_TRACK and Game.has_game_data() \
+		and Nfs3Horizon.peek_precip(Game.track_dir(id)) == Nfs3Horizon.Precip.SNOW
+	_rows[Row.WEATHER].set_items(PackedStringArray(["Clear", "Snow" if snow else "Rain"]), _rows[Row.WEATHER].index)
+	_tint_backdrop()
+
+
+## The track's rendered postcard for the time of day; the blurred front-end slide until
+## that has been rendered.
+func _show_backdrop(animate: bool) -> void:
+	var id := Game.tracks[_rows[Row.TRACK].index]
+	var tex := _postcards.get_postcard(id, _rows[Row.TIME].index == 1)
+	if tex == null:
+		tex = _track_photo(id)
+	if tex == _photo_front.texture:
+		return
 	# Cross-fade: the old photo becomes the back layer, the new one fades in over it.
 	_photo_back.texture = _photo_front.texture
 	_photo_back.modulate.a = _photo_front.modulate.a
@@ -599,9 +645,19 @@ func _on_track_changed(animate: bool) -> void:
 	_tint_backdrop()
 
 
+func _on_postcard_rendered(id: String) -> void:
+	if id == Game.tracks[_rows[Row.TRACK].index]:
+		_show_backdrop(true)
+
+
 func _tint_backdrop() -> void:
 	var night := _rows[Row.TIME].index == 1
 	var tint := Color(0.22, 0.27, 0.45) if night else Color(0.42, 0.42, 0.45)
+	if _photo_front.texture and not _photos.values().has(_photo_front.texture):
+		# A render already has the time of day in it: just dim it behind the showroom.
+		tint = Color(0.72, 0.72, 0.75)
+	if _rows[Row.WEATHER].index == 1:
+		tint = tint.darkened(0.25).lerp(Color(0.3, 0.33, 0.36), 0.3)
 	for tr in [_photo_back, _photo_front]:
 		create_tween().tween_property(tr, "self_modulate", tint, 0.4)
 
@@ -626,60 +682,28 @@ func _track_photo(id: String) -> Texture2D:
 	return tex
 
 
-func _on_car_changed(dir: int) -> void:
+func _on_car_changed(_dir: int) -> void:
 	var ci := _rows[Row.CAR].index
 	var data: Object = Game.load_car(Game.cars[ci].path, ci)
 	_stats.set_car(data, _settings_rows[1].index == 0)
 	_show_car(data)
-	_car_slide = 2.2 * signf(dir) if dir != 0 else 0.0
 
 
 func _show_car(data: Object) -> void:
 	if _preview_car:
 		_preview_car.queue_free()
 		_preview_car = null
-	var root := Node3D.new()
-	var mat: Material = null
-	if data.texture:
-		var sm := ShaderMaterial.new()
-		sm.shader = preload("res://shaders/car.gdshader")
-		sm.set_shader_parameter("albedo_tex", data.texture)
-		if data.colours.size() > 0:
-			sm.set_shader_parameter("paint", data.colours[0])
-		mat = sm
-	# Model origins sit at different heights per car, so rest the lowest point (the tyres,
-	# or the body if the wheels are baked into it) on the podium top.
-	var low := INF
-	for p in data.body_parts + data.wheels:
-		var mi := MeshInstance3D.new()
-		mi.mesh = p.mesh
-		mi.position = p.center
-		if mat:
-			mi.material_override = mat
-		root.add_child(mi)
-		var is_wheel: bool = p in data.wheels
-		if p.mesh and (data.wheels.is_empty() or is_wheel):
-			low = minf(low, p.center.y + p.mesh.get_aabb().position.y)
-		# Settle on the springs like the race car at rest: the body sinks by the static
-		# sag while the tyres stay on the ground, so they ride up into the arches.
-		if is_wheel:
-			mi.position.y += Car.STATIC_SAG
-	if low != INF:
-		root.position.y = PODIUM_TOP - low
-		if not data.wheels.is_empty():
-			root.position.y -= Car.STATIC_SAG
-	# Soft contact shadow under the body.
-	var shadow := MeshInstance3D.new()
-	var q := PlaneMesh.new()
-	q.size = Vector2(data.half_size.x * 2.6, data.half_size.z * 2.3)
-	var sm2 := ShaderMaterial.new()
-	sm2.shader = _shadow_shader()
-	q.material = sm2
-	shadow.mesh = q
-	root.add_child(shadow)
-	shadow.position.y = PODIUM_TOP + 0.01 - root.position.y
-	_pivot.add_child(root)
-	_preview_car = root
+	# The race car itself, parked (handbrake on, no brake lights) and dropped from a little
+	# height: it lands on its springs, bounces and settles at its real static sag.
+	var car := Car.new()
+	car.setup(data)
+	car.handbrake = true
+	car.set_headlights(false)
+	_floor.get_parent().add_child(car)
+	car.reset_to(Transform3D(Basis(), Vector3(0, PODIUM_TOP, 0)), DROP_HEIGHT)
+	_preview_car = car
+	(_shadow.mesh as PlaneMesh).size = Vector2(data.half_size.x * 2.6, data.half_size.z * 2.3)
+	_shadow.visible = true
 
 
 static var _shadow_sh: Shader
@@ -703,6 +727,7 @@ void fragment() {
 func _apply_settings() -> void:
 	Game.quality = _settings_rows[0].index as Game.Quality
 	Game.units_kmh = _settings_rows[1].index == 0
+	Game.damage = _settings_rows[2].index == 1
 	var ci := _rows[Row.CAR].index
 	_stats.set_car(Game.load_car(Game.cars[ci].path, ci), Game.units_kmh)
 	_overlay.queue_redraw()
@@ -783,8 +808,8 @@ func _on_preview_input(e: InputEvent) -> void:
 		# Holding still before letting go shouldn't fling it with a stale speed.
 		if not e.pressed and Time.get_ticks_msec() - _last_drag_ms > 80:
 			_spin_vel = 0.0
-	elif e is InputEventMouseMotion and _dragging and _pivot:
-		_pivot.rotate_y(e.relative.x * 0.01)
+	elif e is InputEventMouseMotion and _dragging and _rig:
+		_rig.rotate_y(-e.relative.x * 0.01)
 		_spin_vel = clampf(e.velocity.x * 0.01, -12.0, 12.0)
 		_last_drag_ms = Time.get_ticks_msec()
 
@@ -792,12 +817,15 @@ func _on_preview_input(e: InputEvent) -> void:
 func _process(dt: float) -> void:
 	_time += dt
 	if not _dragging:
-		_pivot.rotate_y(dt * _spin_vel)
+		_rig.rotate_y(-dt * _spin_vel)
 		_spin_vel = UiKit.damp(_spin_vel, 0.5, 1.5, dt)
-	_floor.rotation.y = _pivot.rotation.y
-	if not _starting:
-		_car_slide = UiKit.damp(_car_slide, 0.0, 9.0, dt)
-	_mover.position.x = _car_slide
+	if _preview_car:
+		if _starting:
+			# Drive off screen: slide the (frozen) car out along the camera's x.
+			_preview_car.global_position = _slide_from + _rig.basis.x * _car_slide
+		var xf := _preview_car.get_global_transform_interpolated()
+		_shadow.position = Vector3(xf.origin.x, PODIUM_TOP + 0.01, xf.origin.z)
+		_shadow.rotation.y = xf.basis.get_euler().y
 	# Slow drift on the backdrop and a breath of camera motion keep the scene alive.
 	var drift := Vector2(sin(_time * 0.07), cos(_time * 0.05)) * size * 0.02
 	for tr in [_photo_back, _photo_front]:
@@ -826,10 +854,15 @@ func _start() -> void:
 	Game.opponents = _opp_value
 	Game.traffic = _rows[Row.TRAFFIC].index == 1
 	Game.night = _rows[Row.TIME].index == 1
+	Game.weather = _rows[Row.WEATHER].index == 1
 	Game.quality = _settings_rows[0].index as Game.Quality
 	Game.units_kmh = _settings_rows[1].index == 0
+	Game.damage = _settings_rows[2].index == 1
 	Game.save_settings()
 	_start_hot = 1.0
+	if _preview_car:
+		_preview_car.freeze = true
+		_slide_from = _preview_car.global_position
 	var loading := UiKit.label("LOADING  " + Game.track_name(Game.track_id).to_upper(), "display", 34, UiKit.INK)
 	loading.modulate.a = 0.0
 	_fade.add_child(loading)

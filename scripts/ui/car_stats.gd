@@ -15,18 +15,37 @@ var spec := ""
 
 ## Normalised 0..1 ratings against the spread of the stock NFS3 cars.
 static func ratings(data: Object) -> Array:
-	var tq: PackedFloat32Array = data.carp.get(10, PackedFloat32Array([400.0]))
-	var peak := 0.0
-	for v in tq:
-		peak = maxf(peak, v)
-	var mass: float = maxf(data.carp_value(2, 1400.0), 600.0)
 	var top_kmh: float = data.carp_value(15, 70.0) * 3.6
+	var t100 := zero_to_100(data)
+	var accel := inverse_lerp(8.0, 3.0, t100)
+	if t100 < 0.0:
+		var tq: PackedFloat32Array = data.carp.get(10, PackedFloat32Array([400.0]))
+		var peak := 0.0
+		for v in tq:
+			peak = maxf(peak, v)
+		accel = inverse_lerp(0.15, 0.75, peak / maxf(data.carp_value(2, 1400.0), 600.0))
+	# Cornering is limited by the weaker axle (front grip bias).
+	var bias: float = data.carp_value(25, 0.5)
 	return [
 		inverse_lerp(150.0, 370.0, top_kmh),
-		inverse_lerp(0.15, 0.75, peak / mass),
-		inverse_lerp(2.4, 4.0, data.carp_value(30, 3.2)),
+		accel,
+		inverse_lerp(2.4, 4.0, data.carp_value(30, 3.2) * minf(bias, 1.0 - bias) * 2.0),
 		inverse_lerp(7.0, 12.2, data.carp_value(18, 10.0)),
 	]
+
+
+## Seconds from 0 to 100 km/h by the original game's own acceleration table (m/s^2 at every
+## 1 m/s, carp.txt fields 67..74), or -1 without one.
+static func zero_to_100(data: Object) -> float:
+	var acc := PackedFloat32Array()
+	for k in range(67, 75):
+		acc.append_array(data.carp.get(k, PackedFloat32Array()))
+	if acc.size() < 28:
+		return -1.0
+	var t := 0.0
+	for v in 28:
+		t += (27.78 - v if v == 27 else 1.0) / maxf(acc[v], 0.3)
+	return t
 
 
 func set_car(data: Object, kmh: bool) -> void:
@@ -35,18 +54,29 @@ func set_car(data: Object, kmh: bool) -> void:
 		_target[i] = clampf(r[i], 0.04, 1.0)
 	var top: float = data.carp_value(15, 70.0) * 3.6
 	_readout[0] = "%d KM/H" % roundi(top) if kmh else "%d MPH" % roundi(top / 1.609)
-	var tq: PackedFloat32Array = data.carp.get(10, PackedFloat32Array([400.0]))
-	var peak := 0.0
-	for v in tq:
-		peak = maxf(peak, v)
+	var t100 := zero_to_100(data)
+	if t100 > 0.0:
+		_readout[1] = ("0-100  %.1f S" if kmh else "0-62  %.1f S") % t100
+	else:
+		var tq: PackedFloat32Array = data.carp.get(10, PackedFloat32Array([400.0]))
+		var peak := 0.0
+		for v in tq:
+			peak = maxf(peak, v)
+		_readout[1] = "%d NM" % roundi(peak)
 	var ratios: PackedFloat32Array = data.carp.get(8, PackedFloat32Array())
 	var gears := 0
 	for g in range(2, ratios.size()):
 		gears += int(ratios[g] > 0.0)
-	_readout[1] = "%d NM" % roundi(peak)
-	spec = "%d KG" % roundi(data.carp_value(2, 1400.0))
+	spec = ""
+	var cls := int(data.carp_value(1, -1.0))
+	if data.carp.has(1) and cls >= 0 and cls <= 2:
+		spec = "CLASS %s   ·   " % "ABC"[cls]
+	spec += "%d KG" % roundi(data.carp_value(2, 1400.0))
 	if gears > 0:
 		spec += "   ·   %d-SPEED" % gears
+	if data.carp.has(16):
+		var fd: float = data.carp_value(16)
+		spec += "   ·   %s" % ("FWD" if fd >= 1.0 else ("AWD" if fd > 0.0 else "RWD"))
 	queue_redraw()
 
 

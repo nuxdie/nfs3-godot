@@ -30,6 +30,8 @@ var opponents := 3
 var traffic := true
 var units_kmh := true
 var night := false
+var weather := false      # the track's rain or snow
+var damage := true        # crashes dent the cars and cost power (not in the original)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var last_results: Array = []
 
@@ -45,6 +47,9 @@ func _ready() -> void:
 	if "--autotest" in OS.get_cmdline_user_args():
 		var t: Node = load("res://tools/autotest.gd").new()
 		add_child(t)
+	# `godot --path . -- --postcards [track ...]` re-renders the menu's track pictures.
+	if "--postcards" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/postcards.gd").new())
 
 
 # ------------------------------------------------------------------ data files
@@ -172,6 +177,8 @@ func save_settings() -> void:
 	cf.set_value("game", "traffic", traffic)
 	cf.set_value("game", "kmh", units_kmh)
 	cf.set_value("game", "night", night)
+	cf.set_value("game", "weather", weather)
+	cf.set_value("game", "damage", damage)
 	cf.set_value("game", "quality", quality)
 	cf.save(SETTINGS_PATH)
 
@@ -190,6 +197,8 @@ func _load_settings() -> void:
 	traffic = _bool(cf, "traffic", traffic)
 	units_kmh = _bool(cf, "kmh", units_kmh)
 	night = _bool(cf, "night", night)
+	weather = _bool(cf, "weather", weather)
+	damage = _bool(cf, "damage", damage)
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 
 

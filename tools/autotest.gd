@@ -16,14 +16,19 @@ func _ready() -> void:
 	# PlayerController (-10) reads the input actions back.
 	process_physics_priority = -15
 	var args := OS.get_cmdline_user_args()
-	var i := args.find("--autotest")
-	if args.size() > i + 1:
-		Game.track_id = args[i + 1]
-	if args.size() > i + 2:
-		Game.mode = int(args[i + 2])
-	if args.size() > i + 3:
-		Game.car_index = int(args[i + 3])
+	# Positional after --autotest: track, mode, car. Flags (--night, --duration=N, ...) go anywhere.
+	var pos := Array(args.slice(args.find("--autotest") + 1)).filter(func(a: String) -> bool: return not a.begins_with("--"))
+	if pos.size() > 0:
+		Game.track_id = pos[0]
+	if pos.size() > 1:
+		Game.mode = int(pos[1])
+	if pos.size() > 2:
+		Game.car_index = int(pos[2])
 	Game.night = "--night" in args
+	for arg in args:
+		if arg.begins_with("--duration="):
+			duration = float(arg.trim_prefix("--duration="))
+	Game.weather = "--weather" in args
 	Game.laps = 2
 	Game.opponents = 3
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -52,11 +57,23 @@ func _physics_process(dt: float) -> void:
 		_drive(p)
 	if int(t * 2) != int((t - dt) * 2):
 		print("t=%.1f state=%d kmh=%d gear=%d rpm=%d wheels=%d lap=%d node=%d pos=%d slip=%.2f" % [t, race.state, p.kmh(), p.gear, p.rpm, p.grounded_wheels, r.get("lap", -9), r.get("node", -1), race.position_of(p), p.slip])
+		if not race.cops.is_empty():
+			var cs := []
+			for c: Car in race.cops:
+				var ai: AIController = race._controller(c)
+				cs.append("%s%s%d@%dm/%dkmh" % ["B" if c.has_meta("backup") else "", "C" if ai.chasing else ("H" if ai.home >= 0 else "P"),
+					ai.chase_slot, c.global_position.distance_to(p.global_position), c.kmh()])
+			print("  cops heat=%d tickets=%d flat=%s roadblock=%d spikes=%d %s" % [race.heat, race.tickets, p.tyres_flat(), race.roadblock.size(), race.spikes.size(), " ".join(cs)])
 	if shots.size() > 0 and t >= shots[0]:
 		# No framebuffer to read back in --headless runs; telemetry only.
 		if DisplayServer.get_name() != "headless":
 			var img := get_viewport().get_texture().get_image()
-			var path := "shots/auto_%02d.png" % int(shots[0])
+			# --tag=NAME keeps parallel runs (other tracks, weather) from overwriting each other.
+			var tag := ""
+			for arg in OS.get_cmdline_user_args():
+				if arg.begins_with("--tag="):
+					tag = arg.trim_prefix("--tag=") + "_"
+			var path := "shots/auto_%s%02d.png" % [tag, int(shots[0])]
 			img.save_png(path)
 			print("shot ", path)
 		shots.pop_front()

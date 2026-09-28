@@ -21,6 +21,7 @@ class Block:
 	var n_hires_verts: int
 	var n_object_verts: int
 	var road: Array = []        # Array[Poly] (LOD chunk 4, high res)
+	var road_flags := PackedByteArray()   # per road poly; see drivable()
 	var lanes: Array = []       # Array[Poly] (chunk 6, lane markings)
 	var objects: Array = []     # Array[Array[Poly]] block-local scenery
 	var xobjs: Array = []       # Array[Dictionary] {ref, verts, shading, polys, anim}
@@ -93,6 +94,15 @@ static func read_polys(d: PackedByteArray, p: int, n: int) -> Array:
 			poly.anim_period = d[q + 13] >> 3
 		out[i] = poly
 	return out
+
+
+## Whether a road poly (by its flags from the block's poly table) can be driven on. The low
+## nibble is the surface: 14 is the scenery terrain beyond the road's edge, 0 the ground
+## under buildings and past road-closed barriers; every other value is a road, verge or
+## shortcut surface.
+static func drivable(flags: int) -> bool:
+	var surface := flags & 0x0F
+	return surface != 0 and surface != 14
 
 
 static func fixed(d: PackedByteArray, p: int) -> Vector3:
@@ -194,6 +204,12 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		var n_sound := d.decode_u32(p + 24)
 		var n_light := d.decode_u32(p + 28)
 		p += 32
+		if _short(d, p, n_pos * 8 + n_poly * 8, "FRD"):
+			return false
+		# Per road poly: vroad entry, flags, 6 unknown bytes.
+		b.road_flags.resize(n_poly)
+		for i in n_poly:
+			b.road_flags[i] = d[p + n_pos * 8 + i * 8 + 1]
 		p += n_pos * 8 + n_poly * 8 + n_vroad * 12 + n_xobj * 20 + n_polyobj * 20 + n_sound * 16
 		if _short(d, p, n_light * 16, "FRD"):
 			return false

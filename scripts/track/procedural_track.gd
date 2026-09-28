@@ -156,6 +156,7 @@ static func _build_road(root: Node3D, path: TrackPath, ground: float) -> void:
 	mi.mesh = road.commit()
 	mi.material_override = _mat(Color(0.28, 0.28, 0.3), true)
 	root.add_child(mi)
+	root.set_meta("road_material", mi.material_override)   # Reflections wets it in the rain
 	var vi := MeshInstance3D.new()
 	vi.mesh = verge.commit()
 	vi.material_override = _mat(Color(0.45, 0.4, 0.3))

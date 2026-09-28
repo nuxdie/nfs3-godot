@@ -3,21 +3,46 @@ shader_type spatial;
 // mid-range alpha. Opaque texels (lights, tyres, badges) keep their colour and
 // near-zero alpha is cut out. `paint` is the FCE colour at double strength
 // (the paint areas are mid-grey), so it can exceed 1.
+// The windows share the paint alpha but are near-black in the skin: those stay
+// unpainted and get a glossy glass finish instead of tinting to the body colour.
+// The wheels sample the same skin with `wheel` set: unpainted texels there are
+// tyre rubber (matte), and painted rims get a satin rather than a clearcoat finish.
 render_mode cull_disabled;
 
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap;
 uniform vec4 paint : source_color = vec4(0.5, 0.5, 0.5, 1.0);
 uniform float gloss = 0.55;
+uniform bool wheel = false;
 
 void fragment() {
 	vec4 c = texture(albedo_tex, UV);
 	if (c.a < 0.08) {
 		discard;
 	}
-	float painted = 1.0 - smoothstep(0.7, 0.85, c.a);
+	float paint_area = 1.0 - smoothstep(0.7, 0.85, c.a);
+	// Linear luminance; glass is ~0.1 in sRGB (0.01 linear), paint mostly above 0.3.
+	float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+	float glass = paint_area * (1.0 - smoothstep(0.012, 0.05, luma));
+	float painted = paint_area - glass;
 	vec3 body = min(c.rgb * paint.rgb, vec3(1.0));
 	ALBEDO = mix(c.rgb, body, painted);
-	ROUGHNESS = mix(0.6, 1.0 - gloss, painted);
+	ROUGHNESS = mix(mix(0.6, 1.0 - gloss, painted), 0.08, glass);
 	METALLIC = 0.3 * painted;
-	SPECULAR = 0.6;
+	SPECULAR = mix(0.6, 0.8, glass);
+	CLEARCOAT = painted;
+	CLEARCOAT_ROUGHNESS = 0.15;
+	if (wheel) {
+		float rubber = 1.0 - painted;
+		ROUGHNESS = mix(ROUGHNESS, 0.9, rubber);
+		SPECULAR = mix(SPECULAR, 0.3, rubber);
+		CLEARCOAT *= 0.3;
+	}
+	// Back faces are the insides of panels that tuck under the body, seen along the bottom
+	// edges; reflecting the sky they flicker as bright specks, so light them matte.
+	if (!FRONT_FACING) {
+		ROUGHNESS = 1.0;
+		SPECULAR = 0.0;
+		METALLIC = 0.0;
+		CLEARCOAT = 0.0;
+	}
 }

@@ -11,6 +11,7 @@ var display_name := ""
 var texture: Texture2D
 var body_parts: Array[Dictionary] = []   # {name, mesh, center}
 var wheels: Array[Dictionary] = []       # {name, mesh, center} front-left, front-right, rear-left, rear-right
+var popup_lights: Array[Dictionary] = [] # {name, mesh, center}: pop-up headlamps, raised only while the lights are on
 var half_size := Vector3(0.9, 0.6, 2.2)
 var colours: Array[Color] = []
 var lights: Array[Dictionary] = []       # {kind, pos}: kind is the dummy's first letter (H head, T tail, S siren)
@@ -80,7 +81,8 @@ static func parse_carp(text: String) -> Dictionary:
 		var m := re.search(lines[i])
 		if m:
 			var vals := PackedFloat32Array()
-			for s in lines[i + 1].split(","):
+			# Some files end each row with a comma: no empty value after it.
+			for s in lines[i + 1].split(",", false):
 				vals.append(s.to_float())
 			out[int(m.get_string(1))] = vals
 	return out
@@ -120,7 +122,8 @@ func _parse_fce(d: PackedByteArray) -> void:
 	# Parts come in LOD groups: body, then its four wheels, then the next LOD down. Part 0 is the
 	# most detailed body ("high body", or "medium body" on traffic), so its wheels are parts 1-4.
 	# Wheel names in the data are unreliable (left/right swapped, a "left front" at the back), so
-	# slots come from where the wheel sits. Headlight glass is a separate part at the end.
+	# slots come from where the wheel sits. Pop-up headlamps, in the raised position, are a
+	# separate part at the end.
 	var wheel_ids: Array[int] = []
 	for pi in range(1, mini(5, n_parts)):
 		if _part_name(d, pi).contains("wheel"):
@@ -146,6 +149,29 @@ func _parse_fce(d: PackedByteArray) -> void:
 				or HEADER_END + maxi(vert_off, norm_off) + (first_v + nv) * 12 > d.size():
 			error = "damaged car.fce"
 			return
+		# The underside is a few big, near-level quads spanning the full width; the body above
+		# is rounded at the corners, so their corners poke out below the bumpers as dark,
+		# torn-looking slivers. Pull them in towards their centre, tucked under the body.
+		var floor_tris := {}
+		var floor_box := AABB()
+		if pi == 0:
+			var low := INF
+			for vi in nv:
+				low = minf(low, _v(d, HEADER_END + vert_off + (first_v + vi) * 12).y)
+			for ti in nt:
+				var q := HEADER_END + tri_off + (first_t + ti) * TRI_SIZE
+				var p: Array[Vector3] = []
+				for k in 3:
+					var vi := mini(d.decode_u32(q + 4 + k * 4), nv - 1)
+					p.append(_v(d, HEADER_END + vert_off + (first_v + vi) * 12))
+				var n := (p[1] - p[0]).cross(p[2] - p[0])
+				var level := absf(n.y) > 0.97 * n.length()
+				var bottom := maxf(p[0].y, maxf(p[1].y, p[2].y)) < low + 0.3
+				if level and bottom and n.length() * 0.5 > 0.5:
+					for v in p:
+						floor_box = AABB(v, Vector3.ZERO) if floor_tris.is_empty() else floor_box.expand(v)
+					floor_tris[ti] = true
+		var floor_mid := floor_box.get_center()
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		for ti in nt:
@@ -159,11 +185,16 @@ func _parse_fce(d: PackedByteArray) -> void:
 				var np := HEADER_END + norm_off + (first_v + vi) * 12
 				st.set_normal(_v(d, np).normalized())
 				st.set_uv(Vector2(d.decode_float(q + 32 + k * 4), 1.0 - d.decode_float(q + 44 + k * 4)))
-				st.add_vertex(_v(d, vp))
+				var pos := _v(d, vp)
+				if floor_tris.has(ti):
+					pos = floor_mid + (pos - floor_mid) * Vector3(0.84, 1.0, 0.92)
+				st.add_vertex(pos)
 		var part := {"name": pname, "mesh": st.commit(), "center": center}
 		if wi >= 0 and slots_ok:
 			part.slot = slots[wi]
 			wheels.append(part)
+		elif pname.contains("headlight"):
+			popup_lights.append(part)
 		else:
 			# Without a clean set of four wheels, draw them as part of the body.
 			body_parts.append(part)
@@ -186,8 +217,9 @@ static func _bleed_cutout(img: Image) -> void:
 		if alpha[i] < 20:
 			todo.append(i)
 			px[i * 4 + 3] = 0
-	# A few rings outwards from the visible texels are enough for the mip levels in use.
-	for pass_i in 3:
+	# Ring by ring outwards from the visible texels until every cut-out texel has a colour:
+	# the small mip levels average whole blocks, so any key colour left over shows at the edges.
+	while not todo.is_empty():
 		var filled := PackedInt32Array()
 		var left := PackedInt32Array()
 		for i in todo:
@@ -215,6 +247,8 @@ static func _bleed_cutout(img: Image) -> void:
 		# Mark this ring as a source for the next one only after it is complete.
 		for k in range(0, filled.size(), 2):
 			px[filled[k] * 4 + 3] = 1
+		if filled.is_empty():
+			break
 		todo = left
 	for i in w * h:
 		px[i * 4 + 3] = alpha[i]

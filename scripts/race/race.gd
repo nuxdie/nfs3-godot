@@ -5,11 +5,15 @@ extends Node3D
 enum State { LOADING, COUNTDOWN, RACING, FINISHED }
 
 const COP_SPEED_TRIGGER := 33.0   # m/s (~120 km/h) - speeding near a cop starts a pursuit
+const COP_SIGHT := 60.0
 const BUST_RADIUS := 10.0
 const BUST_TIME := 1.6
 const ESCAPE_DISTANCE := 380.0
+const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
+const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
 const MAX_LIGHT_CONES := 16   # MAX_BEAMS in track.gdshader
+const MAX_SHADOWS := 16       # MAX_SHADOWS in track.gdshader
 const TICKET_FINES := [150, 400]   # the third ticket in Hot Pursuit is an arrest; Free Roam keeps fining
 
 var state := State.LOADING
@@ -19,16 +23,22 @@ var racers: Array[Dictionary] = []   # {car, name, lap, max_lap, node, progress,
 var cops: Array[Car] = []
 var traffic_cars: Array[Car] = []
 var roadblock: Array[Car] = []
+var spikes: Array[SpikeStrip] = []
 var race_time := 0.0
 var countdown := 3.5
 var tickets := 0
 var fines := 0
-var pursuit_time := 0.0
-var bust_t := 0.0
-var _cooldown := 0.0
+var pursuit_time := 0.0   # length of the current chase after the player
+var heat := 0              # 0 no chase; 1..3 as it drags on: backup units, roadblocks, spikes
+var _block_t := 0.0        # until the next roadblock may go up
+var _backup_t := 0.0       # until the next backup unit may join
+var _gap := Vector3.INF    # the way through the current roadblock
 var _finish_order: Array = []
+var _results_dirty := false   # a car finished behind the results screen; refresh the table
 var _reset_check_t := 0.0
+var _skid_marks: SkidMarks
 var _track_mat: ShaderMaterial   # NFS3 track only: takes the night tint and headlight cones
+var _reflections: Reflections
 
 @onready var hud: Hud = $HUD
 @onready var cam: ChaseCamera = $Camera
@@ -58,131 +68,19 @@ func _ready() -> void:
 # ------------------------------------------------------------------ world
 
 func _build_world() -> void:
-	var track_root := Node3D.new()
-	track_root.name = "Track"
-	add_child(track_root)
-	var ok := false
-	var hrz: Nfs3Horizon = null
-	if Game.track_id != Game.PROCEDURAL_TRACK and Game.has_game_data():
-		var dir := Game.track_dir(Game.track_id)
-		var t := Nfs3Track.load_dir(dir)
-		if t.error == "" and t.vroad.size() > 10:
-			path = Nfs3TrackBuilder.build(t, track_root)
-			_track_mat = track_root.get_meta("track_material")
-			hrz = Nfs3Horizon.load_dir(dir, Game.night, t.images)
-			ok = true
-		else:
-			push_warning("Track load failed (%s), using procedural track" % t.error)
-	if not ok:
-		path = ProceduralTrack.build(track_root)
-
-	var env := WorldEnvironment.new()
-	var e := Environment.new()
-	var sky := Sky.new()
-	var sm := ProceduralSkyMaterial.new()
-	sm.sky_top_color = Color(0.28, 0.48, 0.82)
-	sm.sky_horizon_color = Color(0.72, 0.8, 0.9)
-	sm.ground_horizon_color = Color(0.72, 0.8, 0.9)
-	sm.ground_bottom_color = Color(0.35, 0.4, 0.35)
-	sky.sky_material = sm
-	e.background_mode = Environment.BG_SKY
-	e.sky = sky
-	e.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	e.ambient_light_energy = 0.8
-	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	e.fog_enabled = true
-	e.fog_light_color = Color(0.72, 0.8, 0.9)
-	e.fog_density = 0.0016
-	e.fog_sky_affect = 0.0
-	env.environment = e
-	add_child(env)
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, -35, 0)
-	sun.light_energy = 1.1
-	add_child(sun)
-	Game.apply_quality(get_viewport(), sun)
-	if Game.night:
-		_make_night(e, sm, sun)
-	if hrz:
-		_apply_horizon(hrz, e, sky, sun)
-
-
-## Dark sky and fog (NFS3's night horizons use near-black fog), a faint moon and a cool
-## ambient so unlit cars still read; the NFS3 track's baked light is dimmed to match.
-func _make_night(e: Environment, sm: ProceduralSkyMaterial, sun: DirectionalLight3D) -> void:
-	sm.sky_top_color = Color(0.01, 0.015, 0.04)
-	sm.sky_horizon_color = Color(0.05, 0.06, 0.1)
-	sm.ground_horizon_color = sm.sky_horizon_color
-	sm.ground_bottom_color = Color(0.01, 0.01, 0.02)
-	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	e.ambient_light_color = Color(0.1, 0.12, 0.2)
-	e.ambient_light_energy = 1.0
-	e.fog_light_color = Color(0.03, 0.035, 0.06)
-	e.fog_density = 0.003
-	sun.light_color = Color(0.6, 0.7, 1.0)
-	sun.light_energy = 0.12
-	sun.shadow_enabled = false
-	if _track_mat:
-		_track_mat.set_shader_parameter("night_tint", Vector3(0.16, 0.18, 0.28))
-
-
-## The track's own sky, fog and ambient light from its .hrz file, replacing the generic
-## ones set up above.
-func _apply_horizon(h: Nfs3Horizon, e: Environment, sky: Sky, sun: DirectionalLight3D) -> void:
-	var mat := ShaderMaterial.new()
-	mat.shader = preload("res://shaders/horizon_sky.gdshader")
-	mat.set_shader_parameter("sky_top", h.sky_top)
-	mat.set_shader_parameter("sky_sun", h.sky_sun)
-	mat.set_shader_parameter("sky_away", h.sky_away)
-	mat.set_shader_parameter("earth_top", h.earth_top)
-	mat.set_shader_parameter("earth_base", h.earth_base)
-	# Band edges as the sine of their elevation from the car at the horizon radius.
-	for k in [["horizon", h.band_mid], ["top", h.band_top], ["bottom", h.band_base]]:
-		mat.set_shader_parameter(k[0], sin(atan2(k[1], h.radius)))
-	# A directional light shines along -Z. The sprite sits no higher than 25 degrees so it
-	# shows in the chase view; the light itself stays high for the shading.
-	var to_sun := sun.transform.basis.z
-	var flat := Vector2(to_sun.x, to_sun.z).normalized()
-	var el := minf(asin(to_sun.y), deg_to_rad(25.0))
-	mat.set_shader_parameter("sun_dir", Vector3(flat.x * cos(el), sin(el), flat.y * cos(el)))
-	if h.sun:
-		mat.set_shader_parameter("sun_tex", ImageTexture.create_from_image(h.sun))
-		mat.set_shader_parameter("sun_size", 0.1 * h.sun.get_width() / 64.0)
-		mat.set_shader_parameter("has_sun", true)
-	if h.clouds and h.cloud_type > 0:
-		var ct := ImageTexture.create_from_image(_with_mipmaps(h.clouds))
-		mat.set_shader_parameter("cloud_tex", ct)
-		mat.set_shader_parameter("cloud_type", h.cloud_type)
-		mat.set_shader_parameter("cloud_bright", h.cloud_bright)
-		mat.set_shader_parameter("cloud_variance", h.cloud_variance)
-	var tint := Vector3(0.12 + 0.88 * h.ambient.r, 0.12 + 0.88 * h.ambient.g, 0.12 + 0.88 * h.ambient.b)
-	mat.set_shader_parameter("tint", tint)
-	if h.panorama:
-		mat.set_shader_parameter("panorama", ImageTexture.create_from_image(h.panorama))
-		mat.set_shader_parameter("has_panorama", true)
-		mat.set_shader_parameter("mirror", h.mirror)
-		mat.set_shader_parameter("pano_rotation", deg_to_rad(h.rotation))
-		mat.set_shader_parameter("pano_top", sin(atan2(h.pixmap_top, h.radius)))
-		mat.set_shader_parameter("pano_bottom", sin(atan2(h.pixmap_bottom, h.radius)))
-		mat.set_shader_parameter("fog_color", h.fog_color)
-		mat.set_shader_parameter("pano_fog", h.fog_on_pixmap / 100.0 * 0.5)
-	sky.sky_material = mat
-	e.fog_light_color = h.fog_color
-	e.fog_density = 0.0003 + h.fog_density * 0.00006
-	# The ambient percentages scale the track's baked light (and the sky's layers above); a
-	# floor keeps night tracks readable (5/10/15 % lands close to the old hand-tuned tint).
-	if _track_mat:
-		_track_mat.set_shader_parameter("night_tint", tint)
-	if Game.night:
-		e.ambient_light_color = Color(tint.x, tint.y, tint.z) * 0.7
-
-
-static func _with_mipmaps(img: Image) -> Image:
-	var m := img.duplicate() as Image
-	if m.is_compressed():
-		m.decompress()
-	m.generate_mipmaps()
-	return m
+	var world := TrackWorld.load_track(Game.track_id)
+	add_child(world.root)
+	path = world.path
+	_track_mat = world.track_mat
+	world.light(self, Game.night, Game.weather, get_viewport())
+	var w: Weather = null
+	if world.horizon or Game.weather:
+		w = Weather.new()
+		add_child(w)
+		w.setup(world.horizon, path, world.env, _track_mat, world.root)
+	_reflections = Reflections.new()
+	add_child(_reflections)
+	_reflections.setup(world.root, path, world.env, _track_mat, w)
 
 
 func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
@@ -190,6 +88,13 @@ func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
 	c.setup(data, tint)
 	# At night every car's headlights light the other cars; weak GPUs keep just the player's.
 	c.set_headlight_beam(Game.night and Game.quality != Game.Quality.LOW)
+	if _skid_marks == null:
+		var sfx := Nfs3Sfx.shared(Game.data_root)
+		_skid_marks = SkidMarks.new([1024, 2048, 4096][Game.quality], sfx.skid_atlas if sfx else null)
+		add_child(_skid_marks)
+	c.add_child(CarEffects.new(_skid_marks))
+	if Game.damage:
+		c.add_child(CarDamage.new())
 	add_child(c)
 	return c
 
@@ -230,6 +135,7 @@ func _spawn_cars() -> void:
 	var audio := CarAudio.new()
 	player.add_child(audio)
 	cam.target = player
+	_reflections.follow(player)
 	hud.player = player
 
 	var grid: Array[Car] = [player]
@@ -273,13 +179,15 @@ func _spawn_cars() -> void:
 		if grid_ai:
 			grid_ai.lane = side * col
 		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1, "max_lap": -1, "node": n,
-			"progress": path.progress_at(grid[i].global_position, n), "total": 0.0, "finished": false, "time": 0.0, "best": INF, "lap_start": 0.0})
+			"progress": path.progress_at(grid[i].global_position, n), "total": 0.0, "finished": false, "time": 0.0, "best": INF, "lap_start": 0.0,
+			"bust_t": 0.0, "cool": 0.0})
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
 		_spawn_cops()
 	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
 		_spawn_traffic()
-	# Racers steer around each other, traffic and parked cruisers; traffic pulls around stopped cars.
-	for c in grid + traffic_cars:
+	# Racers steer around each other, traffic and parked cruisers; traffic pulls around stopped
+	# cars; cops dodge anything but whoever they're chasing.
+	for c in grid + traffic_cars + cops:
 		var ai: AIController = _controller(c)
 		if ai:
 			ai.others = grid + traffic_cars + cops
@@ -298,27 +206,38 @@ func _cop_data(i: int) -> Object:
 	return Game.load_car("", 3)
 
 
+## Cruisers spread round the track: all but one parked on the verge, the last on patrol.
 func _spawn_cops() -> void:
 	var n_cops := 4 if Game.mode == Game.Mode.HOT_PURSUIT else 2
 	for i in n_cops:
 		var node := path.idx(int(path.size() * (i + 0.6) / n_cops))
-		var cop := _make_car(_cop_data(i))
-		cop.is_cop = true
-		cop.display_name = "Police"
-		var ai := AIController.new()
-		ai.role = AIController.Role.COP
-		ai.path = path
-		ai.target = player
-		ai.skill = 1.05
-		# Parked on the right-hand verge (some tracks' walls are 30+ m out, so cap it).
-		ai.lane = _ground_offset(node, minf(path.right_width[node] * 0.55, 7.0))
-		cop.add_child(ai)
-		var au := CarAudio.new()
-		au.volume_db = -6.0
-		cop.add_child(au)
+		var cop := _make_cop(i)
+		var ai := _controller(cop)
+		if i < n_cops - 1:
+			# Parked on the right-hand verge (some tracks' walls are 30+ m out, so cap it).
+			ai.home = node
+			ai.home_lane = _ground_offset(node, minf(path.right_width[node] * 0.55, 7.0))
+			ai.lane = ai.home_lane
+		else:
+			ai.lane = _ground_offset(node, 3.0)
 		cop.reset_to(path.transform_at(node, ai.lane, 0.0))
-		cop.set_meta("home", node)
 		cops.append(cop)
+
+
+func _make_cop(i: int) -> Car:
+	var cop := _make_car(_cop_data(i))
+	cop.is_cop = true
+	cop.display_name = "Police"
+	var ai := AIController.new()
+	ai.role = AIController.Role.COP
+	ai.path = path
+	ai.skill = 1.05
+	ai.cruise_speed = 22.0
+	cop.add_child(ai)
+	var au := CarAudio.new()
+	au.volume_db = -6.0
+	cop.add_child(au)
+	return cop
 
 
 func _spawn_traffic() -> void:
@@ -362,7 +281,8 @@ func _physics_process(dt: float) -> void:
 			_update_pursuit(dt)
 			_check_resets(dt)
 		State.FINISHED:
-			# The rest of the field races on behind the results screen.
+			# The rest of the field races on behind the results screen, on the same clock.
+			race_time += dt
 			_update_progress()
 			_check_resets(dt)
 	if Input.is_action_just_pressed("reset_car") and state == State.RACING:
@@ -370,6 +290,7 @@ func _physics_process(dt: float) -> void:
 
 
 func _process(_dt: float) -> void:
+	_update_car_shadows()
 	if Game.night:
 		_update_headlight_cones()
 
@@ -379,6 +300,37 @@ func _unhandled_input(e: InputEvent) -> void:
 		player.set_headlights(not player.headlights_on)
 	elif e.is_action_pressed("high_beam") and player:
 		player.set_high_beam(not player.high_beam)
+
+
+## Hands the track shader the drop shadows of the MAX_SHADOWS cars nearest the camera.
+func _update_car_shadows() -> void:
+	var cam3d := get_viewport().get_camera_3d()
+	if _track_mat == null or cam3d == null:
+		return
+	var eye := cam3d.global_position
+	var near: Array = []
+	for c: Car in racers.map(func(r): return r.car) + traffic_cars + cops + roadblock:
+		if not is_instance_valid(c) or not c.is_visible_in_tree():
+			continue
+		var d := c.global_position.distance_squared_to(eye)
+		if d < 200.0 * 200.0:
+			near.append([d, c])
+	near.sort_custom(func(a, b): return a[0] < b[0])
+	var pos := PackedVector3Array()
+	var ax := PackedVector3Array()
+	var az := PackedVector3Array()
+	for k in mini(near.size(), MAX_SHADOWS):
+		var f: Array = near[k][1].shadow_footprint()
+		pos.append(f[0])
+		ax.append(f[1])
+		az.append(f[2])
+	pos.resize(MAX_SHADOWS)
+	ax.resize(MAX_SHADOWS)
+	az.resize(MAX_SHADOWS)
+	_track_mat.set_shader_parameter("shadow_count", mini(near.size(), MAX_SHADOWS))
+	_track_mat.set_shader_parameter("shadow_pos", pos)
+	_track_mat.set_shader_parameter("shadow_x", ax)
+	_track_mat.set_shader_parameter("shadow_z", az)
 
 
 ## Hands the track shader the light cones (headlights, reversing lamps) nearest the camera;
@@ -449,6 +401,9 @@ func _update_progress() -> void:
 		if a.finished:
 			return a.time < b.time
 		return a.total > b.total)
+	if _results_dirty:
+		_results_dirty = false
+		hud.update_results(_result_rows())
 
 
 func _lap_done(r: Dictionary) -> void:
@@ -477,6 +432,8 @@ func _lap_done(r: Dictionary) -> void:
 			ai.cruise_speed = 18.0
 		if r.car == player:
 			_end_race(false)
+		elif state == State.FINISHED:
+			_results_dirty = true
 	elif r.car == player and r.lap == Game.laps - 1:
 		hud.flash("FINAL LAP", 2.0)
 
@@ -499,13 +456,7 @@ func _end_race(arrested: bool) -> void:
 	player.add_child(auto)
 	if pc:
 		pc.queue_free()
-	var rows := []
-	for r in racers:
-		rows.append({"name": r.name, "you": r.car == player,
-			"time": Hud.fmt_time(r.time) if r.finished else "--:--.--",
-			"best": Hud.fmt_time(r.best) if r.best < INF else "--",
-			"t": r.time if r.finished else INF})
-	Game.last_results = rows
+	var rows := _result_rows()
 	var title := "ARRESTED" if arrested else "RACE COMPLETE"
 	if not arrested and Game.mode != Game.Mode.TIME_TRIAL:
 		title = "FINISHED %s" % Hud.ordinal(position_of(player))
@@ -513,6 +464,18 @@ func _end_race(arrested: bool) -> void:
 	if Game.mode == Game.Mode.HOT_PURSUIT:
 		extra = "Tickets: %d   Fines: $%d" % [tickets, fines]
 	hud.show_results(title, rows, extra)
+
+
+## The leaderboard in its current order; also kept in Game.last_results.
+func _result_rows() -> Array:
+	var rows := []
+	for r in racers:
+		rows.append({"name": r.name, "you": r.car == player,
+			"time": Hud.fmt_time(r.time) if r.finished else "--:--.--",
+			"best": Hud.fmt_time(r.best) if r.best < INF else "--",
+			"t": r.time if r.finished else INF})
+	Game.last_results = rows
+	return rows
 
 
 func position_of(car: Car) -> int:
@@ -532,55 +495,104 @@ func player_racer() -> Dictionary:
 # ------------------------------------------------------------------ pursuit
 
 func _update_pursuit(dt: float) -> void:
-	_cooldown = maxf(_cooldown - dt, 0.0)
-	var any_chasing := false
-	var nearest := INF
+	for r in racers:
+		r.cool = maxf(r.cool - dt, 0.0)
+	for cop in cops.duplicate():
+		var ai := _controller(cop)
+		if ai.chasing:
+			if not is_instance_valid(ai.target) or cop.global_position.distance_to(ai.target.global_position) > ESCAPE_DISTANCE:
+				var was_player := ai.target == player
+				_stop_chase(cop)
+				if was_player and _chasers(player).is_empty():
+					hud.flash("Evaded", 1.5)
+		else:
+			var speeder := _speeder_near(cop)
+			if speeder:
+				_start_chase(cop, speeder)
+
+	var on_player := _chasers(player)
+	hud.pursuit = not on_player.is_empty()
+	if on_player.is_empty():
+		pursuit_time = 0.0
+		heat = 0
+		_dismiss_backup()
+	else:
+		pursuit_time += dt
+		var h := mini(1 + int(pursuit_time / HEAT_STEP), 3)
+		if h > heat and heat > 0:
+			hud.flash("Heat level %d" % h, 1.5, "alert")
+		heat = h
+		# Backup units: one per heat level above the first.
+		_backup_t -= dt
+		var backup := cops.filter(func(c): return c.has_meta("backup")).size()
+		if backup < heat - 1 and _backup_t <= 0.0:
+			_spawn_backup()
+			_backup_t = 8.0
+		_block_t -= dt
+		if heat >= 2 and roadblock.is_empty() and _block_t <= 0.0:
+			_spawn_roadblock(heat >= 3)
+
+	# Busted: stopped with a cop right on you. Rivals get held up; the player gets a ticket.
+	for r in racers:
+		var nearest := INF
+		for cop in _chasers(r.car):
+			nearest = minf(nearest, cop.global_position.distance_to(r.car.global_position))
+		if nearest < BUST_RADIUS and r.car.linear_velocity.length() < 3.0:
+			r.bust_t += dt
+			if r.bust_t > BUST_TIME:
+				r.bust_t = 0.0
+				if r.car == player:
+					_bust()
+					if state != State.RACING:
+						return
+				else:
+					_bust_rival(r)
+		else:
+			r.bust_t = 0.0
+	_clear_roadblock()
+
+
+## Racer speeding within sight of a cop that isn't on a chase, preferring the player.
+func _speeder_near(cop: Car) -> Car:
+	var found: Car = null
+	for r in racers:
+		var c: Car = r.car
+		if r.finished or r.cool > 0.0 or c.speed < COP_SPEED_TRIGGER:
+			continue
+		if cop.global_position.distance_to(c.global_position) < COP_SIGHT:
+			if c == player:
+				return c
+			found = c if found == null else found
+	return found
+
+
+func _chasers(target: Car) -> Array[Car]:
+	var out: Array[Car] = []
 	for cop in cops:
 		var ai := _controller(cop)
-		var d := cop.global_position.distance_to(player.global_position)
-		if not ai.chasing:
-			if _cooldown <= 0.0 and d < 60.0 and player.kmh() / 3.6 > COP_SPEED_TRIGGER:
-				ai.chasing = true
-				cop.enable_siren(true)
-				cop.get_children().filter(func(n): return n is CarAudio).map(func(a): a.siren = true)
-				hud.flash("PURSUIT!", 1.5, "alert")
-		elif d > ESCAPE_DISTANCE:
-			_stop_chase(cop)
-			hud.flash("Evaded", 1.5)
-		if ai.chasing:
-			any_chasing = true
-			nearest = minf(nearest, d)
-	if any_chasing:
-		pursuit_time += dt
-		if pursuit_time > 18.0 and roadblock.is_empty() and Game.mode == Game.Mode.HOT_PURSUIT:
-			_spawn_roadblock()
-	else:
-		pursuit_time = 0.0
-	hud.pursuit = any_chasing
-	# Busted: stopped with a cop right on you.
-	if any_chasing and nearest < BUST_RADIUS and player.linear_velocity.length() < 3.0:
-		bust_t += dt
-		if bust_t > BUST_TIME:
-			_bust()
-	else:
-		bust_t = 0.0
-	# Clear the roadblock once it's well behind the player.
-	if not roadblock.is_empty():
-		var rb_node: int = roadblock[0].get_meta("node")
-		var pr := player_racer()
-		# Signed distance past the roadblock, wrapped so a block just after the start line works.
-		var behind := fposmod(path.cumulative[pr.node] - path.cumulative[rb_node] + path.length * 0.5, path.length) - path.length * 0.5
-		if behind > 150.0:
-			for n in roadblock:
-				n.queue_free()
-			roadblock.clear()
-			# The next one only after another long stretch of chase.
-			pursuit_time = 0.0
+		if ai.chasing and ai.target == target:
+			out.append(cop)
+	return out
+
+
+func _start_chase(cop: Car, target: Car) -> void:
+	var ai := _controller(cop)
+	# Every second cop on the same car goes round it to block instead of ramming.
+	ai.chase_slot = _chasers(target).size() % 2
+	if target == player and ai.chase_slot == 0 and _chasers(target).is_empty():
+		hud.flash("PURSUIT!", 1.5, "alert")
+	ai.target = target
+	ai.chasing = true
+	cop.enable_siren(true)
+	for a in cop.get_children():
+		if a is CarAudio:
+			a.siren = true
 
 
 func _stop_chase(cop: Car) -> void:
 	var ai := _controller(cop)
 	ai.chasing = false
+	ai.target = null
 	cop.enable_siren(false)
 	for a in cop.get_children():
 		if a is CarAudio:
@@ -588,11 +600,10 @@ func _stop_chase(cop: Car) -> void:
 
 
 func _bust() -> void:
-	bust_t = 0.0
 	tickets += 1
-	for cop in cops:
+	for cop in _chasers(player):
 		_stop_chase(cop)
-	_cooldown = 10.0
+	player_racer().cool = 10.0
 	if Game.mode == Game.Mode.HOT_PURSUIT and tickets >= MAX_TICKETS:
 		hud.flash("BUSTED - you're under arrest!", 3.0, "alert")
 		_end_race(true)
@@ -602,11 +613,78 @@ func _bust() -> void:
 	hud.flash("BUSTED! Ticket #%d - $%d fine" % [tickets, fine], 3.0, "alert")
 
 
-func _spawn_roadblock() -> void:
+## A rival pulled over: it sits out a few seconds while the cop writes the ticket.
+func _bust_rival(r: Dictionary) -> void:
+	for cop in _chasers(r.car):
+		_stop_chase(cop)
+	r.cool = RIVAL_HOLD + 8.0
+	hud.flash("%s busted!" % r.name, 2.0)
+	var ai := _controller(r.car)
+	if ai == null:
+		return
+	ai.enabled = false
+	get_tree().create_timer(RIVAL_HOLD, false, true).timeout.connect(func() -> void:
+		if is_instance_valid(ai):
+			ai.enabled = true)
+
+
+## Called in from further back up the road, already on the player's tail.
+func _spawn_backup() -> void:
+	var pr := player_racer()
+	var fwd := player.linear_velocity.dot(path.forward(pr.node)) >= 0.0
+	var dir := 1 if fwd else -1
+	# Out of sight behind the player, at least a road's bend or two back.
+	var n: int = pr.node
+	var d := 0.0
+	while d < 170.0:
+		var m := path.idx(n - dir)
+		d += path.points[m].distance_to(path.points[n])
+		n = m
+	var cop := _make_cop(cops.size())
+	var ai := _controller(cop)
+	ai.lane = _ground_offset(n, 0.0)
+	ai.reverse_dir = not fwd
+	ai.enabled = true
+	cop.set_meta("backup", true)
+	ai.gap = _gap
+	var xf := path.transform_at(n, ai.lane, 0.0)
+	if not fwd:
+		xf = xf.rotated_local(Vector3.UP, PI)
+	cop.reset_to(xf)
+	# Arrives at speed rather than from a standstill.
+	cop.linear_velocity = cop.forward_dir() * minf(player.linear_velocity.length(), 40.0)
+	cops.append(cop)
+	_add_obstacles([cop])
+	_start_chase(cop, player)
+	ai.others = racers.map(func(r): return r.car) + traffic_cars + cops + roadblock
+
+
+## Backup units go home once the chase is off: out of the player's sight, they vanish.
+func _dismiss_backup() -> void:
+	for cop in cops.duplicate():
+		if cop.has_meta("backup") and not _controller(cop).chasing \
+				and cop.global_position.distance_to(player.global_position) > 120.0:
+			cops.erase(cop)
+			cop.queue_free()
+
+
+## Every AI car steers around `cars` from now on.
+func _add_obstacles(cars: Array) -> void:
+	for c: Car in racers.map(func(r): return r.car) + traffic_cars + cops:
+		var ai := _controller(c)
+		if ai:
+			ai.others = ai.others.filter(func(o): return is_instance_valid(o))
+			for o in cars:
+				if o != c and not ai.others.has(o):
+					ai.others.append(o)
+
+
+## Two cruisers parked across the road a little way ahead of the player, with a gap on one
+## side to squeeze through. At top heat a spike strip lies across the gap.
+func _spawn_roadblock(with_spikes: bool) -> void:
 	var pr := player_racer()
 	var n := path.idx(pr.node + 70)
 	var w := minf(path.left_width[n], path.right_width[n])
-	# Two cruisers across the road with a gap on one side to squeeze through.
 	var gap_side := -1.0 if randf() < 0.5 else 1.0
 	for k in 2:
 		var cop := _make_car(_cop_data(k))
@@ -622,12 +700,59 @@ func _spawn_roadblock() -> void:
 	# its centre), where there's road even when the walls are far apart. They also steer around
 	# the cruisers like any other car.
 	var gap_lane := (0.05 * w + 3.9) * gap_side
+	_add_obstacles(roadblock)
 	for r in racers:
 		var ai := _controller(r.car)
 		if ai:
-			ai.others.append_array(roadblock)
 			ai.lane = gap_lane
-	hud.flash("Roadblock ahead!", 2.0, "alert")
+	# Chasing cops thread the gap too, aiming a little past the cruisers.
+	_gap = path.transform_at(path.idx(n + 2), gap_lane, 0.0).origin
+	for cop in cops:
+		_controller(cop).gap = _gap
+	if with_spikes:
+		# A few metres short of the cruisers, covering the gap.
+		var m := _node_behind(n, 7.0)
+		var strip := SpikeStrip.new(7.0)
+		add_child(strip)
+		var xf := path.transform_at(m, gap_lane, 0.0)
+		var q := PhysicsRayQueryParameters3D.create(xf.origin + xf.basis.y * 3.0, xf.origin - xf.basis.y * 3.0, 1)
+		var hit := get_world_3d().direct_space_state.intersect_ray(q)
+		if not hit.is_empty():
+			xf.origin = hit.position
+		strip.global_transform = xf
+		strip.punctured.connect(_on_punctured)
+		spikes.append(strip)
+	hud.flash("Roadblock ahead!" if not with_spikes else "Roadblock - spikes!", 2.0, "alert")
+
+
+## Takes the roadblock down once it's well behind the player.
+func _clear_roadblock() -> void:
+	if roadblock.is_empty():
+		return
+	var rb_node: int = roadblock[0].get_meta("node")
+	var pr := player_racer()
+	# Signed distance past the roadblock, wrapped so a block just after the start line works.
+	var behind := fposmod(path.cumulative[pr.node] - path.cumulative[rb_node] + path.length * 0.5, path.length) - path.length * 0.5
+	# A chase that's ended short of it (the player turned back, or got busted) takes it down too.
+	if behind > 150.0 or (heat == 0 and absf(behind) > 300.0):
+		for c in roadblock:
+			c.queue_free()
+		for sp in spikes:
+			sp.queue_free()
+		roadblock.clear()
+		spikes.clear()
+		_gap = Vector3.INF
+		for cop in cops:
+			_controller(cop).gap = _gap
+		# The next one only after another stretch of chase.
+		_block_t = 20.0
+
+
+func _on_punctured(c: Car) -> void:
+	if c == player:
+		hud.flash("Spiked! Tyres shredded", 2.5, "alert")
+	elif not c.is_cop and position_of(c) > 0:
+		hud.flash("%s hit the spikes" % c.display_name, 1.5)
 
 
 # ------------------------------------------------------------------ resets
@@ -648,11 +773,23 @@ func _check_resets(dt: float) -> void:
 		var off: float = absf(path.lateral(c.global_position, n))
 		var fell: bool = c.global_position.y < path.points[n].y - 25.0
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
-		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + 5.0
-		# AI wedged against scenery that backing up hasn't cleared.
-		var stranded: bool = ai != null and ai.stranded_t > 7.0
+		# A shortcut can run further out than the virtual road's walls, so only off the
+		# drivable surface.
+		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + 5.0 and not _on_road(c)
+		# AI wedged against scenery that backing up hasn't cleared. A cop out of the player's
+		# sight gets put back on the road sooner: nobody sees it jump.
+		var give_up := 3.0 if c.is_cop and c.global_position.distance_to(player.global_position) > 150.0 else 7.0
+		var stranded: bool = ai != null and ai.stranded_t > give_up
 		if c.is_stuck_upside_down() or fell or lost or stranded:
 			_respawn(c)
+
+
+## Whether the car is over the track's drivable surface (the "Road" body, not the terrain).
+func _on_road(c: Car) -> bool:
+	var from := c.global_position + Vector3.UP
+	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 12.0, 1, [c.get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return not hit.is_empty() and hit.collider.name == "Road"
 
 
 func _respawn(c: Car) -> void:
