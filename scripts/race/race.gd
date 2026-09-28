@@ -866,8 +866,9 @@ func _check_resets(dt: float) -> void:
 		var fell: bool = c.global_position.y < path.points[n].y - 25.0
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
 		# A shortcut can run further out than the virtual road's walls, so only off the
-		# drivable surface.
-		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + path.lost_margin and not _on_road(c)
+		# drivable surface. In free roam the player may wander off: the reset key brings them back.
+		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + path.lost_margin and not _on_road(c) \
+			and not (c == player and Game.mode == Game.Mode.FREE_ROAM)
 		# AI wedged against scenery that backing up hasn't cleared. A cop out of the player's
 		# sight gets put back on the road sooner: nobody sees it jump.
 		var give_up := 3.0 if c.is_cop and c.global_position.distance_to(player.global_position) > 150.0 else 7.0

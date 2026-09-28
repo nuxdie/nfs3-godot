@@ -110,6 +110,11 @@ func _physics_process(dt: float) -> void:
 	elif fwd_speed < desired - 1.0:
 		car.throttle = clampf((desired - fwd_speed) / 6.0, 0.25, 1.0)
 		car.brake = 0.0
+	elif fwd_speed > desired + 1.0 and role != Role.RACER and fwd_speed < desired + 3.0:
+		# Cruising a little over: lift and let engine braking settle it. Braking here
+		# drops it under, the hold throttle carries it back over, and the brake lights flicker.
+		car.throttle = 0.0
+		car.brake = 0.0
 	elif fwd_speed > desired + 1.0:
 		# Brake firmly: the limit already allows for the braking distance, so a gentle
 		# proportional brake arrives at the bend too fast.

@@ -89,6 +89,8 @@ static func build(root: Node3D, lay: ProceduralTrack.Layout) -> void:
 		TrackSurface.set_images(b, dust)
 
 	_road(root, lay, road_mat, ground_mat, road_body)
+	_branch_roads(root, lay, road_mat, ground_mat, road_body)
+	_road_marks(lay, road_mat)
 	_sides(root, lay, ground_mat, terrain_body)
 	_terrain(root, lay, ground_mat, terrain_body)
 	_water(root, lay, fine)
@@ -134,7 +136,10 @@ static func _noise_tex(freq: float, size: int) -> NoiseTexture2D:
 ## How far the verge rises above the road: a kerb and pavement in town, none elsewhere
 ## (the tunnel's and bridges' paved strips are flush, so a car along their walls can't ride
 ## up a kerb).
-static func _kerb(lay: ProceduralTrack.Layout, i: int) -> float:
+static func _kerb(lay: ProceduralTrack.Layout, i: int, s := 0.0) -> float:
+	# Dropped where a street leaves.
+	if s != 0.0 and (lay.gap_r if s > 0.0 else lay.gap_l)[i]:
+		return 0.0
 	return 0.12 if lay.zone[i] == ProceduralTrack.Zone.TOWN and lay.kind[i] == ProceduralTrack.Kind.OPEN else 0.0
 
 
@@ -149,22 +154,19 @@ static func _road(root: Node3D, lay: ProceduralTrack.Layout, road_mat: Material,
 	var road := Strip.new()
 	var verge_l := Strip.new()
 	var verge_r := Strip.new()
-	var style := PackedFloat32Array()
+	var style := centre_style(lay)
 	for i in lay.n:
 		var p := lay.pts[i]
 		var r := lay.right[i]
 		var v := i * ProceduralTrack.STEP
-		# Double yellow through the hills and round the blind bends.
-		var z := lay.zone[i]
-		style.append(1.0 if z == ProceduralTrack.Zone.MOUNTAIN or z == ProceduralTrack.Zone.FOREST and absf(lay.curv[i]) > 1.0 / 150.0 else 0.0)
 		road.rows.append(PackedVector3Array([p - r * half, p + r * half]))
 		road.uvs.append(PackedVector2Array([Vector2(-half, v), Vector2(half, v)]))
 		road.colors.append(PackedColorArray([Color.WHITE, Color.WHITE]))
-		var kerb := _kerb(lay, i)
 		var paved := _paved(lay, i)
 		var vc := Color(0, 1, 0) if paved else Color(1, 0, 0)
 		var e := lay.edge[i]
 		for s: float in [-1.0, 1.0]:
+			var kerb := _kerb(lay, i, s)
 			var inner := p + r * half * s
 			# A sloped kerb a wheel rolls up, not a step that trips the car.
 			var top := inner + r * s * (0.45 if kerb > 0.0 else 0.0) + lay.up[i] * kerb
@@ -177,11 +179,6 @@ static func _road(root: Node3D, lay: ProceduralTrack.Layout, road_mat: Material,
 			st.rows.append(pts)
 			st.uvs.append(PackedVector2Array([Vector2.ZERO, Vector2.ZERO, Vector2.ZERO]))
 			st.colors.append(cols)
-	# Held a few nodes either side so it doesn't flicker on and off.
-	var raw := style.duplicate()
-	for i in lay.n:
-		for k in range(-3, 4):
-			style[i] = maxf(style[i], raw[lay.idx(i + k)])
 	for st in [road, verge_l, verge_r]:
 		st.compute_normals()
 	var faces := PackedVector3Array()
@@ -195,6 +192,21 @@ static func _road(root: Node3D, lay: ProceduralTrack.Layout, road_mat: Material,
 	for k in surf.size():
 		tex.append({S_ASPHALT: 0, S_GRAVEL: 1, S_CONCRETE: 2}.get(surf[k], 3))
 	_add_shape(body, faces, surf, tex)
+
+
+## The centre line at each node: 1 a double yellow (no passing: through the mountains and
+## round the forest's blind bends), 0 a dashed one.
+static func centre_style(lay: ProceduralTrack.Layout) -> PackedFloat32Array:
+	var raw := PackedFloat32Array()
+	for i in lay.n:
+		var z := lay.zone[i]
+		raw.append(1.0 if z == ProceduralTrack.Zone.MOUNTAIN or z == ProceduralTrack.Zone.FOREST and absf(lay.curv[i]) > 1.0 / 150.0 else 0.0)
+	# Held a few nodes either side so it doesn't flicker on and off.
+	var style := raw.duplicate()
+	for i in lay.n:
+		for k in range(-3, 4):
+			style[i] = maxf(style[i], raw[lay.idx(i + k)])
+	return style
 
 
 ## Meshes `st` in chunks of CHUNK nodes (so each can be culled), skipping the segments
@@ -297,6 +309,138 @@ static func _add_shape(body: StaticBody3D, faces: PackedVector3Array, surf: Pack
 	TrackSurface.tag(cs, surf, tex)
 
 
+# --- Roads off the lap -----------------------------------------------------------------------
+
+## The roads off the lap (ProceduralTrack.Branch): a strip along each one's centre line over
+## its levelled corridor, draped onto the road's verge at its mouth(s), solid to drive on.
+## Streets are asphalt (the road's own material, its marking drawn for a side street) between
+## kerbed pavements; the rest gravel, two wheel ruts with grass up the middle, on shoulders
+## that slope down to the land.
+static func _branch_roads(root: Node3D, lay: ProceduralTrack.Layout, road_mat: Material, ground_mat: Material,
+		body: StaticBody3D) -> void:
+	var faces := PackedVector3Array()
+	var surf := PackedByteArray()
+	var gravel := Color(1, 0, 0)
+	var paved := Color(0, 1, 0)
+	var grass := Color(0, 0, 0)
+	for b in lay.branches:
+		var street: Array = []
+		var sides: Array = []
+		# Across (m from the centre, its half width scaled in), up (m), colour, surface.
+		if b.paved:
+			street = [[-1.0, 0.0, 0.0, Color.WHITE, S_ASPHALT], [1.0, 0.0, 0.0, Color.WHITE, S_ASPHALT]]
+			sides = [[-1.0, -3.0, -0.3, grass, S_GRASS], [-1.0, -2.6, 0.13, paved, S_CONCRETE],
+				[-1.0, -0.35, 0.13, paved, S_CONCRETE], [-1.0, 0.0, 0.0, paved, S_CONCRETE]]
+		else:
+			street = [[-1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL], [-0.4, 0.0, 0.0, gravel, S_GRAVEL],
+				[0.0, 0.0, 0.03, Color(0.3, 0, 0), S_GRAVEL], [0.4, 0.0, 0.0, gravel, S_GRAVEL],
+				[1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL]]
+			sides = [[-1.0, -1.5, -0.35, grass, S_GRASS], [-1.0, 0.0, 0.0, Color(0.8, 0, 0), S_GRAVEL]]
+		var mirrored := []
+		for c: Array in sides:
+			mirrored.push_front([-c[0], -c[1], c[2], c[3], c[4]])
+		var mat := road_mat if b.paved else ground_mat
+		_branch_strip(root, lay, b, street, mat, faces, surf, true)
+		for cols: Array in [sides, mirrored]:
+			_branch_strip(root, lay, b, cols, ground_mat, faces, surf, false)
+	if faces.is_empty():
+		return
+	var tex := PackedInt32Array()
+	for k in surf.size():
+		tex.append({S_ASPHALT: 0, S_GRAVEL: 1, S_CONCRETE: 2}.get(surf[k], 3))
+	_add_shape(body, faces, surf, tex)
+
+
+## One strip along branch `b`, its columns [scale of the half width, m beyond it, m up,
+## colour, surface] left to right; the carriageway's UVs are the road shader's (m across, m
+## along), with UV2.y set to draw a side street's markings.
+static func _branch_strip(root: Node3D, lay: ProceduralTrack.Layout, b: ProceduralTrack.Branch, cols: Array,
+		mat: Material, faces: PackedVector3Array, surf: PackedByteArray, carriageway: bool) -> void:
+	var m := b.pts.size()
+	var w := cols.size()
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var uv2 := PackedVector2Array()
+	var colors := PackedColorArray()
+	for k in m:
+		var p := b.pts[k]
+		var t := b.pts[mini(k + 1, m - 1)] - b.pts[maxi(k - 1, 0)]
+		t.y = 0.0
+		var r := t.normalized().cross(Vector3.UP).normalized()
+		var h := b.half_at(k * ProceduralTrack.BSTEP)
+		for c: Array in cols:
+			var x: float = c[0] * h + c[1]
+			var q := p + r * x
+			q.y = p.y + c[2]
+			# Onto the road where it meets it.
+			var deck := lay.deck_y(q.x, q.z)
+			if not is_nan(deck):
+				q.y = maxf(q.y, deck + 0.03) if c[2] >= 0.0 else minf(q.y, deck - 0.1)
+			verts.append(q)
+			uvs.append(Vector2(x, k * ProceduralTrack.BSTEP))
+			uv2.append(Vector2(0.0, 1.0))
+			colors.append(c[3])
+	var nrms := PackedVector3Array()
+	for k in m:
+		for j in w:
+			var along := verts[mini(k + 1, m - 1) * w + j] - verts[maxi(k - 1, 0) * w + j]
+			var across := verts[k * w + mini(j + 1, w - 1)] - verts[k * w + maxi(j - 1, 0)]
+			var nrm := across.cross(along).normalized()
+			nrms.append(nrm if nrm.y >= 0.0 else -nrm)
+	var idx := PackedInt32Array()
+	for k in m - 1:
+		for j in w - 1:
+			var a := k * w + j
+			_quad_up(idx, verts, a, a + 1, a + w + 1, a + w)
+			var code: int = cols[j][4] if cols[j][4] == cols[j + 1][4] else cols[j + 1][4]
+			surf.append_array([code, code])
+	for k in idx:
+		faces.append(verts[k])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = nrms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_TEX_UV2] = uv2
+	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_INDEX] = idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.visibility_range_end = 900.0
+	root.add_child(mi)
+
+
+## Where the road's paint changes for the branches: its edge line broken across each mouth,
+## and a zebra crossing before each town street.
+static func _road_marks(lay: ProceduralTrack.Layout, road_mat: ShaderMaterial) -> void:
+	var gaps: Array[Vector4] = []
+	var crossings: Array[float] = []
+	for b in lay.branches:
+		for c: int in [b.from, b.to]:
+			if c < 0 or gaps.size() >= 32:
+				continue
+			var v := c * ProceduralTrack.STEP
+			var r := b.half + 5.0
+			gaps.append(Vector4(v - r, v + r, b.side, 0.0))
+		if b.kind == "street":
+			var v := b.from * ProceduralTrack.STEP - b.half - 4.0
+			var dup := false
+			for c in crossings:
+				dup = dup or absf(c - v) < 10.0
+			if not dup and crossings.size() < 16:
+				crossings.append(v)
+	while gaps.size() < 32:
+		gaps.append(Vector4(-1e6, -1e6, 0.0, 0.0))
+	while crossings.size() < 16:
+		crossings.append(-1e6)
+	road_mat.set_shader_parameter("gaps", gaps)
+	road_mat.set_shader_parameter("crossings", crossings)
+
+
 # --- The land along the road -----------------------------------------------------------------
 
 ## How far out the cross-section reaches on side `s` of node `i`: short of the centre of a
@@ -327,7 +471,7 @@ static func _sides(root: Node3D, lay: ProceduralTrack.Layout, mat: Material, bod
 				q.y = lay.side_y(i, s, d)
 				if dd == 0.0:
 					# Meet the verge exactly.
-					q = p + lay.right[i] * e * s + lay.up[i] * (_kerb(lay, i) if _paved(lay, i) else -0.12)
+					q = p + lay.right[i] * e * s + lay.up[i] * (_kerb(lay, i, s) if _paved(lay, i) else -0.12)
 				row.append(q)
 				cols.append(Color(0.6, 0, 0) if dd == 0.0 and not _paved(lay, i) else Color(0, 0, 0))
 			if s < 0.0:

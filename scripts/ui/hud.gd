@@ -384,7 +384,9 @@ func _draw_info(size: Vector2) -> void:
 		for k in race.MAX_TICKETS:
 			var pr := Rect2(M + 72 + k * 26, ty - 11, 22, 12)
 			UiKit.draw_slant(_draw, pr, RED if k < race.tickets else Color(1, 1, 1, 0.18), 0.5)
-	# Timers, right-aligned.
+	# Timers, right-aligned. Nothing to time in free roam.
+	if free_roam:
+		return
 	var rx := size.x - M
 	var tw := 220.0
 	_str("TIME", Vector2(rx - tw, y), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_RIGHT, tw, 3)
@@ -546,8 +548,7 @@ func _draw_pause(c: Control) -> void:
 			if Game.mode != Game.Mode.TIME_TRIAL:
 				stats.append(["POSITION", "%d / %d" % [race.position_of(player), race.racers.size()]])
 			stats.append(["LAP", "%d / %d" % [clampi(r.lap + 1, 1, Game.laps), Game.laps]])
-		stats.append(["TIME", fmt_time(race.race_time)])
-		if not r.is_empty():
+			stats.append(["TIME", fmt_time(race.race_time)])
 			stats.append(["BEST LAP", fmt_time(r.best)])
 		var x := W - 48.0
 		for i in range(stats.size() - 1, -1, -1):

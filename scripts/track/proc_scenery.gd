@@ -32,9 +32,7 @@ var _keep := {}       # Vector2i cell -> Array of Vector3(x, z, radius): ground 
 const KEEP_CELL := 50.0
 var no_fence := {}    # node * 2 + (1 on the right): a driveway or lot along the road
 var places: ProcPlaces
-var facade_mat: Material
-var store_mat: Material
-var motel_mat: Material
+var signs: ProcSigns
 var plain_mat: Material
 
 
@@ -47,6 +45,7 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._make_meshes()
 	s._make_shapes()
 	s.places = ProcPlaces.build(s, seed_value)
+	s.signs = ProcSigns.build(s, s.places, seed_value)
 	s._town()
 	s._gantry()
 	s._farms()
@@ -55,7 +54,9 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._poles()
 	s._bend_signs()
 	s.places.billboards()
+	s.signs.flush(p_root)
 	s.places = null   # they refer to each other: let both go
+	s.signs = null
 	s._bridge_lamps()
 	s._rocks()
 	s._roadside_trees()
@@ -109,6 +110,7 @@ func _make_shapes() -> void:
 		"motel": [box.call(Vector3(26, 4.0, 8)), 2.0],
 		"kiosk": [box.call(Vector3(10, 4.2, 7)), 2.1],
 		"cabin": [box.call(Vector3(6, 3.4, 5)), 1.7],
+		"parked_car": [box.call(Vector3(1.8, 1.4, 4.4)), 0.7],
 		"silo": [cyl.call(2.8, 14.0), 7.0],
 		"pole": [cyl.call(0.15, 9.6), 4.8],
 		"lamp_post": [cyl.call(0.13, 8.0), 4.0],
@@ -170,7 +172,7 @@ func _beside(i: int, s: float, d: float, along := 0.0) -> Vector3:
 ## Whether a prop of radius `r` at `p` would stand clear of every stretch of road (outside
 ## its walls), above the water and on ground no steeper than `max_slope`.
 func _clear(p: Vector3, r: float, max_slope := 0.8) -> bool:
-	if p.y < lay.water + 0.5 or kept(p, r):
+	if p.y < lay.water + 0.5 or kept(p, r) or lay.on_branch(p.x, p.z, r):
 		return false
 	for i in lay.nearby(p.x, p.z):
 		var v := Vector3(p.x - lay.pts[i].x, 0.0, p.z - lay.pts[i].z)
@@ -279,6 +281,11 @@ func _make_meshes() -> void:
 	_mesh("sign_post", _merge([[_cyl(0.045, 0.045, 2.2, 5), Vector3(0, 1.1, 0), steel]], _paint), 300.0, false)
 	_mesh("chevron", _board(Vector2(0.8, 1.0), 1.75, _sign_mat(_chevron_image())), 350.0, false)
 	_mesh("curve_sign", _board(Vector2(1.0, 1.0), 2.0, _sign_mat(_curve_image()), true), 350.0, false)
+	_mesh("parked_car", _parked_car(), 400.0, true)
+	var orange := Color(0.98, 0.42, 0.05)
+	_mesh("cone", _merge([[_cyl(0.035, 0.17, 0.62, 8), Vector3(0, 0.34, 0), orange],
+		[_cyl(0.07, 0.11, 0.14, 8), Vector3(0, 0.38, 0), Color(0.95, 0.95, 0.95)],
+		[_box(Vector3(0.42, 0.04, 0.42)), Vector3(0, 0.02, 0), orange]], _paint), 250.0, false)
 	_buildings()
 
 
@@ -368,6 +375,30 @@ static func _rock_mesh() -> ArrayMesh:
 	return st.commit()
 
 
+## A parked car, nose along +Z, tinted by its instance colour (glass and tyres stay dark).
+func _parked_car() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var paint := Color.WHITE
+	var glass := Color(0.12, 0.13, 0.15)
+	var dark := Color(0.08, 0.08, 0.08)
+	_append(st, _box(Vector3(1.78, 0.62, 4.3)), Transform3D(Basis(), Vector3(0, 0.6, 0)), paint)
+	_append(st, _box(Vector3(1.6, 0.5, 2.2)), Transform3D(Basis(), Vector3(0, 1.15, -0.25)), paint)
+	_append(st, _box(Vector3(1.64, 0.36, 2.0)), Transform3D(Basis(), Vector3(0, 1.14, -0.25)), glass)
+	_append(st, _box(Vector3(1.8, 0.14, 4.34)), Transform3D(Basis(), Vector3(0, 0.36, 0)), dark)
+	for x: float in [-0.8, 0.8]:
+		for z: float in [-1.35, 1.35]:
+			_append(st, _cyl(0.32, 0.32, 0.24, 10), Transform3D(Basis(Vector3.BACK, PI * 0.5), Vector3(x, 0.32, z)), dark)
+	for x: float in [-0.6, 0.6]:
+		_append(st, _box(Vector3(0.36, 0.14, 0.04)), Transform3D(Basis(), Vector3(x, 0.72, 2.15)), Color(0.95, 0.95, 0.85))
+		_append(st, _box(Vector3(0.36, 0.12, 0.04)), Transform3D(Basis(), Vector3(x, 0.74, -2.15)), Color(0.7, 0.08, 0.06))
+	var mat := _paint.duplicate() as StandardMaterial3D
+	mat.metallic = 0.3
+	mat.roughness = 0.35
+	st.set_material(mat)
+	return st.commit()
+
+
 ## A sign board of `size` whose bottom edge stands `y` m up, facing +Z; `diamond` turns
 ## it 45 degrees.
 static func _board(size: Vector2, y: float, mat: Material, diamond := false) -> ArrayMesh:
@@ -435,19 +466,13 @@ static func _curve_image() -> Image:
 
 ## Box buildings with window-bay walls (4 x 3.3 m a bay) and flat or pitched roofs.
 func _buildings() -> void:
-	var facade := StandardMaterial3D.new()
-	facade.albedo_texture = _facade_texture()
-	facade.vertex_color_use_as_albedo = true
-	facade.vertex_color_is_srgb = true
-	facade.roughness = 0.8
-	facade.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	var facade := _building_mat(_facade_texture(), Vector2.ONE, 0.4)
 	var plain := _paint.duplicate() as StandardMaterial3D
 	plain.albedo_texture = ProcGround.speckle(0.8)
 	plain.uv1_triplanar = true
 	plain.uv1_world_triplanar = true
 	plain.uv1_scale = Vector3.ONE * 0.5
-	var store := facade.duplicate() as StandardMaterial3D
-	store.albedo_texture = _storefront_texture()
+	var store := _building_mat(_storefront_texture(), Vector2(2, 1), 0.75)
 	# Shops under two floors of flats.
 	var above := Image.create(128, 192, false, Image.FORMAT_RGBA8)
 	var bay := _facade_image()
@@ -455,13 +480,8 @@ func _buildings() -> void:
 		above.blit_rect(bay, Rect2i(0, 0, 64, 64), Vector2i((k % 2) * 64, (k / 2) * 64))
 	above.blit_rect(_storefront_image(), Rect2i(0, 0, 128, 64), Vector2i(0, 128))
 	above.generate_mipmaps()
-	var block_front := facade.duplicate() as StandardMaterial3D
-	block_front.albedo_texture = ImageTexture.create_from_image(above)
-	var rooms := facade.duplicate() as StandardMaterial3D
-	rooms.albedo_texture = _motel_texture()
-	facade_mat = facade
-	store_mat = store
-	motel_mat = rooms
+	var block_front := _building_mat(ImageTexture.create_from_image(above), Vector2(2, 3), 0.45)
+	var rooms := _building_mat(_motel_texture(), Vector2.ONE, 0.5)
 	plain_mat = plain
 	var roof_grey := Color(0.38, 0.37, 0.36)
 	var roof_red := Color(0.48, 0.2, 0.15)
@@ -503,6 +523,20 @@ func _buildings() -> void:
 	_append(box, _box(Vector3.ONE), Transform3D(Basis(), Vector3(0, 0.5, 0)), Color.WHITE)
 	box.set_material(field)
 	_mesh("field", box.commit(), 800.0, false)
+
+
+## Walls with windows that light up at night: TrackWorld sets `night` on what the track lists
+## under "night_materials".
+func _building_mat(tex: Texture2D, cells: Vector2, lit: float) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = preload("res://shaders/building.gdshader")
+	m.set_shader_parameter("albedo_tex", tex)
+	m.set_shader_parameter("cells", cells)
+	m.set_shader_parameter("lit_share", lit)
+	var list: Array = root.get_meta("night_materials", [])
+	list.append(m)
+	root.set_meta("night_materials", list)
+	return m
 
 
 ## `size` (width along X, wall height, depth along Z) with a gable `roof` m high along X
@@ -600,8 +634,9 @@ static func _facade_image() -> Image:
 	img.fill(Color(0.9, 0.88, 0.84))
 	img.fill_rect(Rect2i(0, 60, 64, 4), Color(0.75, 0.73, 0.7))
 	img.fill_rect(Rect2i(12, 12, 40, 34), Color(0.93, 0.93, 0.92))
-	img.fill_rect(Rect2i(14, 14, 36, 30), Color(0.16, 0.2, 0.26))
-	img.fill_rect(Rect2i(14, 14, 36, 9), Color(0.33, 0.4, 0.48))
+	# The glass (alpha 0: see building.gdshader).
+	img.fill_rect(Rect2i(14, 14, 36, 30), Color(0.16, 0.2, 0.26, 0.0))
+	img.fill_rect(Rect2i(14, 14, 36, 9), Color(0.33, 0.4, 0.48, 0.0))
 	img.fill_rect(Rect2i(31, 14, 2, 30), Color(0.93, 0.93, 0.92))
 	img.fill_rect(Rect2i(10, 46, 44, 3), Color(0.7, 0.68, 0.65))
 	return img
@@ -623,8 +658,8 @@ static func _storefront_image() -> Image:
 	img.fill_rect(Rect2i(0, 58, 128, 6), Color(0.55, 0.52, 0.5))
 	for r: Rect2i in [Rect2i(5, 20, 54, 38), Rect2i(69, 20, 34, 38), Rect2i(107, 20, 17, 44)]:
 		img.fill_rect(r, frame)
-		img.fill_rect(r.grow(-2), glass)
-		img.fill_rect(Rect2i(r.position + Vector2i(2, 2), Vector2i(r.size.x - 4, 8)), sky)
+		img.fill_rect(r.grow(-2), Color(glass, 0.0))
+		img.fill_rect(Rect2i(r.position + Vector2i(2, 2), Vector2i(r.size.x - 4, 8)), Color(sky, 0.0))
 	# Glazing bars and the door's handle.
 	img.fill_rect(Rect2i(31, 20, 2, 38), frame)
 	img.fill_rect(Rect2i(109, 40, 13, 2), frame)
@@ -641,8 +676,8 @@ static func _motel_texture() -> ImageTexture:
 	img.fill_rect(Rect2i(19, 38, 2, 3), Color(0.85, 0.75, 0.4))
 	img.fill_rect(Rect2i(10, 22, 8, 3), Color(0.85, 0.8, 0.6))
 	img.fill_rect(Rect2i(28, 20, 30, 24), Color(0.95, 0.95, 0.94))
-	img.fill_rect(Rect2i(30, 22, 26, 20), Color(0.18, 0.22, 0.28))
-	img.fill_rect(Rect2i(30, 22, 26, 20).grow_individual(0, 0, -13, 0), Color(0.55, 0.3, 0.25))
+	img.fill_rect(Rect2i(30, 22, 26, 20), Color(0.18, 0.22, 0.28, 0.0))
+	img.fill_rect(Rect2i(30, 22, 26, 20).grow_individual(0, 0, -13, 0), Color(0.55, 0.3, 0.25, 0.0))
 	img.generate_mipmaps()
 	return ImageTexture.create_from_image(img)
 
@@ -699,7 +734,9 @@ func _town() -> void:
 
 func _lamp(i: int, s: float, d: float) -> void:
 	var p := lay.pts[i] + lay.right[i] * s * d
-	p.y = lay.side_y(i, s, d) if d > lay.edge[i] else lay.road_y(i, s, d) + ProcGround._kerb(lay, i)
+	if lay.on_branch(p.x, p.z, 0.3):
+		return
+	p.y = lay.side_y(i, s, d) if d > lay.edge[i] else lay.road_y(i, s, d) + ProcGround._kerb(lay, i, s)
 	var xf := _upright(p, -lay.flat_right[i] * s)
 	_put("lamp_post", xf)
 	_put("lamp_head", xf)
@@ -833,7 +870,11 @@ func _farms() -> void:
 			hi = maxf(hi, y)
 		var corn := rng.randf() < 0.55
 		var h := 2.3 if corn else 0.8
-		if hi - lo < 3.0 and _clear(c + lay.flat_right[i] * s * (-depth * 0.5), 0.0, 10.0):
+		var over_lane := false
+		for corner in [Vector2(-1, -1), Vector2(1, -1), Vector2(1, 1), Vector2(-1, 1), Vector2.ZERO, Vector2(0, -1), Vector2(0, 1)]:
+			var q := _beside(i, s, d + corner.x * depth * 0.5, length * 0.5 + corner.y * length * 0.5)
+			over_lane = over_lane or lay.on_branch(q.x, q.z, maxf(depth, length) * 0.3)
+		if hi - lo < 3.0 and not over_lane and _clear(c + lay.flat_right[i] * s * (-depth * 0.5), 0.0, 10.0):
 			var tint := Color(0.85, 1.0, 0.8) if corn else Color(1.15, 1.0, 0.75)
 			c.y = lo - 0.6
 			_put("field", _upright(c, lay.fwd[i], Vector3(depth, hi - lo + h + 0.6, length)), tint)
@@ -880,9 +921,15 @@ func _rails() -> void:
 		var walls := lay.wall_r if s > 0.0 else lay.wall_l
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		var count := 0
+		var drawn := false
 		for i in lay.n:
 			var j := lay.idx(i + 1)
+			# A mesh per 40 nodes of road, so each is culled by how far off its own stretch is.
+			if i % 40 == 0 and drawn:
+				_commit_chunk(st, mat)
+				st = SurfaceTool.new()
+				st.begin(Mesh.PRIMITIVE_TRIANGLES)
+				drawn = false
 			if not rail[i]:
 				continue
 			var base_i := _rail_base(i, s, walls[i])
@@ -891,6 +938,7 @@ func _rails() -> void:
 				continue
 			var base_j := _rail_base(j, s, walls[j])
 			_solid_strip(base_i, base_j, 1.1)
+			drawn = true
 			for m in prof.size() - 1:
 				var q := [_rail_pt(i, s, base_i, prof[m]), _rail_pt(i, s, base_i, prof[m + 1]),
 					_rail_pt(j, s, base_j, prof[m + 1]), _rail_pt(j, s, base_j, prof[m])]
@@ -898,12 +946,8 @@ func _rails() -> void:
 				for k in [0, 1, 2, 0, 2, 3]:
 					st.set_normal(n)
 					st.add_vertex(q[k])
-			count += 1
-			if count % 40 == 0:
-				_commit_chunk(st, mat)
-				st = SurfaceTool.new()
-				st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		_commit_chunk(st, mat)
+		if drawn:
+			_commit_chunk(st, mat)
 
 
 func _rail_base(i: int, s: float, d: float) -> Vector3:
@@ -918,7 +962,7 @@ func _rail_pt(i: int, s: float, base: Vector3, q: Vector2) -> Vector3:
 
 func _commit_chunk(st: SurfaceTool, mat: Material) -> void:
 	var mesh := st.commit()
-	if mesh.get_surface_count() == 0:
+	if mesh == null or mesh.get_surface_count() == 0:
 		return
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
@@ -942,7 +986,8 @@ func _fences() -> void:
 			# Runs of a few hundred metres with gaps (gates, driveways).
 			if i % 25 == 0:
 				on = rng.randf() < 0.7
-			if not farm or not on or no_fence.has(i * 2 + int(s > 0.0)):
+			var gaps := lay.gap_r if s > 0.0 else lay.gap_l
+			if not farm or not on or no_fence.has(i * 2 + int(s > 0.0)) or gaps[i] or gaps[lay.idx(i + 1)]:
 				continue
 			var d := walls[i] + 1.5
 			var a := _beside(i, s, d)
@@ -1009,7 +1054,8 @@ func _poles() -> void:
 	root.add_child(mi)
 
 
-## Chevrons round the outside of tight bends, and a warning sign on the way into them.
+## Chevrons round the outside of tight bends, and a warning sign on the way into them with
+## the speed to take them at.
 func _bend_signs() -> void:
 	var i := 0
 	while i < lay.n:
@@ -1020,7 +1066,9 @@ func _bend_signs() -> void:
 		# The whole bend: while it keeps turning the same way.
 		var turn := signf(lay.curv[i])
 		var a := i
+		var tightest := k
 		while i < lay.n and lay.curv[i] * turn > 1.0 / 140.0:
+			tightest = maxf(tightest, absf(lay.curv[i]))
 			i += 1
 		var outside := -turn
 		var walls := lay.wall_r if outside > 0.0 else lay.wall_l
@@ -1028,16 +1076,19 @@ func _bend_signs() -> void:
 			if lay.kind[j] != Kind.OPEN:
 				continue
 			var p := _beside(j, outside, walls[j] + 0.9)
+			if lay.on_branch(p.x, p.z, 0.5):
+				continue
 			# Facing the traffic coming round, angled a little in towards it.
 			var face := (-lay.fwd[j] - lay.flat_right[j] * outside * 0.35).normalized()
 			var sc := Vector3(turn, 1, 1)
 			_put("sign_post", _upright(p, face))
 			_put("chevron", _upright(p, face, sc))
 		var w := lay.idx(a - 16)
-		if lay.kind[w] == Kind.OPEN:
-			var p := _beside(w, 1.0, lay.wall_r[w] + 1.2)
-			_put("sign_post", _upright(p, -lay.fwd[w]))
-			_put("curve_sign", _upright(p, -lay.fwd[w], Vector3(turn, 1, 1)))
+		var wp := _beside(w, 1.0, lay.wall_r[w] + 1.2)
+		if lay.kind[w] == Kind.OPEN and not lay.on_branch(wp.x, wp.z, 0.5):
+			_put("sign_post", _upright(wp, -lay.fwd[w]))
+			_put("curve_sign", _upright(wp, -lay.fwd[w], Vector3(turn, 1, 1)))
+			signs.advisory(_upright(wp, -lay.fwd[w]), 1.0 / tightest)
 
 
 ## Boulders on the cuttings and scattered off the road in the hills and by the lake.

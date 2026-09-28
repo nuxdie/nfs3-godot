@@ -20,6 +20,8 @@ const NATURE := ["Cedar", "Pine", "Willow", "Elk", "Bear", "Eagle", "Silver", "C
 	"Hawk", "Aspen", "Granite", "Juniper", "Timber", "Raven", "Coyote", "Laurel", "Copper", "Otter", "Sage"]
 const SURNAMES := ["Hollis", "Mercer", "Dawson", "Whitaker", "Pruitt", "Calloway", "Beckett", "Harlan",
 	"Tate", "Lomax", "Garrity", "Voss", "Kimball", "Sutter", "Rourke", "McCready"]
+const STREETS := ["Elm St", "Oak St", "2nd St", "3rd St", "Mill St", "Park Ave", "School St", "Walnut St",
+	"Depot St", "Spring St", "Court St", "Grove Ave"]
 const FIRST := ["Rosie", "Mel", "Dot", "Lou", "Hank", "Earl", "Flo", "Vern", "June", "Ike"]
 const BRANDS := [["EAGLE", Color(0.1, 0.3, 0.65)], ["ROADSTAR", Color(0.72, 0.1, 0.08)],
 	["PIONEER", Color(0.1, 0.42, 0.25)], ["SUNRISE", Color(0.9, 0.42, 0.05)]]
@@ -51,6 +53,7 @@ var _trades: Array = []
 var _shops := 0
 var _blocks := 0
 var _diamond: StandardMaterial3D
+var _names := {}      # branch index -> its name
 var _reach := 1.0     # of the lettering's draw distance, by quality preset (each label is a draw)
 
 
@@ -72,6 +75,10 @@ static func names(seed_value: int) -> Dictionary:
 		"hotel": "Hotel " + town, "bank": town + " Savings Bank", "brand": brand[0], "brand_c": brand[1],
 		"pop": r.randi_range(9, 60) * 100 + r.randi_range(0, 99), "est": r.randi_range(1851, 1908),
 		"bored": r.randi_range(1929, 1958),
+		# The lap is Main Street through the town and a state route beyond it.
+		"route": r.randi_range(11, 96), "mile0": r.randi_range(12, 70), "church_st": "Church St",
+		"streets": _shuffled(STREETS, r), "church": ["First Baptist Church", "Community Church",
+			"St. " + ["Mary's", "Paul's", "John's"][r.randi() % 3] + " Church"][r.randi() % 3],
 	}
 
 
@@ -99,6 +106,7 @@ static func build(p_sc: ProcScenery, seed_value: int) -> ProcPlaces:
 	p._trades = _shuffled(TRADES, p.rng)
 	p._trades.insert(2, "POST OFFICE")
 	p._diamond = ProcScenery._sign_mat(_diamond_image())
+	p._name_branches()
 	p._town_signs()
 	p._water_tower()
 	p._gas_station()
@@ -108,7 +116,39 @@ static func build(p_sc: ProcScenery, seed_value: int) -> ProcPlaces:
 	p._pass()
 	p._bridges()
 	p._motel()
+	p._side_roads()
 	return p
+
+
+# --- The roads off the lap ------------------------------------------------------------------
+
+## Street names in the order the lap meets them (both halves of a crossroads the same, the
+## second one Church Street), a family's name for each farm lane, forest road numbers.
+func _name_branches() -> void:
+	var by_node := {}
+	var streets: Array = nm.streets
+	var k := 0
+	for bi in lay.branches.size():
+		var b := lay.branches[bi]
+		match b.kind:
+			"street":
+				if not by_node.has(b.from):
+					by_node[b.from] = nm.church_st if by_node.size() == 1 else streets[k % streets.size()]
+					if by_node.size() != 2:
+						k += 1
+				_names[bi] = by_node[b.from]
+			"lane":
+				_names[bi] = SURNAMES[rng.randi() % SURNAMES.size()] + " Rd"
+			"forest":
+				_names[bi] = "Forest Rd %d" % rng.randi_range(101, 399)
+			"camp":
+				_names[bi] = nm.camp
+			_:
+				_names[bi] = ""
+
+
+func branch_name(bi: int) -> String:
+	return _names.get(bi, "")
 
 
 # --- Finding room ----------------------------------------------------------------------------
@@ -635,20 +675,28 @@ func _forest() -> void:
 		return
 	_road_sign(forest[1], 1.0, Vector2(5.6, 1.5), BROWN, CREAM, [[nm.forest.to_upper(), 0.5]])
 	_warning(forest[int(forest.size() * 0.2)], [["DEER", 0.22], ["XING", 0.22]])
-	var half := Vector2(18.0, 14.0)
-	var f := _find(forest, 0.35, 0.85, 8.0, half, 6.0)
-	if f.is_empty():
+	# The campground: cabins round a clearing at the end of its road.
+	var camp: ProceduralTrack.Branch = null
+	for b in lay.branches:
+		if b.kind == "camp":
+			camp = b
+	if camp == null:
 		return
-	var i: int = f[0]
-	var s: float = f[1]
-	var d := _wall(i, s) + 8.0 + half.y
-	sc.keep_out(f[2], 16.0)
-	for o: Vector2 in [Vector2(-9.0, -3.0), Vector2(3.0, 6.0), Vector2(12.0, -4.0)]:
-		var p := sc._beside(i, s, d + o.y, o.x)
-		var face := (-lay.flat_right[i] * s).rotated(Vector3.UP, rng.randf_range(-0.5, 0.5))
-		sc._put("cabin", ProcScenery._upright(p - Vector3(0, 0.5, 0), face), Color(0.6, 0.42, 0.27))
+	var i := camp.from
+	var s := camp.side
+	var end := camp.pts[camp.pts.size() - 1]
+	var t := (end - camp.pts[camp.pts.size() - 3]).normalized()
+	t.y = 0.0
+	var r := t.cross(Vector3.UP).normalized()
+	for o: Vector2 in [Vector2(-12.0, -2.0), Vector2(12.0, 2.0), Vector2(-9.0, 12.0), Vector2(9.0, 13.0), Vector2(0.0, 20.0)]:
+		var p := end + r * o.x + t * o.y
+		p.y = ProcGround.surface_y(lay, p.x, p.z)
+		if sc._clear(p, 3.5, 0.5):
+			sc._put("cabin", ProcScenery._upright(p - Vector3(0, 0.5, 0), (end - p).normalized()), Color(0.6, 0.42, 0.27))
+			sc.keep_out(p, 4.0)
+	sc.keep_out(end + t * 6.0, 9.0)
 	var gate := _road_sign(lay.idx(i - 3), s, Vector2(4.6, 1.5), BROWN, CREAM,
-		[[nm.camp.to_upper(), 0.42], ["TENTS  ·  CABINS  ·  RV", 0.26]], 1.0)
+		[[nm.camp.to_upper(), 0.42], ["TENTS  ·  CABINS  ·  RV", 0.26]], 1.0, -1)
 	var ahead := lay.idx(i - int(0.4 * MILE / STEP))
 	_road_sign(ahead, 1.0, Vector2(3.8, 1.3), BROWN, CREAM, [["CAMPGROUND", 0.4], [_how_far(ahead, i, s), 0.26]])
 	at["camp"] = [gate if gate >= 0 else i, s]
@@ -731,6 +779,176 @@ func _motel() -> void:
 		Color(0, 0, 0, 0), 400.0)
 	_panel(h, Vector3(-9.0, 2.75, -1.95), Vector2(2.4, 0.5), teal, CREAM, [["OFFICE", 0.3]], road_font)
 	at["motel"] = [i, s]
+
+
+# --- Along the side roads -------------------------------------------------------------------
+
+## What the side roads lead to: houses along the town streets (a church on Church Street) and
+## cars parked at the kerb, a farm at the end of each farm lane, the forest closing over the
+## end of each forest road, a walled car park at the lookout.
+func _side_roads() -> void:
+	for bi in lay.branches.size():
+		var b := lay.branches[bi]
+		match b.kind:
+			"street":
+				_street(b, branch_name(bi) == nm.church_st)
+			"lane":
+				_lane_end(b)
+			"forest":
+				_road_end_trees(b)
+			"lookout":
+				_lookout(b)
+
+
+## Point, direction on and to the right, `along` m along branch `b`.
+func _frame(b: ProceduralTrack.Branch, along: float) -> Array:
+	var a := ProcSigns._along(b, along)
+	var t: Vector3 = a[1]
+	return [a[0], t, t.cross(Vector3.UP).normalized()]
+
+
+func _street(b: ProceduralTrack.Branch, church: bool) -> void:
+	var total := (b.pts.size() - 1) * ProceduralTrack.BSTEP
+	var church_side := 1.0 if rng.randf() < 0.5 else -1.0
+	for side: float in [-1.0, 1.0]:
+		var along := 26.0 + rng.randf_range(0.0, 6.0)
+		while along < total - 12.0:
+			var f := _frame(b, along)
+			var p: Vector3 = f[0] + f[2] * side * (b.half + 11.0)
+			p.y = ProcGround.surface_y(lay, p.x, p.z)
+			if church and side == church_side and along > 30.0 and along < 70.0:
+				var cp: Vector3 = f[0] + f[2] * side * (b.half + 17.0)
+				cp.y = ProcGround.surface_y(lay, cp.x, cp.z)
+				if sc._clear(cp, 10.0, 10.0):
+					_church(cp, -f[2] * side, f[1])
+					church = false
+					along += 30.0
+					continue
+			if sc._clear(p, 4.5, 10.0):
+				var tints := [Color(0.97, 0.95, 0.88), Color(0.85, 0.9, 0.95), Color(0.95, 0.88, 0.75), Color(0.88, 0.95, 0.85)]
+				sc._put("house", ProcScenery._upright(p - Vector3(0, 0.3, 0), -f[2] * side), tints[rng.randi() % tints.size()])
+				sc.keep_out(p, 5.0)
+			along += rng.randf_range(13.0, 17.0)
+	# A house closing the far end.
+	var e := _frame(b, total)
+	var q: Vector3 = e[0] + e[1] * 10.0
+	q.y = ProcGround.surface_y(lay, q.x, q.z)
+	if sc._clear(q, 4.5, 10.0):
+		sc._put("house", ProcScenery._upright(q - Vector3(0, 0.3, 0), -e[1]), Color(0.95, 0.93, 0.85))
+	# Cars at the kerb, mostly past the barricade.
+	for k in rng.randi_range(2, 4):
+		var along := rng.randf_range(b.closed + 8.0, total - 8.0) if k > 0 else rng.randf_range(18.0, b.closed - 8.0)
+		var side := 1.0 if rng.randf() < 0.5 else -1.0
+		var f := _frame(b, along)
+		var p: Vector3 = f[0] + f[2] * side * (b.half - 1.1)
+		_park(p, f[1] * side)
+
+
+## A parked car at `p` (its surface height is found), nose along `dir`.
+func _park(p: Vector3, dir: Vector3) -> void:
+	var colours := [Color(0.6, 0.1, 0.08), Color(0.1, 0.2, 0.45), Color(0.85, 0.85, 0.82), Color(0.15, 0.15, 0.16),
+		Color(0.35, 0.4, 0.3), Color(0.7, 0.6, 0.35), Color(0.5, 0.52, 0.55)]
+	var b := lay.branch_at(p.x, p.z)
+	p.y = maxf(ProcGround.surface_y(lay, p.x, p.z), b.y if b.x < 20.0 else -INF)
+	sc._put("parked_car", ProcScenery._upright(p, dir.rotated(Vector3.UP, rng.randf_range(-0.04, 0.04))),
+		colours[rng.randi() % colours.size()])
+
+
+## A white clapboard church with its steeple over the door, facing the street, and its board
+## on the lawn.
+func _church(p: Vector3, face: Vector3, along: Vector3) -> void:
+	sc.keep_out(p, 12.0)
+	var h := _holder(ProcScenery._upright(p - Vector3(0, 0.3, 0), face))
+	var mesh := ProcScenery._house(Vector3(18, 6.0, 10), 4.5, sc.plain_mat, sc.plain_mat, Color(0.3, 0.32, 0.35), false)
+	# The nave's ridge runs back from the street.
+	var nave := MeshInstance3D.new()
+	nave.mesh = mesh
+	nave.rotation.y = PI * 0.5
+	nave.visibility_range_end = 900.0
+	h.add_child(nave)
+	var white := Color(0.96, 0.95, 0.92)
+	_parts(h, [_bx(Vector3(3.6, 11.0, 3.6), Vector3(0, 5.5, 9.6), white),
+		_bx(Vector3(3.8, 0.3, 3.8), Vector3(0, 11.1, 9.6), Color(0.3, 0.32, 0.35)),
+		[ProcScenery._cyl(0.0, 2.3, 7.0, 4), Transform3D(Basis(Vector3.UP, PI * 0.25), Vector3(0, 14.7, 9.6)), Color(0.3, 0.32, 0.35)],
+		_bx(Vector3(0.12, 1.4, 0.12), Vector3(0, 18.8, 9.6), Color(0.85, 0.75, 0.4)),
+		_bx(Vector3(0.8, 0.12, 0.12), Vector3(0, 19.1, 9.6), Color(0.85, 0.75, 0.4)),
+		_bx(Vector3(1.6, 2.6, 0.1), Vector3(0, 1.3, 11.42), Color(0.45, 0.28, 0.18)),
+		_bx(Vector3(1.1, 1.6, 0.1), Vector3(0, 7.5, 11.42), Color(0.2, 0.25, 0.35))], 1200.0)
+	for x: float in [-2.0, 2.0]:
+		for z: float in [-5.0, 0.0, 5.0]:
+			_parts(h, [_bx(Vector3(0.1, 2.4, 1.0), Vector3(x * 2.52, 3.0, z), Color(0.25, 0.3, 0.4))], 400.0, false)
+	_solid(h.transform, Vector3(10, 6, 18), Vector3(0, 3, 0))
+	_solid(h.transform, Vector3(3.6, 11, 3.6), Vector3(0, 5.5, 9.6))
+	var bh := Node3D.new()
+	bh.position = Vector3(4.5, 0, 14.5)
+	h.add_child(bh)
+	_parts(bh, [_bx(Vector3(0.12, 1.6, 0.12), Vector3(-1.1, 0.8, -0.1), Color(0.4, 0.3, 0.2)),
+		_bx(Vector3(0.12, 1.6, 0.12), Vector3(1.1, 0.8, -0.1), Color(0.4, 0.3, 0.2))], 300.0, false)
+	_panel(bh, Vector3(0, 1.45, 0), Vector2(2.6, 1.0), CREAM, Color(0.1, 0.1, 0.12),
+		[[nm.church.to_upper(), 0.2], ["SUNDAY SERVICE 10 AM", 0.13], ["ALL WELCOME", 0.13]], road_font, false,
+		Color(0.2, 0.2, 0.22), 200.0)
+
+
+## A farm where a lane ends: the barn across its end, the farmhouse and a pickup by it.
+func _lane_end(b: ProceduralTrack.Branch) -> void:
+	var total := (b.pts.size() - 1) * ProceduralTrack.BSTEP
+	var e := _frame(b, total)
+	var end: Vector3 = e[0]
+	var t: Vector3 = e[1]
+	var r: Vector3 = e[2]
+	var barn := end + t * 12.0
+	barn.y = ProcGround.surface_y(lay, barn.x, barn.z)
+	if sc._clear(barn, 9.0, 0.5):
+		sc._put("barn", ProcScenery._upright(barn - Vector3(0, 0.4, 0), r), Color(0.72, 0.22, 0.16) if rng.randf() < 0.6
+			else Color(0.85, 0.82, 0.76))
+		sc.keep_out(barn, 11.0)
+	var house := end + r * 14.0 - t * 2.0
+	house.y = ProcGround.surface_y(lay, house.x, house.z)
+	if sc._clear(house, 5.5, 0.5):
+		sc._put("house", ProcScenery._upright(house - Vector3(0, 0.3, 0), -r), Color(0.97, 0.95, 0.88))
+		sc.keep_out(house, 6.0)
+	var silo := end - r * 12.0 + t * 8.0
+	silo.y = ProcGround.surface_y(lay, silo.x, silo.z)
+	if sc._clear(silo, 3.0, 10.0):
+		sc._put("silo", ProcScenery._upright(silo - Vector3(0, 0.3, 0), t))
+		sc.keep_out(silo, 3.5)
+	_park(end - t * 3.0 + r * 1.0, t.rotated(Vector3.UP, 0.4))
+
+
+## Trees closing over the end of a forest road, so it runs on out of sight.
+func _road_end_trees(b: ProceduralTrack.Branch) -> void:
+	var total := (b.pts.size() - 1) * ProceduralTrack.BSTEP
+	var e := _frame(b, total)
+	for k in 7:
+		var p: Vector3 = e[0] + e[1] * rng.randf_range(2.0, 12.0) + e[2] * rng.randf_range(-6.0, 6.0)
+		p.y = ProcGround.surface_y(lay, p.x, p.z) - 0.2
+		sc._put("conifer", ProcScenery._upright(p, Vector3.FORWARD.rotated(Vector3.UP, rng.randf() * TAU),
+			Vector3.ONE * rng.randf_range(0.9, 1.4)), Color(1, 1, 1) * rng.randf_range(0.85, 1.1))
+
+
+## The lookout's car park: a stone wall along its edge over the view, coin telescopes, its sign
+## and a couple of cars stopped to look.
+func _lookout(b: ProceduralTrack.Branch) -> void:
+	var total := (b.pts.size() - 1) * ProceduralTrack.BSTEP
+	var e := _frame(b, total)
+	var end: Vector3 = e[0]
+	var t: Vector3 = e[1]
+	var r: Vector3 = e[2]
+	var w := b.half_at(total) + 1.0
+	var h := _holder(ProcScenery._upright(end + t * 1.2, t))
+	var stone := Color(0.55, 0.53, 0.5)
+	_parts(h, [_bx(Vector3(w * 2.0, 1.2, 0.6), Vector3(0, 0.2, 0), stone),
+		_bx(Vector3(0.6, 1.2, 6.0), Vector3(-w, 0.2, -3.0), stone), _bx(Vector3(0.6, 1.2, 6.0), Vector3(w, 0.2, -3.0), stone)],
+		600.0)
+	_solid(h.transform, Vector3(w * 2.0, 1.4, 0.6), Vector3(0, 0.2, 0))
+	for x: float in [-2.5, 2.5]:
+		_parts(h, [_bx(Vector3(0.12, 1.2, 0.12), Vector3(x, 0.6, -0.8), STEEL),
+			[ProcScenery._cyl(0.14, 0.2, 0.6, 8), Transform3D(Basis(Vector3.RIGHT, PI * 0.5), Vector3(x, 1.35, -0.8)),
+			Color(0.2, 0.35, 0.3)]], 200.0, false)
+	for k in 2:
+		_park(end - t * rng.randf_range(4.0, 7.0) + r * (k * 5.0 - 2.5), t)
+	sc.keep_out(end, w + 4.0)
+	_road_sign(lay.idx(b.from - 2), b.side, Vector2(3.2, 0.9), BROWN, CREAM, [["SCENIC VIEW", 0.42]], 1.4, -1)
 
 
 # --- Billboards ------------------------------------------------------------------------------

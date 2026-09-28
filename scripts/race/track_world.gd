@@ -83,6 +83,9 @@ func light(parent: Node, night: bool, weather: bool, vp: Viewport = null) -> voi
 	# The procedural track's street-lamp light pools only show at night.
 	for n: Node3D in root.get_meta("night_only", []):
 		n.visible = night
+	# ...and its windows light up.
+	for m: ShaderMaterial in root.get_meta("night_materials", []):
+		m.set_shader_parameter("night", 1.0 if night else 0.0)
 	if night:
 		_make_night(e, sm)
 	if weather and not horizon:
