@@ -31,7 +31,9 @@ What's read:
 |---|---|
 | `tracks/trkNNN/trNN.frd` | Track geometry, per-vertex baked lighting, scenery, animated objects |
 | `tracks/trkNNN/trNN.col` | Virtual road (AI line, lap progress, invisible walls), global scenery |
-| `tracks/trkNNN/trNN0.qfs` | Track textures (RefPack-compressed FSH) |
+| `tracks/trkNNN/trNN0.qfs` | Track textures (RefPack-compressed FSH); the first 8 are the horizon panorama |
+| `tracks/trkNNN/3trNN.hrz`, `3trNNn.hrz` | Sky gradient, horizon/cloud placement, fog colour/density, ambient light (day / night) |
+| `tracks/trkNNN/sky.fsh` | Cloud layer and sun/moon sprites |
 | `carmodel/*/car.viv` → `car.fce`, `car00.tga` | Car mesh, wheels, skin, paint colours |
 | `car.viv` → `carp.txt` | Mass, torque curve, gearing, final drive, redline, top speed, braking |
 | `car.viv` → `fedata.eng` | Car names for the menu |
@@ -65,17 +67,21 @@ What's read:
 
 ```
 scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd,
-                   data_path.gd (case-insensitive lookups)
+                   nfs3_horizon.gd (.hrz sky/fog), data_path.gd (case-insensitive lookups)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
                    procedural_track.gd, track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd
 scripts/race/      race.gd (spawning, laps, positions, pursuit rules), chase_camera.gd
-scripts/ui/        main_menu.gd, hud.gd (tach, map, mirror, pause, results)
+scripts/ui/        main_menu.gd (showroom front end), hud.gd (tach, map, mirror, pause, results),
+                   ui_kit.gd (palette, fonts, slanted shapes, key hints), selector_row.gd,
+                   action_list.gd (pause/results menus), track_map.gd, car_stats.gd
+fonts/             Barlow / Barlow Condensed (SIL Open Font License, see fonts/OFL.txt)
 scripts/audio/     car_audio.gd (synthesised engine, tyre squeal, siren)
 shaders/           track.gdshader (unshaded, vertex-lit like the original), track_additive.gdshader
                    (glows, fire, light shafts), car.gdshader (paint mask)
 tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk000|procedural|menu> [mode] [car]
+                   (add --settings with menu to photograph the settings panel)
 ```
 
 ## Not done yet
@@ -85,5 +91,6 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
 - Night, weather, mirrored/reverse tracks, damage, split-screen.
 - The Knockout/tournament structure and car unlocks.
 - The car body collides as a box; FCE dummies (light positions) are unused.
-- Only the road surface and the invisible side walls collide: roadside scenery (trees, poles,
-  signs) is visual, so cars pass through it.
+- Scenery collision is guessed from the textures (the track files carry no collision flag):
+  opaque objects (buildings, walls, poles) are solid, sign-sized ones are knocked over, and
+  cut-out foliage and glows are passable.

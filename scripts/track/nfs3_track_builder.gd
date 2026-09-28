@@ -9,6 +9,15 @@ const WALL_HEIGHT := 6.0
 const WALL_DEPTH := 3.0
 ## Physics layer of the solid scenery that only the chase camera collides with.
 const CAMERA_LAYER := 8
+## Physics layer of solid scenery (buildings, signs, posts, rocks) that cars hit. Kept off
+## layer 1 so the chase camera ignores small props.
+const SCENERY_LAYER := 4
+## Extra objects no wider than this (m) and within this height range are road signs and
+## posts that cars knock over; taller poles and anything bigger stay put.
+const PROP_MAX_WIDTH := 3.5
+const PROP_HEIGHT := Vector2(1.5, 7.0)
+## Height (m) above a prop's foot that a car body can touch.
+const PROP_REACH := 1.5
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
@@ -23,10 +32,14 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		m.shader = sh
 		m.set_shader_parameter("textures", textures)
 		mats.append(m)
+	root.set_meta("track_material", mats[0])   # the race sets its night lighting
 
 	var geo := Node3D.new()
 	geo.name = "Geometry"
 	root.add_child(geo)
+	var props := Node3D.new()
+	props.name = "Props"
+	root.add_child(props)
 	var body := StaticBody3D.new()
 	body.name = "Road"
 	body.collision_layer = 1
@@ -35,12 +48,16 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 
 	for bi in t.blocks.size():
 		var b: Nfs3Track.Block = t.blocks[bi]
-		var groups := [[b.road, b.verts, b.shading, Vector3.ZERO], [b.lanes, b.verts, b.shading, Vector3.ZERO]]
+		var groups := [[b.road, b.verts, b.shading, Vector3.ZERO, false], [b.lanes, b.verts, b.shading, Vector3.ZERO, false]]
 		for obj in b.objects:
-			groups.append([obj, b.verts, b.shading, Vector3.ZERO])
+			groups.append([obj, b.verts, b.shading, Vector3.ZERO, false])
 		for x in b.xobjs:
-			if not x.has("anim"):
-				groups.append([x.polys, x.verts, x.shading, x.ref])
+			if x.has("anim"):
+				continue
+			if _is_prop(t, x):
+				props.add_child(_make_prop(t, x, mats[0]))
+			else:
+				groups.append([x.polys, x.verts, x.shading, x.ref, true])
 		for pass_i in 2:
 			var mesh := _mesh(t, groups, pass_i == 1)
 			if mesh == null:
@@ -74,7 +91,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			if not x.has("anim") or x.anim.size() == 0:
 				continue
 			for pass_i in 2:
-				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO]], pass_i == 1)
+				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, true]], pass_i == 1)
 				if amesh == null:
 					continue
 				var ami := MeshInstance3D.new()
@@ -89,7 +106,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 	# Global scenery from the .col file.
 	var global_groups := []
 	for o in t.col_objects:
-		global_groups.append([o.polys, o.verts, o.shading, o.ref])
+		global_groups.append([o.polys, o.verts, o.shading, o.ref, false])
 	for pass_i in 2:
 		var gmesh := _mesh(t, global_groups, pass_i == 1)
 		if gmesh == null:
@@ -100,30 +117,30 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		gmi.material_override = mats[pass_i]
 		geo.add_child(gmi)
 
+	root.add_child(_scenery_body(t))
 	root.add_child(_camera_blockers(t))
 	var path := _make_path(t)
 	root.add_child(make_walls(path))
 	return path
 
 
-## Cars drive through roadside scenery (NFS3 fences them in with the virtual road's walls
-## instead), but the chase camera must not end up inside a building and show its back
-## faces. Large solid objects (buildings, walls, bridges) block the camera; foliage, glows
-## and small props would only make it jump, so they are left out.
-static func _camera_blockers(t: Nfs3Track) -> StaticBody3D:
+## Cars collide with every opaque scenery object: buildings, bridge piers and road signs
+## stand inside the virtual road's walls. The track files carry no per-object collision
+## flag, so foliage and other cut-out billboards, glows and lane markings stay passable.
+static func _scenery_body(t: Nfs3Track) -> StaticBody3D:
 	var body := StaticBody3D.new()
-	body.name = "CameraBlockers"
-	body.collision_layer = CAMERA_LAYER
+	body.name = "Scenery"
+	body.collision_layer = SCENERY_LAYER
 	body.collision_mask = 0
 	var faces := PackedVector3Array()
 	for b in t.blocks:
 		for obj in b.objects:
-			_blocker_faces(t, obj, b.verts, Vector3.ZERO, faces)
+			_solid_faces(t, obj, b.verts, Vector3.ZERO, faces, false)
 		for x in b.xobjs:
-			if not x.has("anim"):
-				_blocker_faces(t, x.polys, x.verts, x.ref, faces)
+			if not x.has("anim") and not _is_prop(t, x):
+				_solid_faces(t, x.polys, x.verts, x.ref, faces, false)
 	for o in t.col_objects:
-		_blocker_faces(t, o.polys, o.verts, o.ref, faces)
+		_solid_faces(t, o.polys, o.verts, o.ref, faces, false)
 	if faces.size() > 0:
 		var shape := ConcavePolygonShape3D.new()
 		shape.set_faces(faces)
@@ -134,8 +151,89 @@ static func _camera_blockers(t: Nfs3Track) -> StaticBody3D:
 	return body
 
 
-static func _blocker_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, offset: Vector3,
-		out: PackedVector3Array) -> void:
+## Sign-sized extra objects drawn only with opaque textures (foliage cut-outs are left
+## standing: the car passes through them anyway).
+static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
+	if not x.has("prop"):
+		x.prop = false
+		var box := _poly_box(x.polys, x.verts)
+		if box.size != Vector3.ZERO and maxf(box.size.x, box.size.z) <= PROP_MAX_WIDTH \
+				and box.size.y >= PROP_HEIGHT.x and box.size.y <= PROP_HEIGHT.y:
+			x.prop = true
+			for p in x.polys:
+				if p.tex >= t.textures.size():
+					continue
+				var ti: Nfs3Track.TexInfo = t.textures[p.tex]
+				if ti.cutout or ti.additive or ti.is_lane:
+					x.prop = false
+					break
+	return x.prop
+
+
+static func _make_prop(t: Nfs3Track, x: Dictionary, material: Material) -> KnockableProp:
+	var box := _poly_box(x.polys, x.verts)
+	var foot := Vector3(box.get_center().x, box.position.y, box.get_center().z)
+	# Only the polys that reach down to car height can be hit: a sign's post, not its plate.
+	var low := []
+	for p in x.polys:
+		for k in 4:
+			if p.v[k] < x.verts.size() and x.verts[p.v[k]].y < box.position.y + PROP_REACH:
+				low.append(p)
+				break
+	var reach := _poly_box(low, x.verts) if low.size() > 0 else box
+	reach = AABB(reach.position - foot, Vector3(reach.size.x, minf(reach.size.y, PROP_REACH), reach.size.z))
+	var hull := PackedVector3Array()
+	for v in x.verts:
+		hull.append(v - foot)
+	var prop := KnockableProp.new()
+	prop.position = x.ref + foot
+	prop.setup(_mesh(t, [[x.polys, x.verts, x.shading, -foot, true]], false), material,
+			reach, hull, DRAW_DISTANCE)
+	return prop
+
+
+static func _poly_box(polys: Array, verts: PackedVector3Array) -> AABB:
+	var box := AABB()
+	var first := true
+	for p in polys:
+		for k in 4:
+			if p.v[k] < verts.size():
+				box = AABB(verts[p.v[k]], Vector3.ZERO) if first else box.expand(verts[p.v[k]])
+				first = false
+	return box
+
+
+## The chase camera must not end up inside a building and show its back faces. Large
+## solid objects (buildings, walls, bridges) block the camera; foliage, glows and small
+## props would only make it jump, so they are left out.
+static func _camera_blockers(t: Nfs3Track) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "CameraBlockers"
+	body.collision_layer = CAMERA_LAYER
+	body.collision_mask = 0
+	var faces := PackedVector3Array()
+	for b in t.blocks:
+		for obj in b.objects:
+			_solid_faces(t, obj, b.verts, Vector3.ZERO, faces, true)
+		for x in b.xobjs:
+			if not x.has("anim"):
+				_solid_faces(t, x.polys, x.verts, x.ref, faces, true)
+	for o in t.col_objects:
+		_solid_faces(t, o.polys, o.verts, o.ref, faces, true)
+	if faces.size() > 0:
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(faces)
+		shape.backface_collision = true
+		var cs := CollisionShape3D.new()
+		cs.shape = shape
+		body.add_child(cs)
+	return body
+
+
+## Appends the triangles of an object's opaque polys; with `large_only`, only when the
+## object is big enough to block the camera.
+static func _solid_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, offset: Vector3,
+		out: PackedVector3Array, large_only: bool) -> void:
 	var tris := PackedVector3Array()
 	var box := AABB()
 	for p in polys:
@@ -152,23 +250,28 @@ static func _blocker_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array
 			tris.append(v)
 	if tris.is_empty():
 		return
-	if maxf(box.size.x, box.size.z) >= 6.0 and box.size.y >= 2.5:
+	if not large_only or (maxf(box.size.x, box.size.z) >= 6.0 and box.size.y >= 2.5):
 		out.append_array(tris)
 
 
-## One mesh from [polys, verts, shading, offset] groups, keeping only the polys whose
-## texture is (or isn't) additive. Null when nothing matched.
+## One mesh from [polys, verts, shading, offset, mirrored] groups, keeping only the polys
+## whose texture is (or isn't) additive. Null when nothing matched.
+## Extra objects (xobjs) store their quads mirrored (corners 0<->1, 2<->3) relative to the
+## texture corners: read as-is, the half-tree quads of a split tree show their trunk on the
+## outside and the front/back quads of a sign face the wrong way.
 static func _mesh(t: Nfs3Track, groups: Array, additive: bool) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var twins := _twin_polys(groups)
 	var n := 0
 	for g in groups:
-		n += _add_polys(st, t, g[0], g[1], g[2], g[3], additive)
+		n += _add_polys(st, t, g[0], g[1], g[2], g[3], g[4], additive, twins)
 	return st.commit() if n > 0 else null
 
 
 static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: PackedVector3Array,
-		shading: PackedColorArray, offset: Vector3, additive: bool) -> int:
+		shading: PackedColorArray, offset: Vector3, mirrored: bool, additive: bool, twins: Dictionary) -> int:
+	var order: Array = [1, 0, 3, 2] if mirrored else [0, 1, 2, 3]
 	var n := 0
 	for p in polys:
 		if p.tex >= t.textures.size():
@@ -182,17 +285,67 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 				bad = true
 		if bad:
 			continue
-		var a := verts[p.v[0]]
-		var normal := (verts[p.v[2]] - a).cross(verts[p.v[1]] - a).normalized()
+		var a := verts[p.v[order[0]]]
+		var normal := (verts[p.v[order[2]]] - a).cross(verts[p.v[order[1]]] - a).normalized()
+		var one_sided := 1.0 if twins.has(p) else 0.0
+		# UV2.y = one_sided + 2 * frames + 16 * period: the shaders flip through `frames`
+		# consecutive texture layers.
+		var frames := _anim_frames(t, p)
+		var anim: float = 2.0 * frames + 16.0 * p.anim_period if frames > 1 else 0.0
 		for k in Nfs3Track.QUAD:
-			var vi: int = p.v[k]
+			var vi: int = p.v[order[k]]
 			st.set_color(shading[vi] if vi < shading.size() else Color.WHITE)
 			st.set_uv(ti.uv[k])
-			st.set_uv2(Vector2(ti.qfs_index, 0))
+			st.set_uv2(Vector2(ti.qfs_index, one_sided + anim))
 			st.set_normal(normal)
 			st.add_vertex(verts[vi] + offset)
 		n += 2
 	return n
+
+
+## How many frames of a poly's animated texture can be drawn: the frames must sit in
+## consecutive texture layers (they do in every stock track), else the poly stays still.
+static func _anim_frames(t: Nfs3Track, p: Nfs3Track.Poly) -> int:
+	if p.anim_frames < 2:
+		return 0
+	var base: int = t.textures[p.tex].qfs_index
+	for f in range(1, p.anim_frames):
+		if p.tex + f >= t.textures.size() or t.textures[p.tex + f].qfs_index != base + f \
+				or base + f >= t.images.size():
+			return f if f > 1 else 0
+	return p.anim_frames
+
+
+## Polys that share their corners with an opposite-facing poly of the mesh: road signs and
+## billboards are a front quad plus a back quad over the same four points, sometimes split
+## across two objects (the Redrock Ridge motel sign). Drawn double-sided they z-fight or
+## show the far quad's mirrored back, so these get their back faces culled in the shader.
+static func _twin_polys(groups: Array) -> Dictionary:
+	var by_corners := {}
+	for g in groups:
+		var verts: PackedVector3Array = g[1]
+		var order: Array = [1, 0, 3, 2] if g[4] else [0, 1, 2, 3]
+		for p in g[0]:
+			if p.v[0] >= verts.size() or p.v[1] >= verts.size() or p.v[2] >= verts.size() or p.v[3] >= verts.size():
+				continue
+			var corners := []
+			for k in 4:
+				var v: Vector3 = ((verts[p.v[k]] + g[3]) * 100.0).round()
+				corners.append("%d,%d,%d" % [v.x, v.y, v.z])
+			corners.sort()
+			var key := ";".join(corners)
+			if not by_corners.has(key):
+				by_corners[key] = []
+			var a := verts[p.v[order[0]]]
+			by_corners[key].append([p, (verts[p.v[order[2]]] - a).cross(verts[p.v[order[1]]] - a).normalized()])
+	var out := {}
+	for group: Array in by_corners.values():
+		for i in group.size():
+			for j in range(i + 1, group.size()):
+				if group[i][1].dot(group[j][1]) < -0.9:
+					out[group[i][0]] = true
+					out[group[j][0]] = true
+	return out
 
 
 static func _texture_array(t: Nfs3Track) -> Texture2DArray:

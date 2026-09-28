@@ -29,6 +29,7 @@ var laps := 2
 var opponents := 3
 var traffic := true
 var units_kmh := true
+var night := false
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var last_results: Array = []
 
@@ -170,6 +171,7 @@ func save_settings() -> void:
 	cf.set_value("game", "opponents", opponents)
 	cf.set_value("game", "traffic", traffic)
 	cf.set_value("game", "kmh", units_kmh)
+	cf.set_value("game", "night", night)
 	cf.set_value("game", "quality", quality)
 	cf.save(SETTINGS_PATH)
 
@@ -187,6 +189,7 @@ func _load_settings() -> void:
 	opponents = clampi(_int(cf, "opponents", opponents), 0, 7)
 	traffic = _bool(cf, "traffic", traffic)
 	units_kmh = _bool(cf, "kmh", units_kmh)
+	night = _bool(cf, "night", night)
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 
 
@@ -250,6 +253,8 @@ func _setup_input() -> void:
 	_bind("reset_car", [KEY_R], [JOY_BUTTON_BACK])
 	_bind("horn", [KEY_H], [JOY_BUTTON_RIGHT_SHOULDER])
 	_bind("mirror", [KEY_M], [])
+	_bind("headlights", [KEY_L], [JOY_BUTTON_DPAD_UP])
+	_bind("high_beam", [KEY_K], [JOY_BUTTON_DPAD_DOWN])
 	_bind("pause", [KEY_ESCAPE, KEY_P], [JOY_BUTTON_START])
 	# Analog steering on the left stick.
 	for dir in [["steer_left", -1.0], ["steer_right", 1.0]]:

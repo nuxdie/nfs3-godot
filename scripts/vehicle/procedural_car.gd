@@ -17,6 +17,7 @@ var body_parts: Array[Dictionary] = []
 var wheels: Array[Dictionary] = []
 var half_size := Vector3.ONE
 var colours: Array[Color] = []
+var lights: Array[Dictionary] = []
 var carp := {}
 var error := ""
 var body_color := Color.WHITE

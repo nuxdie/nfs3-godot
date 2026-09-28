@@ -11,6 +11,8 @@ class Poly:
 	var v: PackedInt32Array
 	var tex: int
 	var flags: int
+	var anim_frames := 0    # animated texture (fire, water, ...): frames in textures tex, tex+1, ...
+	var anim_period := 0    # game ticks per frame
 
 class Block:
 	var center: Vector3
@@ -84,6 +86,11 @@ static func read_polys(d: PackedByteArray, p: int, n: int) -> Array:
 		poly.v = PackedInt32Array([d.decode_u16(q), d.decode_u16(q + 2), d.decode_u16(q + 4), d.decode_u16(q + 6)])
 		poly.tex = d.decode_u16(q + 8)
 		poly.flags = d[q + 12]
+		# Flag 0x04: animated texture; the last byte packs frame count (low 3 bits) and
+		# ticks per frame (high 5 bits). The frames are the next entries of the texture table.
+		if poly.flags & 0x04 and d[q + 13] & 7 >= 2 and d[q + 13] >> 3 > 0:
+			poly.anim_frames = d[q + 13] & 7
+			poly.anim_period = d[q + 13] >> 3
 		out[i] = poly
 	return out
 
@@ -115,6 +122,33 @@ static func load_dir(dir: String) -> Nfs3Track:
 	else:
 		t.error = "missing texture archive"
 	return t
+
+
+## Just the block centres along the lap (Godot space), read from the FRD headers without
+## building anything: enough for the menu's track map. Empty if the file is missing or bad.
+static func peek_outline(dir: String) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var short := dir.get_file().to_lower().replace("k0", "")
+	var frd_path := DataPath.find_ci(dir, short + ".frd")
+	var d := FileAccess.get_file_as_bytes(frd_path) if frd_path != "" else PackedByteArray()
+	if d.size() < 32:
+		return out
+	var n_blocks := d.decode_u32(28) + 1
+	if n_blocks < 1 or n_blocks > 1000:
+		return out
+	var p := 32
+	for bi in n_blocks:
+		if p + 84 > d.size():
+			return PackedVector3Array()
+		out.append(mirror(Vector3(d.decode_float(p), d.decode_float(p + 4), d.decode_float(p + 8))))
+		var n_verts := d.decode_u32(p + 60)
+		p += 84 + n_verts * 16 + 4 * 0x12C
+		if p + 32 > d.size():
+			return PackedVector3Array()
+		var n := [d.decode_u32(p + 4), d.decode_u32(p + 8), d.decode_u32(p + 12), d.decode_u32(p + 16),
+			d.decode_u32(p + 20), d.decode_u32(p + 24), d.decode_u32(p + 28)]
+		p += 32 + n[0] * 8 + n[1] * 8 + n[2] * 12 + n[3] * 20 + n[4] * 20 + n[5] * 16 + n[6] * 16
+	return out
 
 
 ## True (and sets `error`) when `n` bytes at `p` run past the end of the file: a damaged or

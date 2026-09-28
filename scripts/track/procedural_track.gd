@@ -11,20 +11,7 @@ const TREE_DRAW_DISTANCE := 450.0
 static func build(root: Node3D, seed_value := 1998) -> TrackPath:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var curve := Curve3D.new()
-	curve.bake_interval = STEP
-	var n_ctrl := 14
-	var ctrl: Array[Vector3] = []
-	for i in n_ctrl:
-		var a := TAU * i / n_ctrl
-		var r := rng.randf_range(380.0, 620.0)
-		ctrl.append(Vector3(cos(a) * r * 1.3, rng.randf_range(0.0, 22.0), sin(a) * r))
-	for i in n_ctrl:
-		var prev := ctrl[(i - 1 + n_ctrl) % n_ctrl]
-		var next := ctrl[(i + 1) % n_ctrl]
-		var tan := (next - prev) * 0.28
-		curve.add_point(ctrl[i], -tan, tan)
-	curve.add_point(ctrl[0], -(ctrl[1] - ctrl[n_ctrl - 1]) * 0.28, Vector3.ZERO)
+	var curve := _curve(rng)
 
 	var path := TrackPath.new()
 	var total := curve.get_baked_length()
@@ -47,6 +34,31 @@ static func build(root: Node3D, seed_value := 1998) -> TrackPath:
 	_build_props(root, path, rng, ground)
 	root.add_child(Nfs3TrackBuilder.make_walls(path))
 	return path
+
+
+## The lap's centreline, without building the track (for the menu's map).
+static func outline(seed_value := 1998) -> PackedVector3Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	return _curve(rng).get_baked_points()
+
+
+static func _curve(rng: RandomNumberGenerator) -> Curve3D:
+	var curve := Curve3D.new()
+	curve.bake_interval = STEP
+	var n_ctrl := 14
+	var ctrl: Array[Vector3] = []
+	for i in n_ctrl:
+		var a := TAU * i / n_ctrl
+		var r := rng.randf_range(380.0, 620.0)
+		ctrl.append(Vector3(cos(a) * r * 1.3, rng.randf_range(0.0, 22.0), sin(a) * r))
+	for i in n_ctrl:
+		var prev := ctrl[(i - 1 + n_ctrl) % n_ctrl]
+		var next := ctrl[(i + 1) % n_ctrl]
+		var tan := (next - prev) * 0.28
+		curve.add_point(ctrl[i], -tan, tan)
+	curve.add_point(ctrl[0], -(ctrl[1] - ctrl[n_ctrl - 1]) * 0.28, Vector3.ZERO)
+	return curve
 
 
 static func _mat(color: Color, stripes := false) -> StandardMaterial3D:

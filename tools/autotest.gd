@@ -23,12 +23,15 @@ func _ready() -> void:
 		Game.mode = int(args[i + 2])
 	if args.size() > i + 3:
 		Game.car_index = int(args[i + 3])
+	Game.night = "--night" in args
 	Game.laps = 2
 	Game.opponents = 3
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://shots"))
 	if Game.track_id == "menu":
 		# Just photograph the front end.
+		if "--settings" in args:
+			get_tree().current_scene.open_settings.call_deferred()
 		for k in 60:
 			await get_tree().process_frame
 		if DisplayServer.get_name() != "headless":

@@ -9,6 +9,13 @@ signal crashed(impulse: float)
 
 const SUSPENSION_TRAVEL := 0.22
 const STATIC_SAG := 0.09
+# Past full travel the suspension hits a stiff, well-damped bump stop instead of letting
+# the body sink onto the wheels (which pushed the tyres up through the wheel arches).
+const BUMP_STOP_STIFFNESS := 12.0   # x spring rate
+const BUMP_STOP_DAMPING := 4.0      # x damper rate
+# The wheel ray starts this far above full bump so a hard landing that sinks the car
+# doesn't put the ray origin under the road (a miss there dropped the wheel out).
+const RAY_LEAD := 0.25
 
 # --- control inputs, written by a controller every physics frame
 var throttle := 0.0
@@ -49,9 +56,25 @@ var _shift_timer := 0.0
 var _upside_timer := 0.0
 var _body_visual: Node3D
 var _siren_lights: Array[OmniLight3D] = []
+var _siren_glows: Array[MeshInstance3D] = []
+var _siren_pos: Array[Vector3] = []
 var _siren := false
 var _siren_t := 0.0
-var _brake_lights: Array[OmniLight3D] = []
+var _brake_lights: Array[Node3D] = []
+var _lamps: Array[Node3D] = []   # head and running tail glows, shown while the headlights are on
+var _head_glows: Array[Node3D] = []
+var _reverse_lights: Array[Node3D] = []
+var _reverse_xf: Transform3D     # where the reversing lamps' light cone starts, local
+var _beams: Array[SpotLight3D] = []   # [between the lamps, left lamp, right lamp]
+var _split_beams := false
+var _beam_allowed := false
+var headlights_on := true
+var high_beam := false
+
+## Headlight beams: tilt below level (degrees), reach (m), cone half-angle (degrees), energy.
+const LOW_BEAM := [6.0, 40.0, 24.0, 10.0]
+const HIGH_BEAM := [1.5, 100.0, 16.0, 18.0]
+const REVERSE_CONE := Vector3(14.0, 0.75, 0.9)   # track shader: reach, cos(outer angle), strength
 
 
 func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
@@ -73,7 +96,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	n_gears = maxi(n_gears, 1)
 
 	collision_layer = 2
-	collision_mask = 1 | 2
+	collision_mask = 1 | 2 | Nfs3TrackBuilder.SCENERY_LAYER
 	contact_monitor = true
 	max_contacts_reported = 4
 	can_sleep = false
@@ -136,8 +159,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 			w.visual = pivot
 			w.spin_node = spin
 		w.center = center
-		# The ray starts above the wheel centre by the suspension travel.
-		w.mount = center + Vector3.UP * SUSPENSION_TRAVEL
+		# The ray starts above the wheel centre by the suspension travel plus a lead-in.
+		w.mount = center + Vector3.UP * (SUSPENSION_TRAVEL + RAY_LEAD)
 		_wheels.append(w)
 
 	_wheelbase = maxf(_wheels[0].center.z - _wheels[2].center.z, 1.5)
@@ -165,42 +188,170 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	var sz := box.size
 	inertia = Vector3(sz.y * sz.y + sz.z * sz.z, sz.x * sz.x + sz.z * sz.z, sz.x * sz.x + sz.y * sz.y) * mass / 12.0 * 1.4
 
-	for side: float in [-1.0, 1.0]:
+	# Lamps sit at the model's light dummies; cars without them get a guess from the body size.
+	var heads := _lamp_positions(data, "H", Vector3(hs.x * 0.7, 0.0, hs.z))
+	var tails := _lamp_positions(data, "T", Vector3(hs.x * 0.7, 0.0, -hs.z))
+	for p in heads:
+		_head_glows.append(_lamp_glow(p + Vector3(0, 0, 0.08), Color(1.0, 0.95, 0.8), 0.32))
+	_lamps.append_array(_head_glows)
+	for p in tails:
+		_lamps.append(_lamp_glow(p - Vector3(0, 0, 0.06), Color(0.45, 0.03, 0.02), 0.22))
+	for l in _lamps:
+		add_child(l)
+	_siren_pos = _lamp_positions(data, "S", Vector3(0.4, hs.y * 0.9, 0.0))
+	for p in tails:
+		var glow := _lamp_glow(p - Vector3(0, 0, 0.08), Color(1.0, 0.08, 0.04), 0.3)
+		glow.visible = false
+		add_child(glow)
+		_brake_lights.append(glow)
+	# Reversing lamps: white, just inboard of the taillights (the models have no dummies for them).
+	for p in tails:
+		var glow := _lamp_glow(p - Vector3(signf(p.x) * 0.16, 0.03, 0.07), Color(0.9, 0.9, 0.85), 0.22)
+		glow.visible = false
+		add_child(glow)
+		_reverse_lights.append(glow)
+	var rear := Vector3(0.0, tails[0].y, (tails[0].z + tails[-1].z) * 0.5)
+	var rl := OmniLight3D.new()
+	rl.light_color = Color(0.9, 0.9, 0.85)
+	rl.omni_range = 4.0
+	rl.light_energy = 1.0
+	rl.visible = false
+	rl.position = rear - Vector3(0, 0, 0.3)
+	add_child(rl)
+	_reverse_lights.append(rl)
+	# Facing -Z (backwards) is the light's default; tip it 15° down at the road.
+	_reverse_xf = Transform3D(Basis.from_euler(Vector3(deg_to_rad(-15.0), 0, 0)), rear)
+	for p in [tails[0], tails[-1]]:
 		var bl := OmniLight3D.new()
 		bl.light_color = Color(1, 0.05, 0.02)
 		bl.omni_range = 2.0
 		bl.light_energy = 1.2
 		bl.visible = false
-		bl.position = Vector3(side * hs.x * 0.7, 0.0, -hs.z - 0.2)
+		bl.position = p - Vector3(0, 0, 0.2)
 		add_child(bl)
 		_brake_lights.append(bl)
+	# Real headlight beams, where set_headlight_beam() allows them: one per lamp, or a single
+	# one between the lamps to spare the per-object light budget (8 spots on the Mobile renderer).
+	# The NFS3 track shader draws its own cones, see light_cones().
+	for p: Vector3 in [(heads[0] + heads[-1]) * 0.5, heads[0], heads[-1]]:
+		var beam := SpotLight3D.new()
+		beam.position = p + Vector3(0, 0.1, 0.2)
+		beam.light_color = Color(1.0, 0.95, 0.85)
+		beam.spot_attenuation = 0.4
+		beam.visible = false
+		add_child(beam)
+		_beams.append(beam)
+	set_high_beam(false)
+
+
+## Whether this car's headlights cast a real light (on cars and the procedural track).
+func set_headlight_beam(allowed: bool, per_lamp := false) -> void:
+	_beam_allowed = allowed
+	_split_beams = per_lamp
+	set_headlights(headlights_on)
+
+
+func set_headlights(on: bool) -> void:
+	headlights_on = on
+	for i in _beams.size():
+		_beams[i].visible = on and _beam_allowed and (i > 0) == _split_beams
+	for l in _lamps:
+		l.visible = on
+
+
+func set_high_beam(on: bool) -> void:
+	high_beam = on
+	var b: Array = HIGH_BEAM if on else LOW_BEAM
+	for i in _beams.size():
+		_beams[i].rotation_degrees = Vector3(180.0 + b[0], 0, 0)   # face +Z, tipped down at the road
+		_beams[i].spot_range = b[1]
+		_beams[i].spot_angle = b[2] + 4.0   # the real light's soft edge reaches a little past the cone
+		# A pair of lamps overlaps into about the brightness of the single beam.
+		_beams[i].light_energy = b[3] * (1.0 if i == 0 else 0.6)
+	for g in _head_glows:
+		g.scale = Vector3.ONE * (1.4 if on else 1.0)
+
+
+## Light cones for the NFS3 track shader, which is unshaded and draws its own lighting:
+## [world transform (the cone points down -Z), Vector3(reach, cos(outer angle), strength)].
+## Drawn from the interpolated transform so the cones move smoothly between physics ticks.
+func light_cones() -> Array:
+	var out := []
+	var xf := get_global_transform_interpolated()
+	if headlights_on:
+		var b: Array = HIGH_BEAM if high_beam else LOW_BEAM
+		var shape := Vector3(b[1], cos(deg_to_rad(b[2])), 1.4 if high_beam else 1.0)
+		out.append([xf * _beams[1].transform, shape])
+		out.append([xf * _beams[2].transform, shape])
+	if gear < 0:
+		out.append([xf * _reverse_xf, REVERSE_CONE])
+	return out
+
+
+static func _lamp_positions(data: Object, kind: String, fallback: Vector3) -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for l: Dictionary in data.lights:
+		if l.kind == kind:
+			out.append(l.pos)
+	if out.is_empty():
+		out = [fallback, Vector3(-fallback.x, fallback.y, fallback.z)]
+	return out
+
+
+## A small camera-facing additive sprite: reads as a lit lamp in daylight without costing a light.
+static func _lamp_glow(pos: Vector3, colour: Color, size: float) -> MeshInstance3D:
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 1, 1, 1))
+	g.set_color(1, Color(1, 1, 1, 0))
+	g.add_point(0.25, Color(1, 1, 1, 0.9))
+	var t := GradientTexture2D.new()
+	t.gradient = g
+	t.fill = GradientTexture2D.FILL_RADIAL
+	t.fill_from = Vector2(0.5, 0.5)
+	t.fill_to = Vector2(0.5, 0.0)
+	t.width = 32
+	t.height = 32
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	m.albedo_texture = t
+	m.albedo_color = colour
+	m.disable_fog = true
+	var q := QuadMesh.new()
+	q.size = Vector2(size, size)
+	q.material = m
+	var mi := MeshInstance3D.new()
+	mi.mesh = q
+	mi.position = pos
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
 
 
 func enable_siren(on: bool) -> void:
 	_siren = on
 	if on and _siren_lights.is_empty():
-		var hs_y := 0.8
-		for c in [Color(1, 0.05, 0.05), Color(0.1, 0.2, 1)]:
+		# Red on the left-hand siren dummy, blue on the right-hand one (+X is the driver's left).
+		var ends: Array[Vector3] = [_siren_pos[0], _siren_pos[-1]]
+		if ends[0].x < ends[1].x:
+			ends.reverse()
+		for k in 2:
+			var c: Color = [Color(1, 0.05, 0.05), Color(0.1, 0.2, 1)][k]
 			var l := OmniLight3D.new()
 			l.light_color = c
 			l.omni_range = 14.0
 			l.light_energy = 0.0
-			l.position = Vector3(0.4 if _siren_lights.is_empty() else -0.4, hs_y, 0)
+			l.position = ends[k] + Vector3.UP * 0.1
 			add_child(l)
 			_siren_lights.append(l)
-			var bulb := MeshInstance3D.new()
-			var bm := BoxMesh.new()
-			bm.size = Vector3(0.35, 0.12, 0.2)
-			var m := StandardMaterial3D.new()
-			m.albedo_color = c
-			m.emission_enabled = true
-			m.emission = c
-			m.emission_energy_multiplier = 3.0
-			bm.material = m
-			bulb.mesh = bm
-			l.add_child(bulb)
+			var glow := _lamp_glow(ends[k] + Vector3.UP * 0.05, c, 0.55)
+			add_child(glow)
+			_siren_glows.append(glow)
 	for l in _siren_lights:
 		l.visible = on
+	for g in _siren_glows:
+		g.visible = on
 
 
 func forward_dir() -> Vector3:
@@ -211,8 +362,16 @@ func kmh() -> float:
 	return absf(speed) * 3.6
 
 
-func reset_to(xf: Transform3D) -> void:
-	global_transform = xf
+## Puts the car down on the road at `xf` (a point on the road surface), wheels hanging just
+## `drop` above it: tall cars and trucks would otherwise spawn with their tyres in the road
+## and the suspension would fire them into the air.
+func reset_to(xf: Transform3D, drop := 0.1) -> void:
+	var tyre_drop := 0.0
+	for w in _wheels:
+		tyre_drop = maxf(tyre_drop, w.radius - w.center.y)
+		w.compression = 0.0
+		w.contact = false
+	global_transform = xf.translated_local(Vector3.UP * (tyre_drop + drop))
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
 	gear = 1
@@ -288,7 +447,7 @@ func _physics_process(dt: float) -> void:
 	var space := get_world_3d().direct_space_state
 	var q := PhysicsRayQueryParameters3D.new()
 	q.exclude = [get_rid()]
-	q.collision_mask = 1
+	q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
 	grounded_wheels = 0
 	var total_slip := 0.0
 	var k := mass * 9.81 / 4.0 / STATIC_SAG
@@ -296,11 +455,12 @@ func _physics_process(dt: float) -> void:
 
 	for w in _wheels:
 		var origin: Vector3 = global_transform * w.mount
-		var ray_len: float = SUSPENSION_TRAVEL + w.radius
+		var ray_len: float = SUSPENSION_TRAVEL + RAY_LEAD + w.radius
 		q.from = origin
 		q.to = origin - up * ray_len
 		var hit := space.intersect_ray(q)
 		var prev_comp: float = w.compression
+		var prev_contact: bool = w.contact
 		if hit.is_empty():
 			w.compression = 0.0
 			w.contact = false
@@ -311,11 +471,20 @@ func _physics_process(dt: float) -> void:
 		w.contact = true
 		var dist := origin.distance_to(hit.position)
 		w.compression = ray_len - dist
-		var comp_vel: float = (w.compression - prev_comp) / dt
-		var spring := maxf(k * w.compression + c * comp_vel, 0.0)
+		var offset: Vector3 = hit.position - global_position
+		# On first contact the finite difference from zero would read as a huge compression
+		# speed (and a huge damper kick); the body's own speed into the road is the real one.
+		var comp_vel: float = (w.compression - prev_comp) / dt if prev_contact \
+				else -(linear_velocity + angular_velocity.cross(offset)).dot(up)
+		var spring: float = k * w.compression + c * comp_vel
+		var over: float = w.compression - SUSPENSION_TRAVEL
+		if over > 0.0:
+			spring += k * BUMP_STOP_STIFFNESS * over + c * BUMP_STOP_DAMPING * maxf(comp_vel, 0.0)
+		spring = maxf(spring, 0.0)
 		var n: Vector3 = hit.normal
 		var contact: Vector3 = hit.position
-		var offset := contact - global_position
+		w.ground = contact
+		w.normal = n
 		apply_force(up * spring, offset)
 
 		# Tyre frame on the ground plane.
@@ -391,6 +560,14 @@ func _physics_process(dt: float) -> void:
 	var braking_lit := brake > 0.1 and gear > 0
 	for bl in _brake_lights:
 		bl.visible = braking_lit
+	for rl in _reverse_lights:
+		rl.visible = gear < 0
+
+
+## Per-wheel state for effects: "contact", "ground" and "normal" (world, valid while in
+## contact), "slip" 0..1, "front", "left".
+func wheel_states() -> Array[Dictionary]:
+	return _wheels
 
 
 func is_stuck_upside_down() -> bool:
@@ -401,9 +578,10 @@ func _process(dt: float) -> void:
 	for w in _wheels:
 		if not w.has("visual"):
 			continue
-		# Wheel centre sits `compression` above its fully-extended position.
-		var y: float = w.center.y + w.compression
-		w.visual.position.y = lerpf(w.visual.position.y, y, 0.6)
+		# Wheel centre sits `compression` above its fully-extended position, but never
+		# further up than the arch allows.
+		var y: float = w.center.y + minf(w.compression, SUSPENSION_TRAVEL)
+		w.visual.position.y = lerpf(w.visual.position.y, y, 1.0 - exp(-55.0 * dt))
 		w.visual.rotation.y = steer_angle if w.front else 0.0
 		w.spin_node.rotation.x = fmod(w.spin, TAU)
 	if _siren:
@@ -411,6 +589,8 @@ func _process(dt: float) -> void:
 		var phase := fmod(_siren_t * 3.0, 1.0)
 		_siren_lights[0].light_energy = 6.0 if phase < 0.5 else 0.0
 		_siren_lights[1].light_energy = 6.0 if phase >= 0.5 else 0.0
+		_siren_glows[0].visible = phase < 0.5
+		_siren_glows[1].visible = phase >= 0.5
 
 
 func _on_body_entered(other: Node) -> void:

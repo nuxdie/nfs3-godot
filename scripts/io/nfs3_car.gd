@@ -13,6 +13,7 @@ var body_parts: Array[Dictionary] = []   # {name, mesh, center}
 var wheels: Array[Dictionary] = []       # {name, mesh, center} front-left, front-right, rear-left, rear-right
 var half_size := Vector3(0.9, 0.6, 2.2)
 var colours: Array[Color] = []
+var lights: Array[Dictionary] = []       # {kind, pos}: kind is the dummy's first letter (H head, T tail, S siren)
 var carp := {}                           # id -> PackedFloat32Array
 var error := ""
 
@@ -103,6 +104,11 @@ func _parse_fce(d: PackedByteArray) -> void:
 	if n_parts < 1 or n_parts > 64:
 		error = "damaged car.fce"
 		return
+	# Light "dummies": positions named by type, e.g. HFLO (headlight), TRLN (taillight), SMLN (siren).
+	for i in mini(d.decode_u32(52), 16):
+		var dname := d.slice(2564 + i * 64, 2628 + i * 64).get_string_from_ascii().strip_edges().to_upper()
+		if not dname.is_empty():
+			lights.append({"kind": dname[0], "pos": _v(d, 56 + i * 12)})
 	var n_pri := d.decode_u32(2044)
 	for i in mini(n_pri, 16):
 		var q := 2048 + i * 16
