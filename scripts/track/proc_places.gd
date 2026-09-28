@@ -166,6 +166,11 @@ func _stretch(z: int) -> PackedInt32Array:
 	return out
 
 
+## Whether a sign at `p` beside node `j` stands near the road's level, where a driver sees it.
+func _level(j: int, p: Vector3) -> bool:
+	return absf(p.y - lay.pts[j].y) < 1.5
+
+
 func _wall(i: int, s: float) -> float:
 	return lay.wall_r[i] if s > 0.0 else lay.wall_l[i]
 
@@ -367,13 +372,17 @@ func _panel(parent: Node3D, c: Vector3, size: Vector2, bg: Color, fg: Color, lin
 
 ## A road sign on two posts beside node `i` (or the first open node on from it, going `dir`),
 ## facing the traffic coming up to it: a `size` board in `bg`, bordered and lettered in `fg`.
-func _road_sign(i: int, s: float, size: Vector2, bg: Color, fg: Color, lines: Array, low := 1.5, dir := 1) -> int:
-	for k in 16:
+func _road_sign(i: int, s0: float, size: Vector2, bg: Color, fg: Color, lines: Array, low := 1.5, dir := 1) -> int:
+	# Near the road's level on its own side if it can be, else on the other, else anywhere
+	# (not up a cutting or down a bank, out of sight).
+	for tries in 48:
+		var k := tries % 16
+		var s := s0 if tries < 16 or tries >= 32 else -s0
 		var j := lay.idx(i + k * dir)
 		if lay.kind[j] != Kind.OPEN:
 			continue
 		var p := sc._beside(j, s, _wall(j, s) + 1.2 + size.x * 0.5)
-		if not sc._clear(p, 0.5, 10.0):
+		if not sc._clear(p, 0.5, 10.0) or tries < 32 and not _level(j, p):
 			continue
 		_no_fence(j, s, 2)
 		var face := (-lay.fwd[j] - lay.flat_right[j] * s * 0.2).normalized()
@@ -391,16 +400,16 @@ func _road_sign(i: int, s: float, size: Vector2, bg: Color, fg: Color, lines: Ar
 
 ## A yellow diamond warning sign on the right, lettered in black.
 func _warning(i: int, lines: Array) -> void:
-	for k in 16:
-		var j := lay.idx(i + k)
+	for tries in 32:
+		var j := lay.idx(i + tries % 16)
 		if lay.kind[j] != Kind.OPEN:
 			continue
 		var p := sc._beside(j, 1.0, lay.wall_r[j] + 1.2)
-		if not sc._clear(p, 0.3, 10.0):
+		if not sc._clear(p, 0.3, 10.0) or tries < 16 and not _level(j, p):
 			continue
 		var xf := ProcScenery._upright(p, -lay.fwd[j])
-		sc._put("sign_post", xf)
 		var h := _holder(xf)
+		sc.knockable(xf, ProcSigns.POST_REACH, [sc._put("sign_post", xf)], h)
 		var mi := MeshInstance3D.new()
 		mi.mesh = ProcScenery._board(Vector2(1.2, 1.2), 1.75, _diamond, true)
 		mi.visibility_range_end = 350.0
@@ -418,6 +427,7 @@ func _hand_sign(i: int, s: float, lines: Array) -> void:
 			continue
 		var face := (-lay.fwd[j] - lay.flat_right[j] * s * 0.4).normalized()
 		var h := _holder(ProcScenery._upright(p + Vector3.DOWN * 0.1, face))
+		sc.knockable(h.transform, ProcSigns.POST_REACH, [], h)
 		_parts(h, [_bx(Vector3(0.12, 2.2, 0.12), Vector3(0, 1.0, -0.1), Color(0.4, 0.3, 0.2))], 300.0, false)
 		_panel(h, Vector3(0, 1.55, 0), Vector2(2.2, 1.1), PLYWOOD, Color(0.55, 0.08, 0.06), lines, ad_font)
 		return
@@ -659,6 +669,7 @@ func _farm() -> void:
 	_panel(h, Vector3(0, 0.5, 0.86), Vector2(3.6, 0.7), PLYWOOD, Color(0.55, 0.08, 0.06), [["SWEET CORN · PEACHES", 0.36]],
 		ad_font)
 	var mb := _holder(ProcScenery._upright(sc._beside(i, s, _wall(i, s) + 1.6), -lay.flat_right[i] * s))
+	sc.knockable(mb.transform, AABB(Vector3(-0.3, 0, -0.4), Vector3(0.6, 1.3, 0.8)), [], mb)
 	_parts(mb, [_bx(Vector3(0.1, 1.1, 0.1), Vector3(0, 0.55, 0), wood), _bx(Vector3(0.3, 0.3, 0.55), Vector3(0, 1.2, 0), Color(0.2, 0.2, 0.22))], 200.0, false)
 	_text(mb, nm.farm.to_upper(), Vector3(0.16, 1.2, 0), 0.09, CREAM, road_font, false, 60.0, PI * 0.5)
 	_text(mb, nm.farm.to_upper(), Vector3(-0.16, 1.2, 0), 0.09, CREAM, road_font, false, 60.0, -PI * 0.5)
@@ -720,7 +731,7 @@ func _pass() -> void:
 		_road_sign(lay.idx(a - 40), 1.0, Vector2(3.8, 1.5), GREEN, CREAM, [[nm.tunnel.to_upper(), 0.4],
 			["TURN ON HEADLIGHTS", 0.26]])
 		# Cut into the portal's face over the arch (see ProcGround._portal).
-		var p := lay.pts[a] - lay.fwd[a] * 20.12 + lay.up[a] * (ProcGround.TUNNEL_WALL + ProcGround.TUNNEL_ROOF + 1.2)
+		var p := lay.pts[a] - lay.fwd[a] * 0.12 + lay.up[a] * (ProcGround.TUNNEL_WALL + ProcGround.TUNNEL_ROOF + 1.2)
 		var h := _holder(ProcScenery._upright(p, -lay.fwd[a]))
 		_text(h, nm.tunnel.to_upper(), Vector3(0, 0.3, 0), 0.6, Color(0.2, 0.2, 0.2), road_font, false, 500.0)
 		_text(h, str(nm.bored), Vector3(0, -0.5, 0), 0.3, Color(0.2, 0.2, 0.2), road_font, false, 300.0)
@@ -844,14 +855,12 @@ func _street(b: ProceduralTrack.Branch, church: bool) -> void:
 		_park(p, f[1] * side)
 
 
-## A parked car at `p` (its surface height is found), nose along `dir`.
+## A parked car at `p` (its surface height is found), nose along `dir`: the race parks a real
+## one there (see ParkedCars).
 func _park(p: Vector3, dir: Vector3) -> void:
-	var colours := [Color(0.6, 0.1, 0.08), Color(0.1, 0.2, 0.45), Color(0.85, 0.85, 0.82), Color(0.15, 0.15, 0.16),
-		Color(0.35, 0.4, 0.3), Color(0.7, 0.6, 0.35), Color(0.5, 0.52, 0.55)]
 	var b := lay.branch_at(p.x, p.z)
 	p.y = maxf(ProcGround.surface_y(lay, p.x, p.z), b.y if b.x < 20.0 else -INF)
-	sc._put("parked_car", ProcScenery._upright(p, dir.rotated(Vector3.UP, rng.randf_range(-0.04, 0.04))),
-		colours[rng.randi() % colours.size()])
+	sc.parked.append(ProcScenery._upright(p, dir.rotated(Vector3.UP, rng.randf_range(-0.04, 0.04))))
 
 
 ## A white clapboard church with its steeple over the door, facing the street, and its board

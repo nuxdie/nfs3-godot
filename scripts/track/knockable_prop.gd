@@ -14,6 +14,8 @@ var _knocked := false
 
 ## In the prop's local space, whose origin is the post's foot: `mesh`, `reach` (the part a
 ## car body can touch, e.g. just the post) and `hull` (all of its points, for the loose body).
+## `mesh` may be null (its nodes added as children instead) and `material` null (the mesh's
+## own surface materials).
 func setup(mesh: ArrayMesh, material: Material, reach: AABB, hull: PackedVector3Array,
 		draw_distance: float) -> void:
 	mass = MASS
@@ -23,12 +25,13 @@ func setup(mesh: ArrayMesh, material: Material, reach: AABB, hull: PackedVector3
 	collision_mask = 0
 	can_sleep = true
 
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = material
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.visibility_range_end = draw_distance
-	add_child(mi)
+	if mesh:
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.material_override = material
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = draw_distance
+		add_child(mi)
 
 	var shape := ConvexPolygonShape3D.new()
 	shape.points = hull

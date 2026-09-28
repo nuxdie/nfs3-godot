@@ -2,8 +2,8 @@ extends Node
 ## Global state: where the NFS3 data lives, what the player picked in the menu,
 ## input bindings and a small cache of loaded cars.
 
-enum Mode { SINGLE_RACE, HOT_PURSUIT, TIME_TRIAL, FREE_ROAM }
-const MODE_NAMES := ["Single Race", "Hot Pursuit", "Time Trial", "Free Roam"]
+enum Mode { SINGLE_RACE, HOT_PURSUIT, TIME_TRIAL, FREE_ROAM, SPECTATE }
+const MODE_NAMES := ["Single Race", "Hot Pursuit", "Time Trial", "Free Roam", "Spectate"]
 enum Quality { LOW, MEDIUM, HIGH }
 const QUALITY_NAMES := ["Low", "Medium", "High"]
 
@@ -33,6 +33,7 @@ var night := false
 var weather := false      # the track's rain or snow
 var damage := true        # crashes dent the cars and cost power (not in the original)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
+var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
 var last_results: Array = []
 
 var _car_cache := {}
@@ -59,6 +60,8 @@ func _ready() -> void:
 	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
 	if "--fxshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/fx_shots.gd").new())
+	if "--layouts" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/_layouts.gd").new())
 
 
 # ------------------------------------------------------------------ data files
@@ -189,6 +192,7 @@ func save_settings() -> void:
 	cf.set_value("game", "weather", weather)
 	cf.set_value("game", "damage", damage)
 	cf.set_value("game", "quality", quality)
+	cf.set_value("game", "camera", camera_mode)
 	cf.save(SETTINGS_PATH)
 
 
@@ -209,6 +213,7 @@ func _load_settings() -> void:
 	weather = _bool(cf, "weather", weather)
 	damage = _bool(cf, "damage", damage)
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
+	camera_mode = clampi(_int(cf, "camera", camera_mode), 0, ChaseCamera.MODES.size() - 1)
 
 
 func _int(cf: ConfigFile, key: String, fallback: int) -> int:
@@ -275,6 +280,8 @@ func _setup_input() -> void:
 	_bind("high_beam", [KEY_K], [JOY_BUTTON_DPAD_DOWN])
 	_bind("pause", [KEY_ESCAPE, KEY_P], [JOY_BUTTON_START])
 	_bind("handling_feel", [KEY_F6], [])
+	_bind("watch_prev", [KEY_Q, KEY_PAGEUP], [])
+	_bind("watch_next", [KEY_E, KEY_PAGEDOWN, KEY_TAB], [])
 	# Analog steering on the left stick.
 	for dir in [["steer_left", -1.0], ["steer_right", 1.0]]:
 		var ev := InputEventJoypadMotion.new()

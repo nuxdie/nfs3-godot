@@ -7,6 +7,8 @@ extends CanvasLayer
 const RED := UiKit.COP_RED
 const GO := Color(0.35, 1.0, 0.5)
 const M := 36.0
+# An unlit ticket / heat pip: dark, so it reads over sky and road alike.
+const EMPTY_PIP := Color(0.05, 0.055, 0.07, 0.4)
 
 var race: Node
 var player: Car
@@ -422,20 +424,23 @@ func _gap(rr: Dictionary, lead: Dictionary, L: float) -> String:
 ## Everything about the police in one block under the tower: chase status and heat while
 ## they're after you, tickets always, flat tyres once spiked.
 func _draw_cop_block(y: float) -> void:
-	var bx := M + 84.0
 	if pursuit:
 		var on := fmod(_time * 4.0, 2.0) < 1.0
 		_draw.draw_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
 		_str("PURSUIT", Vector2(M + 14, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-		for k in 3:
-			UiKit.draw_slant(_draw, Rect2(bx + k * 26, y - 11, 22, 10), RED if k < race.heat else Color(1, 1, 1, 0.18), 0.5)
-		_str("HEAT", Vector2(bx + 84, y), "cond", 11, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_LEFT, -1, 2)
 		y += 22
-	_str("TICKETS", Vector2(M, y), "cond", 13, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-	for k in race.MAX_TICKETS:
-		UiKit.draw_slant(_draw, Rect2(bx + k * 26, y - 11, 22, 10), RED if k < race.tickets else Color(1, 1, 1, 0.18), 0.5)
+		_pips("HEAT", y, 3, race.heat)
+		y += 22
+	_pips("TICKETS", y, race.MAX_TICKETS, race.tickets)
 	if player and player.tyres_flat():
 		_str("FLAT TYRES", Vector2(M, y + 22), "cond", 13, RED, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+
+
+## A label and a row of `n` slanted pips, the first `lit` of them red.
+func _pips(label: String, y: float, n: int, lit: int) -> void:
+	_str(label, Vector2(M, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+	for k in n:
+		UiKit.draw_slant(_draw, Rect2(M + 84 + k * 26, y - 11, 22, 10), RED if k < lit else EMPTY_PIP, 0.5)
 
 
 ## While chased: a thin light bar along the top edge, red and blue halves taking turns.
@@ -500,6 +505,8 @@ func _draw_hints(size: Vector2) -> void:
 	if _hint_t <= 0.0:
 		return
 	var hints := [["C", "CAMERA"], ["R", "RESET"], ["M", "MIRROR"], ["L", "LIGHTS"], ["ESC", "PAUSE"]]
+	if Game.mode == Game.Mode.SPECTATE:
+		hints = [["←→", "SWITCH CAR"], ["C", "CAMERA"], ["M", "MIRROR"], ["ESC", "PAUSE"]]
 	var w := 0.0
 	for h in hints:
 		w += UiKit.text_width("cond", h[0], 13, 1) + 12 + 7 + UiKit.text_width("cond", h[1], 13, 2) + 22

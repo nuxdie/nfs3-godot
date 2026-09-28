@@ -5,7 +5,10 @@ class_name ProceduralTrack
 ## terrain shaped around the road (cuttings, embankments, bridges) and the scenery to
 ## match each stretch.
 ##
-##   Layout     the centre line (a jittered loop checked for tight bends and near misses),
+##   Layout     the centre line (a jittered outline of a loop, each leg of it given its
+##              stretch's corners: square in town and round the fields, snaking through the
+##              forest, switchbacks up the mountain, sweepers by the lake; checked for tight
+##              bends and near misses),
 ##              the natural terrain under it, the road's heights (smoothed, grade-limited,
 ##              carried level through the ridge and over the river, rolling over the
 ##              farmland), banking, which nodes are open road, tunnel or bridge, and the
@@ -16,7 +19,7 @@ class_name ProceduralTrack
 ##              the signs and billboards that name and point to them
 
 ## Bump when the look changes, so the menu re-renders its postcard.
-const VERSION := 4
+const VERSION := 5
 ## The seed the game builds the lap from.
 const SEED := 1998
 
@@ -28,11 +31,11 @@ const LOST_MARGIN := 120.0   # m out past the road's edge before the race resets
 enum Kind { OPEN, TUNNEL, BRIDGE }
 enum Zone { TOWN, FARM, FOREST, MOUNTAIN, LAKE }
 
-## Where along the lap (0..1) each stretch starts; the lap starts in town.
+## Roughly where along the lap (0..1) each stretch starts; the lap starts in town.
 const ZONES := [[0.0, Zone.TOWN], [0.08, Zone.FARM], [0.33, Zone.FOREST], [0.52, Zone.MOUNTAIN],
 	[0.75, Zone.LAKE], [0.95, Zone.TOWN]]
-const TUNNEL_AT := 0.635     # the ridge the tunnel goes through
-const RIVER_AT := 0.84       # the river the bridge crosses
+const TUNNEL_AT := 0.635     # roughly where the ridge the tunnel goes through is
+const RIVER_AT := 0.84       # and the river the bridge crosses
 
 
 ## A road off the lap: a town street, a farm lane, a forest road, the lookout's drive or the
@@ -131,6 +134,9 @@ class Layout:
 	var ridge_p := Vector2.ZERO
 	var ridge_dir := Vector2.RIGHT      # along the path through it
 	var lake_p := Vector2.ZERO
+	var tunnel_at := 0                  # the nodes the tunnel, the river crossing and the lake
+	var river_at := 0                   # are laid out for
+	var lake_at := 0
 	var lake_depth := 0.0
 	var branches: Array[Branch] = []
 	var gap_l := PackedByteArray()      # 1 where a branch leaves that side of the road
@@ -298,7 +304,13 @@ class Layout:
 			var level := levelled(p.x + fr.x * d, p.z + fr.z * d, edge_y)
 			return clampf(nat, level - t * 0.5, level + t * 0.6)
 		# A branch running close by has the last word: the bank steepens rather than burying it.
-		return levelled(p.x + fr.x * d, p.z + fr.z * d, clampf(nat, edge_y - dd * 0.62, edge_y + maxf(dd - 1.5, 0.0) * 1.5))
+		# (Not at the road's very edge, and not where a guardrail stands on it.)
+		var bank := clampf(nat, edge_y - dd * 0.62, edge_y + maxf(dd - 1.5, 0.0) * 1.5)
+		var rails := rail_r if s > 0.0 else rail_l
+		var rail_at := p + flat_right[i] * s * (e + 0.6)
+		var railed := rails.size() == n and rails[i] == 1 and not on_branch(rail_at.x, rail_at.z, 0.5)
+		var w := smoothstep(1.5, 5.0, dd) if railed else smoothstep(0.0, 1.0, dd)
+		return lerpf(bank, levelled(p.x + fr.x * d, p.z + fr.z * d, bank), w)
 
 	func lap_frac(i: int) -> float:
 		return float(i) / n
@@ -354,9 +366,8 @@ static func build(root: Node3D, seed_value := SEED) -> TrackPath:
 static func outline(seed_value := SEED) -> PackedVector3Array:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var pts := _centreline(rng)
 	var out := PackedVector3Array()
-	for p in pts:
+	for p in _centreline(rng).pts:
 		out.append(Vector3(p.x, 0.0, p.y))
 	return out
 
@@ -364,8 +375,12 @@ static func outline(seed_value := SEED) -> PackedVector3Array:
 static func make_layout(seed_value: int) -> Layout:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value
-	var line := _centreline(rng)
+	var plan := _centreline(rng)
+	var line := plan.pts
 	var lay := Layout.new(seed_value)
+	lay.tunnel_at = plan.tunnel
+	lay.river_at = plan.river
+	lay.lake_at = plan.lake
 	lay.n = line.size()
 	var lo := Vector2(INF, INF)
 	var hi := -lo
@@ -374,9 +389,9 @@ static func make_layout(seed_value: int) -> Layout:
 		hi = hi.max(p)
 	lay.centre = (lo + hi) * 0.5
 	lay.extent = maxf(hi.x - lo.x, hi.y - lo.y) * 0.5
+	lay.zone = plan.zone
 	for i in lay.n:
 		lay.pts.append(Vector3(line[i].x, 0.0, line[i].y))
-		lay.zone.append(_zone_at(float(i) / lay.n))
 	for i in lay.n:
 		var d := line[(i + 1) % lay.n] - line[(i - 1 + lay.n) % lay.n]
 		var f := Vector3(d.x, 0.0, d.y).normalized()
@@ -408,56 +423,333 @@ static func _zone_at(f: float) -> int:
 
 # --- The centre line -----------------------------------------------------------------------
 
-## Evenly spaced points (STEP apart) round a closed lap on the ground plane. Loops of
-## jittered control points are tried until one has no bend tighter than a hairpin and no
-## two stretches of road running too close to each other.
-static func _centreline(rng: RandomNumberGenerator) -> PackedVector2Array:
-	var best := PackedVector2Array()
-	for attempt in 60:
-		var pts := _control_points(rng)
-		var line := _sample(pts)
-		if _valid(line):
-			return line
-		if best.is_empty():
-			best = line
+## The lap's centre line and what each stretch of it is: `pts` STEP apart, `zone` per node, and
+## the nodes the tunnel, the river crossing and the lake are laid out for.
+class Plan:
+	var pts := PackedVector2Array()
+	var zone := PackedByteArray()
+	var tunnel := 0
+	var river := 0
+	var lake := 0
+
+
+## How the road runs in each stretch, after NFS3's courses: the town's streets meet square, the
+## farm road runs along the field edges and turns their corners, the forest road snakes, the
+## mountain road climbs in switchbacks and twists through the rock, and the lakeside sweeps
+## along the shore. [corner radius range, how much longer than a leg's chord the road runs
+## (a guess, for sharing the lap out between the stretches)].
+const STYLE := {
+	Zone.TOWN: [26.0, 34.0, 1.3],
+	Zone.FARM: [38.0, 70.0, 1.3],
+	Zone.FOREST: [36.0, 70.0, 1.35],
+	Zone.MOUNTAIN: [26.0, 40.0, 1.9],
+	Zone.LAKE: [140.0, 260.0, 1.12],
+}
+
+
+## Tries plans until one has no bend tighter than a hairpin and no two stretches of road
+## running too close to each other.
+static func _centreline(rng: RandomNumberGenerator) -> Plan:
+	var first: Plan = null
+	for attempt in 200:
+		var plan := _plan(rng)
+		var ok := _valid(plan.pts)
+		if ok:
+			return plan
+		if first == null:
+			first = plan
+	push_warning("Procedural track: no clean lap for this seed")
+	return first
+
+
+## An outline of the lap (a jittered loop, a point or two pulled in so it doubles back round a
+## bay), shared out between the stretches; then each leg of it, the road between two of its
+## points, gets its stretch's corners, and they're rounded off and sampled STEP apart.
+static func _plan(rng: RandomNumberGenerator) -> Plan:
+	var m := rng.randi_range(12, 15)
+	var phase := rng.randf() * TAU
+	var rx := rng.randf_range(900.0, 1100.0)
+	var ry := rx * rng.randf_range(0.6, 0.85)
+	var outline := PackedVector2Array()
+	for i in m:
+		var a := phase + TAU * (i + rng.randf_range(-0.3, 0.3)) / m
+		outline.append(Vector2(cos(a) * rx, sin(a) * ry) * rng.randf_range(0.75, 1.15))
+	# Bays and headlands: points pulled well in and pushed out, so the lap doubles back on
+	# itself and reaches out in arms, as NFS3's do.
+	for k in rng.randi_range(1, 3):
+		outline[rng.randi_range(2, m - 2)] *= rng.randf_range(0.25, 0.55)
+	if rng.randf() < 0.6:
+		outline[rng.randi_range(2, m - 2)] *= rng.randf_range(1.2, 1.4)
+	# Which stretch each leg is: its middle's share of the (guessed) lap.
+	var zones := PackedByteArray()
+	zones.resize(m)
+	var est := PackedFloat32Array()
+	est.resize(m)
+	for _pass in 3:
+		var total := 0.0
+		for j in m:
+			est[j] = outline[j].distance_to(outline[(j + 1) % m]) * STYLE[zones[j]][2]
+			total += est[j]
+		var acc := 0.0
+		for j in m:
+			zones[j] = _zone_at((acc + est[j] * 0.5) / total)
+			acc += est[j]
+	# The lap starts and ends in town.
+	zones[0] = Zone.TOWN
+	zones[m - 1] = Zone.TOWN
+	var fracs := PackedFloat32Array()
+	var acc := 0.0
+	var total_est := 0.0
+	for e in est:
+		total_est += e
+	for j in m:
+		fracs.append((acc + est[j] * 0.5) / total_est)
+		acc += est[j]
+	var tunnel_leg := _pick_leg(outline, zones, fracs, Zone.MOUNTAIN, TUNNEL_AT)
+	var river_leg := _pick_leg(outline, zones, fracs, Zone.LAKE, RIVER_AT)
+	# The climb: the longest of the other mountain legs goes up in switchbacks.
+	var climb_leg := -1
+	for j in m:
+		if zones[j] == Zone.MOUNTAIN and j != tunnel_leg and (climb_leg < 0 or est[j] > est[climb_leg]):
+			climb_leg = j
+	# The corners: points, their radii, and each segment's leg (from its first point).
+	var vp := PackedVector2Array()
+	var vr := PackedFloat32Array()
+	var vleg := PackedInt32Array()
+	var town_axis := (outline[1] - outline[0]).normalized()
+	var farm_axis := town_axis.rotated(rng.randf_range(0.3, 1.2))
+	var start := 0
+	for j in m:
+		var p := outline[j]
+		var q := outline[(j + 1) % m]
+		var z: int = zones[j]
+		vp.append(p)
+		vr.append(_radius(rng, z))
+		vleg.append(j)
+		var mid: Array
+		if j == 0:
+			# The start/finish straight: the lap starts a third of the way along it.
+			start = vp.size()
+			mid = [[p.lerp(q, 0.35), 0.0]]
+		elif j == tunnel_leg or j == river_leg:
+			mid = _sweep(rng, p, q, 1, 0.0, 25.0, 220.0, 320.0)
+		else:
+			match z:
+				Zone.TOWN:
+					mid = _square(rng, p, q, town_axis, z)
+				Zone.FARM:
+					mid = _square(rng, p, q, farm_axis, z)
+				Zone.FOREST:
+					mid = _esses(rng, p, q, z, 100.0, 160.0, 30.0, 70.0)
+				Zone.MOUNTAIN:
+					if j == climb_leg or rng.randf() < 0.4:
+						mid = _switchbacks(rng, p, q)
+					else:
+						mid = _esses(rng, p, q, z, 80.0, 120.0, 25.0, 50.0)
+				_:
+					mid = _sweep(rng, p, q, int(p.distance_to(q) / 330.0), 20.0, 60.0, 140.0, 260.0)
+		for e in mid:
+			vp.append(e[0])
+			vr.append(e[1])
+			vleg.append(j)
+	start = _tidy(vp, vr, vleg, start)
+	var dense := _fillet(vp, vr, vleg, start)
+	var plan := Plan.new()
+	var legs := _resample(dense[0], dense[1], plan)
+	for i in legs.size():
+		plan.zone.append(zones[legs[i]])
+	plan.tunnel = _leg_middle(legs, tunnel_leg, int(TUNNEL_AT * legs.size()))
+	plan.river = _leg_middle(legs, river_leg, int(RIVER_AT * legs.size()))
+	# The lake by the longest lakeside leg that isn't the river's.
+	var lake_leg := -1
+	for j in m:
+		if zones[j] == Zone.LAKE and j != river_leg and (lake_leg < 0 or est[j] > est[lake_leg]):
+			lake_leg = j
+	plan.lake = _leg_middle(legs, lake_leg, int(0.78 * legs.size()))
+	return plan
+
+
+static func _radius(rng: RandomNumberGenerator, z: int) -> float:
+	return rng.randf_range(STYLE[z][0], STYLE[z][1])
+
+
+## The leg of stretch `z` best placed for a feature meant to be `at` round the lap (and long
+## enough to hold it), or -1.
+static func _pick_leg(outline: PackedVector2Array, zones: PackedByteArray, fracs: PackedFloat32Array,
+		z: int, at: float) -> int:
+	var best := -1
+	var best_s := -INF
+	for j in zones.size():
+		if zones[j] != z:
+			continue
+		var s := outline[j].distance_to(outline[(j + 1) % zones.size()]) - 3000.0 * absf(fracs[j] - at)
+		if s > best_s:
+			best_s = s
+			best = j
 	return best
 
 
-static func _control_points(rng: RandomNumberGenerator) -> PackedVector2Array:
-	var n := rng.randi_range(10, 13)
-	var pts := PackedVector2Array()
-	var phase := rng.randf() * TAU
-	for i in n:
-		var a := phase + TAU * (i + rng.randf_range(-0.28, 0.28)) / n
-		var r := rng.randf_range(430.0, 760.0)
-		pts.append(Vector2(cos(a) * r * 1.3, sin(a) * r))
-	# A couple of points pulled in towards the middle make the lap double back: hairpins
-	# and S-bends rather than one big bumpy oval.
-	for k in rng.randi_range(1, 2):
-		var i := rng.randi_range(2, n - 1)
-		pts[i] *= rng.randf_range(0.35, 0.55)
-	# The start/finish straight: the first leg, with points on the line between its ends.
-	var a0 := pts[0]
-	var a1 := pts[1]
-	var out := PackedVector2Array([a0, a0.lerp(a1, 0.33), a0.lerp(a1, 0.66)])
-	out.append_array(pts.slice(1))
+static func _leg_middle(legs: PackedInt32Array, leg: int, fallback: int) -> int:
+	var a := -1
+	var count := 0
+	for i in legs.size():
+		if legs[i] == leg:
+			if a < 0:
+				a = i
+			count += 1
+	return a + count / 2 if count > 0 else fallback
+
+
+## Streets or field edges: the leg as one or two turns off a grid, square corners.
+static func _square(rng: RandomNumberGenerator, p: Vector2, q: Vector2, axis: Vector2, z: int) -> Array:
+	var d := q - p
+	var a := axis * d.dot(axis)
+	var b := d - a
+	var out := []
+	if a.length() < 70.0 or b.length() < 70.0:
+		return out
+	if rng.randf() < 0.5:
+		var t := rng.randf_range(0.3, 0.7)
+		out.append([p + a * t, _radius(rng, z)])
+		out.append([p + a * t + b, _radius(rng, z)])
+	elif rng.randf() < 0.5:
+		out.append([p + a, _radius(rng, z)])
+	else:
+		out.append([p + b, _radius(rng, z)])
 	return out
 
 
-static func _sample(ctrl: PackedVector2Array) -> PackedVector2Array:
-	var curve := Curve3D.new()
-	curve.bake_interval = 2.0
-	var n := ctrl.size()
-	for i in n + 1:
-		var p := ctrl[i % n]
-		var t := (ctrl[(i + 1) % n] - ctrl[(i - 1 + n) % n]) / 6.0
-		curve.add_point(Vector3(p.x, 0.0, p.y), Vector3(-t.x, 0.0, -t.y), Vector3(t.x, 0.0, t.y))
-	var total := curve.get_baked_length()
-	var count := int(total / STEP)
+## Snaking: points either side of the leg every `lo`..`hi` m, `alo`..`ahi` m off it.
+static func _esses(rng: RandomNumberGenerator, p: Vector2, q: Vector2, z: int, lo: float, hi: float,
+		alo: float, ahi: float) -> Array:
+	var d := q - p
+	var count := int(d.length() / rng.randf_range(lo, hi))
+	var side := 1.0 if rng.randf() < 0.5 else -1.0
+	var v := d.normalized().orthogonal()
+	var out := []
+	for i in range(1, count):
+		var t := (i + rng.randf_range(-0.2, 0.2)) / count
+		out.append([p + d * t + v * side * rng.randf_range(alo, ahi), _radius(rng, z)])
+		side = -side
+	return out
+
+
+## Long bends: `count` points off the leg, `alo`..`ahi` m to one side or the other.
+static func _sweep(rng: RandomNumberGenerator, p: Vector2, q: Vector2, count: int, alo: float, ahi: float,
+		rlo: float, rhi: float) -> Array:
+	var d := q - p
+	var v := d.normalized().orthogonal()
+	var out := []
+	for i in range(1, count + 1):
+		var t := float(i) / (count + 1)
+		var side := 1.0 if rng.randf() < 0.5 else -1.0
+		out.append([p + d * t + v * side * rng.randf_range(alo, ahi), rng.randf_range(rlo, rhi)])
+	return out
+
+
+## Up (or down) the mountainside in hairpins: legs across the line of the leg, joined at their
+## ends by a short straight between two tight corners, far enough apart that the legs aren't
+## too close. Where the leg is too short for two hairpins, it twists instead.
+static func _switchbacks(rng: RandomNumberGenerator, p: Vector2, q: Vector2) -> Array:
+	var d := q - p
+	var u := d.normalized()
+	var v := u.orthogonal()
+	var s := rng.randf_range(90.0, 110.0)         # between legs
+	var w := rng.randf_range(70.0, 110.0)         # each leg's reach either side of the line
+	var cols := mini(int((d.length() - 160.0) / s) + 1, rng.randi_range(3, 4))
+	if cols < 3:
+		return _esses(rng, p, q, Zone.MOUNTAIN, 80.0, 120.0, 25.0, 50.0)
+	var x0 := (d.length() - (cols - 1) * s) * 0.5
+	var side := 1.0 if rng.randf() < 0.5 else -1.0
+	var out := []
+	for c in cols:
+		var x := x0 + c * s
+		if c > 0:
+			out.append([p + u * x + v * side * w, rng.randf_range(26.0, s * 0.33)])
+			side = -side
+		if c < cols - 1:
+			out.append([p + u * x + v * side * w, rng.randf_range(26.0, s * 0.33)])
+	return out
+
+
+## Drops the corners with no room to round them wider than a hairpin (where the outline
+## doubles back on itself, say), until there are none; the start straight's are kept. The
+## start's new index.
+static func _tidy(vp: PackedVector2Array, vr: PackedFloat32Array, vleg: PackedInt32Array, start: int) -> int:
+	var dropped := true
+	while dropped:
+		dropped = false
+		var n := vp.size()
+		for k in n:
+			if absi(k - start) <= 1 or (start == 0 and k == n - 1) or (start == n - 1 and k == 0):
+				continue
+			var prev := vp[(k - 1 + n) % n]
+			var next := vp[(k + 1) % n]
+			var th := absf((vp[k] - prev).angle_to(next - vp[k]))
+			if th < 0.01:
+				continue
+			var room := 0.5 * minf(vp[k].distance_to(prev), vp[k].distance_to(next)) / tan(minf(th, 3.0) * 0.5)
+			if room < MIN_RADIUS + 5.0:
+				vp.remove_at(k)
+				vr.remove_at(k)
+				vleg.remove_at(k)
+				if k < start:
+					start -= 1
+				dropped = true
+				break
+	return start
+
+
+## The corners rounded off: each point's corner an arc of its radius (eased where the segments
+## either side are too short for it), from point `start` round. [the points, about a metre
+## apart on the arcs; each one's leg].
+static func _fillet(vp: PackedVector2Array, vr: PackedFloat32Array, vleg: PackedInt32Array, start: int) -> Array:
+	var n := vp.size()
 	var out := PackedVector2Array()
+	var legs := PackedInt32Array()
+	for kk in n:
+		var k := (start + kk) % n
+		var prev := vp[(k - 1 + n) % n]
+		var next := vp[(k + 1) % n]
+		var c := vp[k]
+		var din := (c - prev).normalized()
+		var dout := (next - c).normalized()
+		var th := din.angle_to(dout)
+		if vr[k] <= 0.0 or absf(th) < 0.01:
+			out.append(c)
+			legs.append(vleg[k])
+			continue
+		# (A leg doubling straight back is no corner at all; _valid turns it down.)
+		var half := tan(minf(absf(th), 3.0) * 0.5)
+		var t := minf(vr[k] * half, 0.5 * minf(c.distance_to(prev), c.distance_to(next)))
+		var r := t / half
+		var t0 := c - din * t
+		var o := t0 - din.orthogonal() * r * signf(th)
+		var steps := maxi(2, int(absf(th) * r))
+		for sidx in steps + 1:
+			out.append(o + (t0 - o).rotated(th * sidx / steps))
+			# The arc belongs to the leg it leads into.
+			legs.append(vleg[k] if sidx * 2 >= steps else vleg[(k - 1 + n) % n])
+	return [out, legs]
+
+
+## Points STEP apart round the closed line `line` into `plan.pts`; each one's leg.
+static func _resample(line: PackedVector2Array, legs: PackedInt32Array, plan: Plan) -> PackedInt32Array:
+	var n := line.size()
+	var cum := PackedFloat32Array([0.0])
+	for i in n:
+		cum.append(cum[i] + line[i].distance_to(line[(i + 1) % n]))
+	var total := cum[n]
+	var count := int(total / STEP)
+	var out := PackedInt32Array()
+	var k := 0
 	for i in count:
-		var p := curve.sample_baked(i * total / count)
-		out.append(Vector2(p.x, p.z))
+		var s := i * total / count
+		while cum[k + 1] < s:
+			k += 1
+		var u := (s - cum[k]) / maxf(cum[k + 1] - cum[k], 0.0001)
+		plan.pts.append(line[k].lerp(line[(k + 1) % n], u))
+		out.append(legs[k])
 	return out
 
 
@@ -468,7 +760,7 @@ const GAP_NODES := 40        # ...this many nodes apart along the lap
 
 static func _valid(line: PackedVector2Array) -> bool:
 	var n := line.size()
-	if n * STEP < 3200.0 or n * STEP > 6200.0:
+	if n * STEP < 5400.0 or n * STEP > 8600.0:
 		return false
 	for i in n:
 		var a := line[(i - 1 + n) % n] - line[(i - 3 + n) % n]
@@ -494,7 +786,7 @@ static func _valid(line: PackedVector2Array) -> bool:
 
 ## Places the ridge, the river and the lake by the road.
 static func _terrain_features(lay: Layout, rng: RandomNumberGenerator) -> void:
-	var it := int(TUNNEL_AT * lay.n)
+	var it := lay.tunnel_at
 	lay.ridge_p = Vector2(lay.pts[it].x, lay.pts[it].z)
 	lay.ridge_dir = Vector2(lay.fwd[it].x, lay.fwd[it].z).rotated(rng.randf_range(-0.3, 0.3))
 	var lowest := INF
@@ -502,7 +794,7 @@ static func _terrain_features(lay: Layout, rng: RandomNumberGenerator) -> void:
 		lowest = minf(lowest, lay.natural(lay.pts[i].x, lay.pts[i].z))
 	lay.river_bed = lowest - 9.0
 	lay.water = lay.river_bed + 3.2
-	var ir := int(RIVER_AT * lay.n)
+	var ir := lay.river_at
 	lay.river_p = Vector2(lay.pts[ir].x, lay.pts[ir].z)
 	# Across the road at a slant, whichever way keeps it furthest from the rest of the lap.
 	var across := Vector2(lay.fwd[ir].x, lay.fwd[ir].z).orthogonal()
@@ -522,10 +814,18 @@ static func _terrain_features(lay: Layout, rng: RandomNumberGenerator) -> void:
 			best = clear
 			lay.river_dir = d
 	# A lake off to the side of the lakeside stretch.
-	var il := int(0.78 * lay.n)
-	var side := 1.0 if rng.randf() < 0.5 else -1.0
+	# (On whichever side leaves it clearer of the rest of the lap.)
+	var il := lay.lake_at
 	var fr := lay.flat_right[il]
-	lay.lake_p = Vector2(lay.pts[il].x, lay.pts[il].z) + Vector2(fr.x, fr.z) * side * 170.0
+	var lake_clear := -INF
+	for side in [1.0, -1.0]:
+		var c: Vector2 = Vector2(lay.pts[il].x, lay.pts[il].z) + Vector2(fr.x, fr.z) * side * 170.0
+		var clear := INF
+		for i in lay.n:
+			clear = minf(clear, c.distance_to(Vector2(lay.pts[i].x, lay.pts[i].z)))
+		if clear > lake_clear + rng.randf_range(0.0, 20.0):
+			lake_clear = clear
+			lay.lake_p = c
 	lay.lake_depth = lay.natural(lay.lake_p.x, lay.lake_p.y) - (lay.water - 7.0)
 	lay.river_on = true
 
@@ -547,7 +847,7 @@ static func _heights(lay: Layout) -> void:
 		y[i] += (detail[i] - y[i]) * 0.7 * farm[i]
 	# Level through the ridge and over the river: straight between the ends of each window,
 	# so the road goes under the one and over the other.
-	var windows := [[int(TUNNEL_AT * n), 45], [int(RIVER_AT * n), 32]]
+	var windows := [[lay.tunnel_at, 45], [lay.river_at, 32]]
 	for w in windows:
 		var a: int = w[0] - w[1]
 		var b: int = w[0] + w[1]
@@ -711,10 +1011,12 @@ static func _widths(lay: Layout) -> void:
 			if drop > 2.4 or near_bridge or outside and lay.zone[i] != Zone.FARM:
 				rail[i] = 1
 		_close_gaps(rail, 1, 5)
-		# Open where a branch leaves, and a node either side.
+		# Open where a branch leaves, and a node either side, and none where a branch runs
+		# alongside (it would stand on its shoulder).
 		var gap := lay.gap_r if s > 0.0 else lay.gap_l
 		for i in n:
-			if gap[i] or gap[lay.idx(i - 1)] or gap[lay.idx(i + 1)]:
+			var at := lay.pts[i] + lay.flat_right[i] * s * (lay.edge[i] + 0.6)
+			if gap[i] or gap[lay.idx(i - 1)] or gap[lay.idx(i + 1)] or lay.on_branch(at.x, at.z, 0.5):
 				rail[i] = 0
 		_drop_short(rail, 1, 6)
 		var walls := PackedFloat32Array()

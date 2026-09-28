@@ -5,6 +5,8 @@ render_mode unshaded, cull_disabled, blend_add, depth_draw_never, fog_disabled;
 
 uniform sampler2DArray textures : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform float brightness = 1.35;
+// 1 at night: sunlight (vertex alpha 1, e.g. sun shafts) fades out; glows and fire stay.
+uniform float night = 0.0;
 
 varying flat float layer;
 const float TICKS_PER_SECOND = 60.0;   // as in track.gdshader
@@ -26,5 +28,5 @@ void vertex() {
 void fragment() {
 	vec4 c = texture(textures, vec3(UV, layer));
 	ALBEDO = c.rgb * COLOR.rgb * brightness;
-	ALPHA = c.a;
+	ALPHA = c.a * (1.0 - night * COLOR.a);
 }

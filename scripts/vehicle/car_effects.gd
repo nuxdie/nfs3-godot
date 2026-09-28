@@ -2,8 +2,8 @@ class_name CarEffects
 extends Node3D
 ## Visual feedback from a car's tyres and body: skid marks where the tyres slide on paved
 ## ground, smoke off the rear wheels when they slide hard there, dust in the ground's colour
-## when they run on loose ground (TrackSurface), and sparks where the body scrapes a wall
-## or another car. Add as a child of the Car.
+## when they run on loose ground (TrackSurface), sparks where the body scrapes a wall
+## or another car, and a splash when it goes into a stream or a lake. Add as a child of the Car.
 
 const SEG_LEN := 0.5        # metres of tread per skid mark segment
 const MARK_SLIP := 0.45     # wheel slip that starts laying rubber
@@ -21,6 +21,8 @@ var _last: Array = []       # per wheel: where its current mark strip ended, or 
 var _smoke: Array[CPUParticles3D] = []   # per rear wheel
 var _dust: Array[CPUParticles3D] = []    # per rear wheel
 var _sparks: CPUParticles3D
+var _splash: CPUParticles3D
+var _wet := false           # in a stream or a lake last step
 var _spark_t := 0.0
 var _crash_t := 0.0         # a crash was reported; spark at its contact once physics has it
 var _crash_v := 0.0         # ... and how fast the car was going into it, m/s
@@ -45,6 +47,8 @@ func _ready() -> void:
 			_dust.append(d)
 	_sparks = _spark_emitter()
 	add_child(_sparks)
+	_splash = _splash_emitter()
+	add_child(_splash)
 	_car.crashed.connect(func(_i: float) -> void:
 		_crash_t = 0.1
 		_crash_v = maxf(_prev_v, _i))
@@ -111,6 +115,15 @@ func _physics_process(dt: float) -> void:
 		_spark_t = maxf(_spark_t, 0.2 if crash else 0.05)
 		_crash_t = 0.0
 	_sparks.emitting = _spark_t > 0.0
+	# Going into a stream or a lake throws up spray, higher the faster the car hits it.
+	var wet := _car.water_depth > 0.0
+	if wet and not _wet:
+		var v := clampf(_car.linear_velocity.length() * 0.3, 3.0, 12.0)
+		_splash.global_position = _car.global_position + Vector3.UP * _car.water_depth
+		_splash.initial_velocity_min = v * 0.5
+		_splash.initial_velocity_max = v
+		_splash.restart()
+	_wet = wet
 	_prev_v = _car.linear_velocity.length()
 
 
@@ -277,6 +290,41 @@ func _spark_emitter() -> CPUParticles3D:
 	var q := QuadMesh.new()
 	q.size = Vector2(0.05, 0.4)
 	q.material = m
+	p.mesh = q
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return p
+
+
+## A one-shot burst of white water thrown up round the car as it goes in (restart() fires
+## it), falling back under gravity.
+func _splash_emitter() -> CPUParticles3D:
+	var p := CPUParticles3D.new()
+	p.name = "Splash"
+	p.top_level = true
+	p.local_coords = false
+	p.emitting = false
+	p.one_shot = true
+	p.explosiveness = 0.9
+	p.amount = 64
+	p.lifetime = 1.4
+	p.direction = Vector3.UP
+	p.spread = 40.0
+	p.gravity = Vector3(0, -9.8, 0)
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	p.emission_sphere_radius = 1.5
+	p.scale_amount_min = 0.8
+	p.scale_amount_max = 1.6
+	var sc := Curve.new()
+	sc.add_point(Vector2(0, 0.5))
+	sc.add_point(Vector2(1, 1.4))
+	p.scale_amount_curve = sc
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(0.9, 0.95, 1.0, 0.9))
+	ramp.set_color(1, Color(0.8, 0.88, 0.95, 0.0))
+	p.color_ramp = ramp
+	var q := QuadMesh.new()
+	q.size = Vector2.ONE
+	q.material = _sprite_material(false)
 	p.mesh = q
 	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return p

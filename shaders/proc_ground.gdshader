@@ -17,10 +17,12 @@ uniform float water_line = -1000.0;
 
 varying vec3 wpos;
 varying vec3 wnrm;
+varying float tunnel;   // UV2.y 2: a tunnel's walkway, lit by its lamps rather than the sky
 
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	wnrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	tunnel = step(1.5, UV2.y);
 }
 
 float tri(vec3 p, vec3 w, float scale) {
@@ -62,6 +64,10 @@ void fragment() {
 	col = mix(col, vec3(0.9, 0.92, 0.95), snow);
 
 	ALBEDO = col;
+	if (tunnel > 0.5) {
+		EMISSION = col * vec3(1.0, 0.8, 0.55) * 0.3;
+		ALBEDO *= 0.35;
+	}
 	ROUGHNESS = 0.95;
 	SPECULAR = 0.25;
 }

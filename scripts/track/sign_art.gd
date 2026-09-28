@@ -23,7 +23,8 @@ var font: FontFile
 var _faces := {}             # name -> Rect2 in UV
 var _shelf := Vector3i.ZERO  # x, y and height of the shelf being filled
 var _glyphs := {}            # "px|glyph|colour" -> [Image, offset, advance]
-var _chunks := {}            # Vector2i cell -> SurfaceTool
+var _chunks := {}            # Vector2i cell -> {v, n, uv[, ch]}
+var _knockable: Array = []   # [chunk, from, count, frame, reach]
 var metal: Rect2             # plain galvanised steel: posts and the backs of signs
 var wood: Rect2
 var body: StaticBody3D
@@ -159,13 +160,18 @@ func _glyph(ch: String, px: int, c: Color) -> Array:
 
 # --- Building --------------------------------------------------------------------------------
 
-func _st(at: Vector3) -> SurfaceTool:
+## The chunk of geometry for the square `at` is in: {v, n, uv} (non-indexed triangles).
+func _st(at: Vector3) -> Dictionary:
 	var cell := Vector2i(floori(at.x / CELL), floori(at.z / CELL))
 	if not _chunks.has(cell):
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		_chunks[cell] = st
+		_chunks[cell] = {"v": PackedVector3Array(), "n": PackedVector3Array(), "uv": PackedVector2Array()}
 	return _chunks[cell]
+
+
+func _vert(st: Dictionary, p: Vector3, n: Vector3, uv: Vector2) -> void:
+	st.v.append(p)
+	st.n.append(n)
+	st.uv.append(uv)
 
 
 ## A board `size` m centred at `c` in frame `xf`, facing its +Z, showing `uv`; its back plain
@@ -178,15 +184,11 @@ func board(xf: Transform3D, c: Vector3, size: Vector2, uv: Rect2, back := true) 
 	var uvs := [uv.position + Vector2(0, uv.size.y), uv.end, uv.position + Vector2(uv.size.x, 0), uv.position]
 	var n := (xf.basis * Vector3.BACK).normalized()
 	for k in [0, 2, 1, 0, 3, 2]:
-		st.set_normal(n)
-		st.set_uv(uvs[k])
-		st.add_vertex(xf * (c + corners[k] + Vector3(0, 0, 0.01)))
+		_vert(st, xf * (c + corners[k] + Vector3(0, 0, 0.01)), n, uvs[k])
 	if back:
 		var m := metal.get_center()
 		for k in [0, 1, 2, 0, 2, 3]:
-			st.set_normal(-n)
-			st.set_uv(m)
-			st.add_vertex(xf * (c + corners[k] - Vector3(0, 0, 0.01)))
+			_vert(st, xf * (c + corners[k] - Vector3(0, 0, 0.01)), -n, m)
 
 
 ## A box `size` m centred at `c` in frame `xf`, all over `uv` (a plain colour).
@@ -207,9 +209,7 @@ func box(xf: Transform3D, c: Vector3, size: Vector3, uv := Rect2(), solid := fal
 			var order := [0, 1, 2, 0, 2, 3] if sgn < 0.0 else [0, 2, 1, 0, 3, 2]
 			var wn := (xf.basis * n).normalized()
 			for k in order:
-				st.set_normal(wn)
-				st.set_uv(m)
-				st.add_vertex(xf * q[k])
+				_vert(st, xf * q[k], wn, m)
 	if solid:
 		var shape := BoxShape3D.new()
 		shape.size = size
@@ -218,12 +218,26 @@ func box(xf: Transform3D, c: Vector3, size: Vector3, uv := Rect2(), solid := fal
 		body.shape_owner_set_transform(o, xf.orthonormalized() * Transform3D(Basis(), c))
 
 
-## A post from the ground up `h` m at `c` (its foot) in frame `xf`, solid.
-func post(xf: Transform3D, c: Vector3, h: float, w := 0.08) -> void:
-	box(xf, c + Vector3(0, h * 0.5 - 0.3, 0), Vector3(w, h + 0.3, w), metal, true)
+## A post from the ground up `h` m at `c` (its foot) in frame `xf`; solid unless it's part
+## of something a car knocks over (see knockable()).
+func post(xf: Transform3D, c: Vector3, h: float, w := 0.08, solid := true) -> void:
+	box(xf, c + Vector3(0, h * 0.5 - 0.3, 0), Vector3(w, h + 0.3, w), metal, solid)
 
 
-func flush(root: Node3D) -> void:
+## Where the next piece built at `at` starts: pass it to knockable() once the piece is built.
+func mark(at: Vector3) -> Array:
+	var st := _st(at)
+	return [st, st.v.size()]
+
+
+## Everything built since `m` (at `xf`, its foot) is knocked over by a car touching it within
+## `reach` (in its frame): taken out of its chunk, and flying off as a piece of its own.
+func knockable(m: Array, xf: Transform3D, reach: AABB) -> void:
+	var st: Dictionary = m[0]
+	_knockable.append([st, m[1], st.v.size() - m[1], xf, reach])
+
+
+func flush(root: Node3D, breakables: Breakables = null) -> void:
 	if _chunks.is_empty():
 		return
 	atlas.generate_mipmaps()
@@ -236,13 +250,28 @@ func flush(root: Node3D) -> void:
 	# Retro-reflective: lit up by headlights at night more than paint would be.
 	mat.rim_enabled = true
 	mat.rim = 0.3
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED   # a loose sign tumbles
 	for cell: Vector2i in _chunks:
-		var st: SurfaceTool = _chunks[cell]
-		st.set_material(mat)
+		var st: Dictionary = _chunks[cell]
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = st.v
+		arrays[Mesh.ARRAY_NORMAL] = st.n
+		arrays[Mesh.ARRAY_TEX_UV] = st.uv
+		var ch := Breakables.chunk(arrays, mat)
+		st["ch"] = ch
 		var mi := MeshInstance3D.new()
-		mi.mesh = st.commit()
+		mi.mesh = ch.mesh
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF   # thin: not worth the draw calls
 		mi.visibility_range_end = 500.0
 		mi.visibility_range_end_margin = 40.0
 		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		root.add_child(mi)
+	if breakables:
+		for k: Array in _knockable:
+			var st: Dictionary = k[0]
+			var from: int = k[1]
+			var count: int = k[2]
+			var xf: Transform3D = k[3]
+			breakables.add(xf, k[4], func() -> Array:
+				return [Breakables.take_piece(st.ch, from, count, xf), null])

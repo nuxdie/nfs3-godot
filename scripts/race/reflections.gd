@@ -74,6 +74,17 @@ func follow(car: Car) -> void:
 		_probe.global_position = car.global_position + Vector3.UP
 
 
+## Moves the probe onto another car (spectating switches cars mid-race).
+func retarget(car: Car) -> void:
+	if _probe == null:
+		return
+	_probe_car = car
+	if _probe.update_mode == ReflectionProbe.UPDATE_ALWAYS:
+		_probe.reparent(car, false)
+	else:
+		_probe_t = 0.0
+
+
 func _build_mirror(track_root: Node3D) -> void:
 	# Its own copy of the material, before the main one gets the mirror's texture (drawing
 	# a viewport's texture into itself would feed back).

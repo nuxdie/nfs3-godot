@@ -241,7 +241,9 @@ static func _emit_strip(parent: Node3D, st: Strip, lay: ProceduralTrack.Layout, 
 						u[k].y += n * ProceduralTrack.STEP
 				uvs.append_array(u)
 				for k in cols_n:
-					uv2.append(Vector2(style[ii] if style.size() > 0 else 0.0, 0.0))
+					# (The road's UV2.y marks the tunnel, where the road shader lights it.)
+					var in_tunnel := lay.kind[ii] == ProceduralTrack.Kind.TUNNEL
+					uv2.append(Vector2(style[ii] if style.size() > 0 else 0.0, 2.0 if in_tunnel else 0.0))
 			var a: int = row_base[i]
 			var b: int = row_base[(i + 1) % n]
 			for k in cols_n - 1:
@@ -964,11 +966,17 @@ static func _tunnel_profile(e: float) -> PackedVector2Array:
 static func _tunnels(root: Node3D, lay: ProceduralTrack.Layout, concrete: StandardMaterial3D, ground_mat: Material) -> void:
 	var tube_mat := concrete.duplicate() as StandardMaterial3D
 	tube_mat.albedo_color = Color(0.8, 0.78, 0.72)
+	# Lit by its lamps rather than the sky it can't see: a warm glow off the walls (the road
+	# shader lights the road under them).
+	tube_mat.emission_enabled = true
+	tube_mat.emission = Color(1.0, 0.8, 0.55)
+	tube_mat.emission_energy_multiplier = 0.1
+	tube_mat.albedo_color = Color(0.62, 0.6, 0.56)
 	var lamp_mat := StandardMaterial3D.new()
 	lamp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	lamp_mat.albedo_color = Color(1.0, 0.85, 0.55)
+	lamp_mat.albedo_color = Color(1.0, 0.88, 0.6)
 	var lamp := BoxMesh.new()
-	lamp.size = Vector3(0.35, 0.12, 2.4)
+	lamp.size = Vector3(0.4, 0.12, 3.0)
 	for run in ProceduralTrack._runs(lay.kind, ProceduralTrack.Kind.TUNNEL):
 		var a: int = run[0]
 		var count: int = run[1]
@@ -984,7 +992,8 @@ static func _tunnels(root: Node3D, lay: ProceduralTrack.Layout, concrete: Standa
 				var shade := Color(0.55, 0.55, 0.55) if m == 0 or m == pi.size() - 2 else Color.WHITE
 				var axis := (lay.pts[i] + lay.pts[j]) * 0.5 + lay.up[i] * TUNNEL_WALL
 				_face(st, [pi[m], pi[m + 1], pj[m + 1], pj[m]], axis, shade)
-			if k % 2 == 0:
+			# A pair of lamps over each node, over each lane.
+			if true:
 				for side: float in [-1.0, 1.0]:
 					var at := lay.pts[i] + lay.right[i] * side * 2.2 + lay.up[i] * (TUNNEL_WALL + TUNNEL_ROOF * 0.93)
 					lamps.append(Transform3D(Basis.looking_at(lay.fwd[i], lay.up[i]), at))

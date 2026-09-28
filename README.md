@@ -56,6 +56,9 @@ What's read:
 - **Time Trial** – just you and the clock.
 - **Free Roam** – no laps, traffic and a couple of cops (same pursuit rules,
   but tickets never end the session).
+- **Spectate** – a Single Race with the AI driving your car too. ←/→ (or Q/E,
+  Tab, PgUp/PgDn) switch which racer the camera follows; the results come up
+  once the whole field has finished.
 
 ## Controls
 
@@ -86,7 +89,10 @@ scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, wal
                    billboards that name them and point to them with real distances),
                    proc_signs.gd (traffic signs: speed limits, warnings, stop signs, street names,
                    route shields, guide signs, mile markers, barricades) painted into one atlas by
-                   sign_art.gd,
+                   sign_art.gd, breakables.gd (its signs, chevrons, cones, sawhorses and fence
+                   panels, drawn batched until a car knocks one flying as a KnockableProp; its
+                   guardrails bend as the NFS3 tracks' do, through Guardrails), parked_cars.gd
+                   (real traffic cars the race parks along its streets and lots, asleep till touched),
                    track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd,
@@ -111,6 +117,8 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
                    (add --settings with menu to photograph the settings panel)
                    (--night / --weather set the conditions, --tag=NAME prefixes the screenshots)
                    (--classic drops the body sway and progressive grip, --no-traffic empties the road)
+                   (--ram, procedural track: drives into some knockable props and a guardrail
+                   instead, printing what came loose and bent, shots/ram_*.png)
 tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with
                    draw-call and triangle counts: godot --path . -- --trackshots <track> [0.25 ...]
                    (--night / --weather; --up= --back= --ahead= --side= --lookside= aim the eye;
@@ -127,7 +135,6 @@ tools/car_calib.gd flat-out drag test of every car against the original game's a
 ## Not done yet
 
 - Original sounds/music (`.bnk`) – audio is synthesised instead.
-- Lane-marking textures that live in `render/pc/sfx.fsh` are skipped.
 - Mirrored/reverse tracks, split-screen.
 - The Knockout/tournament structure and car unlocks.
 - The car body collides as a box; FCE dummies (light positions) are unused.

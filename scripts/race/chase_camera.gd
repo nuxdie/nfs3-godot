@@ -25,6 +25,7 @@ var _idle := RECENTER_DELAY
 
 
 func _ready() -> void:
+	mode = Game.camera_mode
 	set_mouse_look(true)
 
 
@@ -42,6 +43,8 @@ func _unhandled_input(e: InputEvent) -> void:
 	if e.is_action_pressed("camera"):
 		mode = (mode + 1) % MODES.size()
 		_init_done = false
+		Game.camera_mode = mode
+		Game.save_settings()
 	elif e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_yaw = wrapf(_yaw - e.relative.x * MOUSE_SENS, -PI, PI)
 		_pitch = clampf(_pitch - e.relative.y * MOUSE_SENS, -1.2, 0.35)

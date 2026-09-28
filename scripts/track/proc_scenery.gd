@@ -9,8 +9,10 @@ extends RefCounted
 ##
 ## Everything is low-poly and drawn through MultiMeshes bucketed by CELL-sized squares, so
 ## each bucket is culled on its own and far ones drop out. There are no invisible walls, so
-## what a car could reach is solid: rails, fences, buildings, poles, lamp posts, rocks and
-## tree trunks (signs, crops, bushes and the backdrop forest stay passable).
+## what a car could reach is solid: rails, buildings, poles, lamp posts, rocks and tree trunks
+## (crops, bushes and the backdrop forest stay passable). Signs, chevrons, cones, sawhorses and
+## fence panels are knocked flying by a car that hits them (Breakables), and the guardrails
+## bend where they're hit (Guardrails), as on the NFS3 tracks.
 
 const Kind := ProceduralTrack.Kind
 const Zone := ProceduralTrack.Zone
@@ -33,6 +35,10 @@ const KEEP_CELL := 50.0
 var no_fence := {}    # node * 2 + (1 on the right): a driveway or lot along the road
 var places: ProcPlaces
 var signs: ProcSigns
+var breakables: Breakables
+var _mm_of := {}      # batch key -> its MultiMesh, once flushed
+var parked := []     # where the places leave a car parked (see ParkedCars)
+var _knock := []      # props to knock over, registered once flushed: [frame, reach, puts, node]
 var plain_mat: Material
 
 
@@ -44,6 +50,9 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._density = [0.45, 0.75, 1.0][clampi(Game.quality, 0, 2)]
 	s._make_meshes()
 	s._make_shapes()
+	s.breakables = Breakables.new()
+	s.breakables.name = "Breakables"
+	p_root.add_child(s.breakables)
 	s.places = ProcPlaces.build(s, seed_value)
 	s.signs = ProcSigns.build(s, s.places, seed_value)
 	s._town()
@@ -62,6 +71,9 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 	s._roadside_trees()
 	s._forests()
 	s._flush()
+	s._register_knockables()
+	# The race parks real cars there (ParkedCars).
+	p_root.set_meta("parking", s.parked)
 	s._light_pools()
 	if not s._faces.is_empty():
 		var shape := ConcavePolygonShape3D.new()
@@ -74,12 +86,14 @@ static func build(p_root: Node3D, p_lay: ProceduralTrack.Layout, seed_value: int
 
 # --- Placement helpers -----------------------------------------------------------------------
 
-func _put(kind: String, xf: Transform3D, color := Color.WHITE) -> void:
+## Draws a `kind` at `xf`: returns [batch key, its index there, kind, xf] (see knockable()).
+func _put(kind: String, xf: Transform3D, color := Color.WHITE) -> Array:
 	var key := "%s|%d|%d" % [kind, floori(xf.origin.x / CELL), floori(xf.origin.z / CELL)]
 	if not _batches.has(key):
 		_batches[key] = {"kind": kind, "xforms": [], "colors": PackedColorArray()}
 	_batches[key].xforms.append(xf)
 	_batches[key].colors.append(color)
+	var out := [key, _batches[key].xforms.size() - 1, kind, xf]
 	if _solid_shapes.has(kind):
 		var sh: Array = _solid_shapes[kind]
 		# Unscaled, turned with the instance, stood on its foot.
@@ -87,6 +101,39 @@ func _put(kind: String, xf: Transform3D, color := Color.WHITE) -> void:
 		var o := _body.create_shape_owner(_body)
 		_body.shape_owner_add_shape(o, sh[0])
 		_body.shape_owner_set_transform(o, Transform3D(b, xf.origin + b.y * sh[1] * xf.basis.get_scale().y))
+	return out
+
+
+## A prop a car knocks flying: the instances `puts` (from _put) and/or `node` (whose meshes and
+## lettering fly off as they are), standing at `xf` (its foot), touched within `reach` (in its
+## frame).
+func knockable(xf: Transform3D, reach: AABB, puts: Array = [], node: Node3D = null) -> void:
+	_knock.append([xf, reach, puts, node])
+
+
+func _register_knockables() -> void:
+	for k: Array in _knock:
+		var xf: Transform3D = k[0]
+		var puts: Array = k[2]
+		var node: Node3D = k[3]
+		var piece: Array = k.slice(4)   # [fence chunk, first vertex], for a fence panel
+		breakables.add(xf, k[1], func() -> Variant:
+			var parts := []
+			if not piece.is_empty():
+				parts.append([Breakables.take_piece(piece[0], piece[1], 18, xf), Transform3D()])
+			for p: Array in puts:
+				var mm: MultiMesh = _mm_of[p[0]]
+				Breakables.take_instance(mm, p[1])
+				parts.append([_meshes[p[2]].mesh, xf.affine_inverse() * (p[3] as Transform3D)])
+			if node == null:
+				return [Breakables.combine(parts), null]
+			for part: Array in parts:
+				var mi := MeshInstance3D.new()
+				mi.mesh = part[0]
+				mi.transform = node.global_transform.affine_inverse() * xf * (part[1] as Transform3D)
+				node.add_child(mi)
+			return node)
+	_knock.clear()
 
 
 func _make_shapes() -> void:
@@ -110,7 +157,6 @@ func _make_shapes() -> void:
 		"motel": [box.call(Vector3(26, 4.0, 8)), 2.0],
 		"kiosk": [box.call(Vector3(10, 4.2, 7)), 2.1],
 		"cabin": [box.call(Vector3(6, 3.4, 5)), 1.7],
-		"parked_car": [box.call(Vector3(1.8, 1.4, 4.4)), 0.7],
 		"silo": [cyl.call(2.8, 14.0), 7.0],
 		"pole": [cyl.call(0.15, 9.6), 4.8],
 		"lamp_post": [cyl.call(0.13, 8.0), 4.0],
@@ -154,6 +200,7 @@ func _flush() -> void:
 		mmi.visibility_range_end_margin = 40.0
 		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		root.add_child(mmi)
+		_mm_of[key] = mm
 
 
 ## Standing upright at `p` facing `facing` (its local +Z) on the ground plane.
@@ -281,7 +328,6 @@ func _make_meshes() -> void:
 	_mesh("sign_post", _merge([[_cyl(0.045, 0.045, 2.2, 5), Vector3(0, 1.1, 0), steel]], _paint), 300.0, false)
 	_mesh("chevron", _board(Vector2(0.8, 1.0), 1.75, _sign_mat(_chevron_image())), 350.0, false)
 	_mesh("curve_sign", _board(Vector2(1.0, 1.0), 2.0, _sign_mat(_curve_image()), true), 350.0, false)
-	_mesh("parked_car", _parked_car(), 400.0, true)
 	var orange := Color(0.98, 0.42, 0.05)
 	_mesh("cone", _merge([[_cyl(0.035, 0.17, 0.62, 8), Vector3(0, 0.34, 0), orange],
 		[_cyl(0.07, 0.11, 0.14, 8), Vector3(0, 0.38, 0), Color(0.95, 0.95, 0.95)],
@@ -371,30 +417,6 @@ static func _rock_mesh() -> ArrayMesh:
 	mat.uv1_world_triplanar = true
 	mat.uv1_scale = Vector3.ONE * 0.7
 	mat.roughness = 1.0
-	st.set_material(mat)
-	return st.commit()
-
-
-## A parked car, nose along +Z, tinted by its instance colour (glass and tyres stay dark).
-func _parked_car() -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var paint := Color.WHITE
-	var glass := Color(0.12, 0.13, 0.15)
-	var dark := Color(0.08, 0.08, 0.08)
-	_append(st, _box(Vector3(1.78, 0.62, 4.3)), Transform3D(Basis(), Vector3(0, 0.6, 0)), paint)
-	_append(st, _box(Vector3(1.6, 0.5, 2.2)), Transform3D(Basis(), Vector3(0, 1.15, -0.25)), paint)
-	_append(st, _box(Vector3(1.64, 0.36, 2.0)), Transform3D(Basis(), Vector3(0, 1.14, -0.25)), glass)
-	_append(st, _box(Vector3(1.8, 0.14, 4.34)), Transform3D(Basis(), Vector3(0, 0.36, 0)), dark)
-	for x: float in [-0.8, 0.8]:
-		for z: float in [-1.35, 1.35]:
-			_append(st, _cyl(0.32, 0.32, 0.24, 10), Transform3D(Basis(Vector3.BACK, PI * 0.5), Vector3(x, 0.32, z)), dark)
-	for x: float in [-0.6, 0.6]:
-		_append(st, _box(Vector3(0.36, 0.14, 0.04)), Transform3D(Basis(), Vector3(x, 0.72, 2.15)), Color(0.95, 0.95, 0.85))
-		_append(st, _box(Vector3(0.36, 0.12, 0.04)), Transform3D(Basis(), Vector3(x, 0.74, -2.15)), Color(0.7, 0.08, 0.06))
-	var mat := _paint.duplicate() as StandardMaterial3D
-	mat.metallic = 0.3
-	mat.roughness = 0.35
 	st.set_material(mat)
 	return st.commit()
 
@@ -907,29 +929,33 @@ func _farmstead(i: int, s: float) -> void:
 
 # --- Along the road --------------------------------------------------------------------------
 
-## Galvanised guardrails where the layout put them: a W-beam on posts along the wall.
+## Galvanised guardrails where the layout put them: a W-beam on posts along the wall, cut
+## into half-metre columns so a car's hit bends it (Guardrails). The collision strip behind
+## it does the stopping.
 func _rails() -> void:
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.74, 0.76, 0.78)
+	mat.vertex_color_use_as_albedo = true
+	mat.vertex_color_is_srgb = true
 	mat.metallic = 0.6
 	mat.roughness = 0.35
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var rails := Guardrails.new()
+	rails.name = "Guardrails"
+	root.add_child(rails)
+	var grey := Color(0.74, 0.76, 0.78)
+	const COLS := 12
 	# Beam cross-section: (out from the wall, up from the ground).
 	var prof := [Vector2(0.0, 0.48), Vector2(0.07, 0.58), Vector2(0.0, 0.68), Vector2(0.07, 0.78), Vector2(0.0, 0.84)]
 	for s: float in [-1.0, 1.0]:
 		var rail := lay.rail_r if s > 0.0 else lay.rail_l
 		var walls := lay.wall_r if s > 0.0 else lay.wall_l
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		var drawn := false
+		var out := Nfs3TrackBuilder._rail_arrays()
 		for i in lay.n:
 			var j := lay.idx(i + 1)
 			# A mesh per 40 nodes of road, so each is culled by how far off its own stretch is.
-			if i % 40 == 0 and drawn:
-				_commit_chunk(st, mat)
-				st = SurfaceTool.new()
-				st.begin(Mesh.PRIMITIVE_TRIANGLES)
-				drawn = false
+			if i % 40 == 0 and not out[1].is_empty():
+				rails.add_chunk(out[0], out[1], mat, 450.0)
+				out = Nfs3TrackBuilder._rail_arrays()
 			if not rail[i]:
 				continue
 			var base_i := _rail_base(i, s, walls[i])
@@ -938,16 +964,29 @@ func _rails() -> void:
 				continue
 			var base_j := _rail_base(j, s, walls[j])
 			_solid_strip(base_i, base_j, 1.1)
-			drawn = true
-			for m in prof.size() - 1:
-				var q := [_rail_pt(i, s, base_i, prof[m]), _rail_pt(i, s, base_i, prof[m + 1]),
-					_rail_pt(j, s, base_j, prof[m + 1]), _rail_pt(j, s, base_j, prof[m])]
-				var n: Vector3 = (q[1] - q[0]).cross(q[3] - q[0]).normalized()
-				for k in [0, 1, 2, 0, 2, 3]:
-					st.set_normal(n)
-					st.add_vertex(q[k])
-		if drawn:
-			_commit_chunk(st, mat)
+			var arrays: Array = out[0]
+			for c in COLS:
+				var t0 := float(c) / COLS
+				var t1 := float(c + 1) / COLS
+				for m in prof.size() - 1:
+					var q := [_rail_col(i, j, s, base_i, base_j, t0, prof[m]), _rail_col(i, j, s, base_i, base_j, t0, prof[m + 1]),
+						_rail_col(i, j, s, base_i, base_j, t1, prof[m + 1]), _rail_col(i, j, s, base_i, base_j, t1, prof[m])]
+					var n: Vector3 = (q[1] - q[0]).cross(q[3] - q[0]).normalized()
+					for k in [0, 1, 2, 0, 2, 3]:
+						arrays[Mesh.ARRAY_VERTEX].append(q[k])
+						arrays[Mesh.ARRAY_NORMAL].append(n)
+						arrays[Mesh.ARRAY_COLOR].append(grey)
+						arrays[Mesh.ARRAY_TEX_UV].append(Vector2.ZERO)
+						arrays[Mesh.ARRAY_TEX_UV2].append(Vector2.ZERO)
+						out[1].append(prof[m + (1 if k == 1 or k == 2 else 0)].y / 0.84)
+		if not out[1].is_empty():
+			rails.add_chunk(out[0], out[1], mat, 450.0)
+
+
+## A point of the beam `t` of the way from node `i` to `j`, at profile point `q`.
+func _rail_col(i: int, j: int, s: float, base_i: Vector3, base_j: Vector3, t: float, q: Vector2) -> Vector3:
+	var out := lay.flat_right[i].lerp(lay.flat_right[j], t).normalized()
+	return base_i.lerp(base_j, t) + out * s * q.x + Vector3.UP * q.y
 
 
 func _rail_base(i: int, s: float, d: float) -> Vector3:
@@ -960,28 +999,19 @@ func _rail_pt(i: int, s: float, base: Vector3, q: Vector2) -> Vector3:
 	return base + lay.flat_right[i] * s * q.x + Vector3.UP * q.y
 
 
-func _commit_chunk(st: SurfaceTool, mat: Material) -> void:
-	var mesh := st.commit()
-	if mesh == null or mesh.get_surface_count() == 0:
-		return
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.visibility_range_end = 450.0
-	root.add_child(mi)
-
-
-## White three-rail wooden fences along the farms.
+## White three-rail wooden fences along the farms, a panel a node long: a car knocks the
+## panel it hits flying, post and all, as the NFS3 tracks' fences go.
 func _fences() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var white := Color(0.92, 0.91, 0.87)
+	var mat: Material = _meshes["fence_post"].mesh.surface_get_material(0)
+	var ch := {}
 	for s: float in [-1.0, 1.0]:
 		var rail := lay.rail_r if s > 0.0 else lay.rail_l
 		var walls := lay.wall_r if s > 0.0 else lay.wall_l
 		var on := false
 		for i in lay.n:
+			if i % 40 == 0 or ch.is_empty():
+				ch = _fence_chunk(ch, mat)
 			var farm := lay.zone[i] == Zone.FARM and lay.kind[i] == Kind.OPEN and not rail[i]
 			# Runs of a few hundred metres with gaps (gates, driveways).
 			if i % 25 == 0:
@@ -993,25 +1023,53 @@ func _fences() -> void:
 			var a := _beside(i, s, d)
 			if lay.on_branch(a.x, a.z, 0.3):
 				continue
-			_put("fence_post", _upright(a, lay.fwd[i]))
 			var j := lay.idx(i + 1)
 			var b := _beside(j, s, walls[j] + 1.5) if j < lay.n else a
 			var mid := (a + b) * 0.5
 			if absf(b.y - a.y) > 2.0 or lay.on_branch(b.x, b.z, 0.3) or lay.on_branch(mid.x, mid.z, 0.3):
 				continue
-			_solid_strip(a, b, 1.3)
+			# The panel's frame: its foot at the post, X along it to the next.
+			var along := Vector3(b.x - a.x, 0.0, b.z - a.z)
+			var xf := _upright(a, along.cross(Vector3.UP).normalized())
+			var post := _put("fence_post", _upright(a, lay.fwd[i]))
+			var arrays: Array = ch.arrays
+			var from: int = arrays[Mesh.ARRAY_VERTEX].size()
 			for h: float in [0.45, 0.8, 1.15]:
 				var q := [a + Vector3.UP * h, b + Vector3.UP * h, b + Vector3.UP * (h + 0.12), a + Vector3.UP * (h + 0.12)]
 				var n: Vector3 = (q[1] - q[0]).cross(q[3] - q[0]).normalized()
 				for k in [0, 1, 2, 0, 2, 3]:
-					st.set_color(white)
-					st.set_normal(n)
-					st.add_vertex(q[k])
-			if i % 40 == 0:
-				_commit_chunk(st, _meshes["fence_post"].mesh.surface_get_material(0))
-				st = SurfaceTool.new()
-				st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_commit_chunk(st, _meshes["fence_post"].mesh.surface_get_material(0))
+					arrays[Mesh.ARRAY_VERTEX].append(q[k])
+					arrays[Mesh.ARRAY_NORMAL].append(n)
+					arrays[Mesh.ARRAY_COLOR].append(white)
+			var lb := xf.affine_inverse() * b
+			var reach := AABB(Vector3(minf(lb.x, 0.0) - 0.2, 0.0, -0.3), Vector3(absf(lb.x) + 0.4, 1.3, 0.6))
+			_knock_panel(xf, reach, ch, from, post)
+	_fence_chunk(ch, mat)
+
+
+## The fence chunk after `ch` (which is drawn, if it has anything in it).
+func _fence_chunk(ch: Dictionary, mat: Material) -> Dictionary:
+	if not ch.is_empty() and not ch.arrays[Mesh.ARRAY_VERTEX].is_empty():
+		var built := Breakables.chunk(ch.arrays, mat)
+		ch.mesh = built.mesh
+		ch.mat = mat
+		var mi := MeshInstance3D.new()
+		mi.mesh = ch.mesh
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = 450.0
+		root.add_child(mi)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array()
+	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array()
+	arrays[Mesh.ARRAY_COLOR] = PackedColorArray()
+	return {"arrays": arrays}
+
+
+## A fence panel (vertices `from` on in chunk `ch`, 3 rails) and its post `post` (from _put),
+## knocked flying together.
+func _knock_panel(xf: Transform3D, reach: AABB, ch: Dictionary, from: int, post: Array) -> void:
+	_knock.append([xf, reach, [post], null, ch, from])
 
 
 ## Telephone poles down one side of the farm and lake roads, wires sagging between them.
@@ -1084,13 +1142,13 @@ func _bend_signs() -> void:
 			# Facing the traffic coming round, angled a little in towards it.
 			var face := (-lay.fwd[j] - lay.flat_right[j] * outside * 0.35).normalized()
 			var sc := Vector3(turn, 1, 1)
-			_put("sign_post", _upright(p, face))
-			_put("chevron", _upright(p, face, sc))
+			knockable(_upright(p, face), ProcSigns.POST_REACH, [_put("sign_post", _upright(p, face)),
+				_put("chevron", _upright(p, face, sc))])
 		var w := lay.idx(a - 16)
 		var wp := _beside(w, 1.0, lay.wall_r[w] + 1.2)
 		if lay.kind[w] == Kind.OPEN and not lay.on_branch(wp.x, wp.z, 0.5):
-			_put("sign_post", _upright(wp, -lay.fwd[w]))
-			_put("curve_sign", _upright(wp, -lay.fwd[w], Vector3(turn, 1, 1)))
+			knockable(_upright(wp, -lay.fwd[w]), ProcSigns.POST_REACH, [_put("sign_post", _upright(wp, -lay.fwd[w])),
+				_put("curve_sign", _upright(wp, -lay.fwd[w], Vector3(turn, 1, 1)))])
 			signs.advisory(_upright(wp, -lay.fwd[w]), 1.0 / tightest)
 
 

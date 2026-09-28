@@ -8,6 +8,7 @@ const MODE_NOTES := [
 	"One rival, and every cop in the county after you both.",
 	"Just you and the clock. No rivals, no traffic.",
 	"No laps, no rivals. Cruise the track with traffic and patrols.",
+	"Sit back and watch the AI race your car and its rivals. ←→ switch cars.",
 ]
 const CONTROLS := [
 	[["↑↓", "W", "S"], "Throttle · brake"], [["←→", "A", "D"], "Steer"], [["SPACE"], "Handbrake"],
@@ -599,7 +600,7 @@ func _on_mode_changed() -> void:
 	var m := _rows[Row.MODE].index
 	var opp := _rows[Row.OPPONENTS]
 	var items := PackedStringArray()
-	var cap := 7 if m == Game.Mode.SINGLE_RACE else 1
+	var cap := 7 if m == Game.Mode.SINGLE_RACE or m == Game.Mode.SPECTATE else 1
 	for n in cap + 1:
 		items.append("Solo" if n == 0 else "%d rival%s" % [n, "" if n == 1 else "s"])
 	opp.set_items(items, mini(_opp_value, cap))

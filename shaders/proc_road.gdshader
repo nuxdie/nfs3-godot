@@ -2,7 +2,8 @@ shader_type spatial;
 // The procedural track's asphalt. UV.x is metres across from the centre line (+ right), UV.y
 // metres along the lap; UV2.x picks the centre marking (0 dashed yellow, 1 double yellow).
 // UV2.y is 1 on a side street (UV.y from its mouth): a centre line and a stop line where it
-// meets the road, no edge lines. Worn wheel tracks, patches, tar snakes and painted lines
+// meets the road, no edge lines; 2 in a tunnel, lit warm by the lamps over it (one pair every
+// 6 m, at each node) rather than the sky. Worn wheel tracks, patches, tar snakes and painted lines
 // are drawn here rather than baked.
 
 uniform sampler2D noise_fine : filter_linear_mipmap_anisotropic, repeat_enable;
@@ -18,11 +19,13 @@ uniform float crossings[16];
 varying vec3 wpos;
 varying float style;
 varying float street;
+varying float tunnel;
 
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	style = UV2.x;
-	street = UV2.y;
+	tunnel = step(1.5, UV2.y);
+	street = step(0.5, UV2.y) * (1.0 - tunnel);
 }
 
 // 1 inside [a, b] with a pixel-wide soft edge.
@@ -109,6 +112,12 @@ void fragment() {
 	float wet = wetness * (0.8 + 0.2 * c2);
 	// The colours above are sRGB.
 	ALBEDO = pow(col, vec3(2.2)) * mix(1.0, 0.55, wet);
+	if (tunnel > 0.5) {
+		// Pools of lamplight under each pair, the sky's blue kept down.
+		float pool = 0.5 + 0.5 * cos(v / 6.0 * 6.2831853);
+		EMISSION = ALBEDO * vec3(1.0, 0.8, 0.55) * (0.12 + 0.75 * pow(pool, 3.0));
+		ALBEDO *= 0.35;
+	}
 	ROUGHNESS = mix(0.88 - 0.12 * tracks - 0.1 * patch, 0.1, wet);
 	SPECULAR = mix(0.4, 0.7, wet);
 }

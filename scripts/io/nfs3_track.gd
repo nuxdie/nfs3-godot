@@ -31,7 +31,7 @@ class TexInfo:
 	var width: int
 	var height: int
 	var uv: PackedVector2Array
-	var is_lane: bool
+	var is_lane: bool       # painted road marking (a sfx.fsh sprite, see _add_lane_images)
 	var additive: bool      # glows, fire, light shafts: drawn additively over the scene
 	var cutout: bool        # alpha-tested (foliage, fences, railings)
 	var qfs_index: int
@@ -48,7 +48,7 @@ var name := ""
 var blocks: Array[Block] = []
 var textures: Array[TexInfo] = []
 var vroad: Array[VRoad] = []
-var col_objects: Array = []   # Array[Dictionary] {ref, verts, shading, polys}
+var col_objects: Array = []   # Array[Dictionary] {ref, verts, shading, polys}: static ones only
 var images: Array[Image] = []
 var error := ""
 
@@ -109,6 +109,29 @@ static func fixed(d: PackedByteArray, p: int) -> Vector3:
 	return Vector3(-d.decode_s32(p) / 65536.0, d.decode_s32(p + 4) / 65536.0, d.decode_s32(p + 8) / 65536.0)
 
 
+## `n` animation keyframes of 20 bytes: fixed-point position, then the rotation.
+static func anim_keys(d: PackedByteArray, p: int, n: int) -> Array:
+	var keys := []
+	for a in n:
+		var q := p + a * 20
+		# Fixed-point (1.0 = 16384) x, y, z, w; mirroring X flips the y and z parts.
+		var rot := Quaternion(d.decode_s16(q + 12), -d.decode_s16(q + 14), -d.decode_s16(q + 16), d.decode_s16(q + 18))
+		keys.append({
+			"pos": fixed(d, q),
+			"rot": rot.normalized() if rot.length_squared() > 1.0 else Quaternion.IDENTITY,
+		})
+	return keys
+
+
+## Whether the FRD already has animated object `o` (same mesh size and starting point).
+func _has_anim_xobj(o: Dictionary) -> bool:
+	for b in blocks:
+		for x in b.xobjs:
+			if x.has("anim") and x.verts.size() == o.verts.size() and x.ref.distance_to(o.ref) < 0.1:
+				return true
+	return false
+
+
 # --------------------------------------------------------------------- loading
 
 static func load_dir(dir: String) -> Nfs3Track:
@@ -131,7 +154,27 @@ static func load_dir(dir: String) -> Nfs3Track:
 		t.images = fsh.images
 	else:
 		t.error = "missing texture archive"
+		return t
+	# Lane markings aren't in the track's archive: their textures index the shared lin0-lin9
+	# sprites of gamedata/render/pc/sfx.fsh (the game's tracks folder is gamedata/tracks).
+	t._add_lane_images(Fsh.load_file(DataPath.find_ci(dir.get_base_dir().get_base_dir(), "render/pc/sfx.fsh")))
 	return t
+
+
+## Appends the lane sprites the lane textures use to `images` and points them there; with
+## no sfx archive, lane textures get an index past the end, so nothing draws them.
+func _add_lane_images(sfx: Fsh) -> void:
+	var layer_of := {}
+	for ti in textures:
+		if not ti.is_lane:
+			continue
+		var sprite := "lin%d" % ti.qfs_index
+		if not layer_of.has(sprite):
+			layer_of[sprite] = -1
+			if sfx and sfx.by_name.has(sprite):
+				layer_of[sprite] = images.size()
+				images.append(sfx.by_name[sprite])
+		ti.qfs_index = layer_of[sprite] if layer_of[sprite] >= 0 else 0xFFFF
 
 
 ## Just the block centres along the lap (Godot space), read from the FRD headers without
@@ -280,15 +323,7 @@ func _parse_frd(d: PackedByteArray) -> bool:
 				p += 24
 				if _short(d, p, n_anim * 20, "FRD"):
 					return false
-				var keys := []
-				for a in n_anim:
-					var q := p + a * 20
-					# Fixed-point (1.0 = 16384) x, y, z, w; mirroring X flips the y and z parts.
-					var rot := Quaternion(d.decode_s16(q + 12), -d.decode_s16(q + 14), -d.decode_s16(q + 16), d.decode_s16(q + 18))
-					keys.append({
-						"pos": fixed(d, q),
-						"rot": rot.normalized() if rot.length_squared() > 1.0 else Quaternion.IDENTITY,
-					})
+				var keys := anim_keys(d, p, n_anim)
 				p += n_anim * 20
 				x.anim = keys
 				x.ref = keys[0].pos if keys.size() > 0 else Vector3.ZERO
@@ -398,13 +433,25 @@ func _parse_col(d: PackedByteArray) -> bool:
 					return false
 				var typ := d[p + 2]
 				var s := d[p + 3]
-				var ref := Vector3.ZERO
+				if s >= structs.size():
+					p += size
+					continue
+				var o := {"ref": Vector3.ZERO, "verts": structs[s].verts, "shading": structs[s].shading, "polys": structs[s].polys, "col_tex": true}
 				if typ == 1 and size >= 16:
-					ref = fixed(d, p + 4)
-				elif typ == 3 and size >= 28:
-					ref = fixed(d, p + 8)
-				if s < structs.size():
-					col_objects.append({"ref": ref, "verts": structs[s].verts, "shading": structs[s].shading, "polys": structs[s].polys, "col_tex": true})
+					o.ref = fixed(d, p + 4)
+					col_objects.append(o)
+				elif typ == 3:
+					# Animated: {size, type, struct, n_keys, delay} then keys as in the FRD. The
+					# FRD mostly carries the same objects; the rest join its animated xobjs.
+					var n_anim := d.decode_u16(p + 4)
+					if n_anim == 0 or size < 8 + n_anim * 20:
+						p += size
+						continue
+					o.anim = anim_keys(d, p + 8, n_anim)
+					o.anim_delay = d.decode_u16(p + 6)
+					o.ref = o.anim[0].pos
+					if not _has_anim_xobj(o) and blocks.size() > 0:
+						blocks[-1].xobjs.append(o)
 				p += size
 	# virtual road
 	if _short(d, p, 8, "COL"):

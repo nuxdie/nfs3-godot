@@ -64,7 +64,19 @@ func _physics_process(dt: float) -> void:
 	if role == Role.TRAFFIC:
 		_pull_around(dt)
 	# The lane was picked where the road was wide; keep it inside the walls where it narrows.
-	var off := clampf(lane + _dodge, -maxf(path.left_width[aim_node] - 2.5, 0.0), maxf(path.right_width[aim_node] - 2.5, 0.0))
+	var lo := -maxf(path.left_width[aim_node] - 2.5, 0.0)
+	var hi := maxf(path.right_width[aim_node] - 2.5, 0.0)
+	var off := clampf(lane + _dodge, lo, hi)
+	# Round anything standing on the road ahead (a pillar, a median): past the aim point, and
+	# far enough to see the next one of a row coming before drifting back into its line.
+	var scan_to := path.ahead(node, dir, maxf(40.0, car.speed * 2.0))
+	if fposmod((path.cumulative[aim_node] - path.cumulative[scan_to]) * dir, path.length) < path.length * 0.5:
+		scan_to = path.idx(aim_node + 2 * dir)
+	var clear := path.free_offset(path.idx(node + dir), scan_to, dir, off, path.lateral(car.global_position, node), lo, hi)
+	if clear != off and role == Role.RACER:
+		# Keep to the clear line rather than being pulled back into the obstacles after each one.
+		lane = clear
+	off = clear
 	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * off
 	var desired := _speed_limit(dir)
 	car.power_scale = 1.0

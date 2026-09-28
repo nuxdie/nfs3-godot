@@ -15,6 +15,12 @@ const CAMERA_LAYER := 8
 ## Physics layer of solid scenery (buildings, signs, posts, rocks) that cars hit. Kept off
 ## layer 1 so the chase camera ignores small props.
 const SCENERY_LAYER := 4
+## Physics layer of the water surfaces (streams, lakes): nothing collides with them, the
+## race looks for them to tell a car that has gone in.
+const WATER_LAYER := 16
+## How far out (m) from the road's edge water opens its wall: enough for a bank down to a
+## stream, short of letting cars out across open country.
+const WATER_REACH := 30.0
 ## Extra objects no wider than this (m) and within this height range are road signs and
 ## posts that cars knock over; taller poles and anything bigger stay put.
 const PROP_MAX_WIDTH := 3.5
@@ -46,6 +52,9 @@ const RAIL_MIN_WIDTH := 1.5
 const RAIL_COLUMN := 0.5
 ## Track blocks per guardrail mesh.
 const RAIL_CHUNK_BLOCKS := 4
+## Additive textures that are daylight (sun shafts), per track: faded out at night, while
+## glows and fire keep shining. Hometown's are the shafts in its two covered bridges.
+const SUNLIGHT_TEXTURES := {"trk000": [195]}
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
@@ -61,6 +70,9 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		m.set_shader_parameter("textures", textures)
 		mats.append(m)
 	root.set_meta("track_material", mats[0])   # the race sets its night lighting
+	var night_mats: Array = root.get_meta("night_materials", [])
+	night_mats.append(mats[1])                 # ...and fades the sun shafts
+	root.set_meta("night_materials", night_mats)
 
 	var geo := Node3D.new()
 	geo.name = "Geometry"
@@ -115,8 +127,10 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[0], DRAW_DISTANCE)
 			rail_mesh = _rail_arrays()
 		var standing := func(p: Nfs3Track.Poly) -> bool: return not knocked.has(p)
-		# The road's drivable polys are flagged so the shader can wet them in the rain.
-		var groups := [[b.road, b.verts, b.shading, Vector3.ZERO, false, b.road_flags], [b.lanes, b.verts, b.shading, Vector3.ZERO, false]]
+		# The road's drivable polys are flagged so the shader can wet them in the rain; its
+		# painted lines (no flags: all drivable) with it.
+		var groups := [[b.road, b.verts, b.shading, Vector3.ZERO, false, b.road_flags],
+			[b.lanes, b.verts, b.shading, Vector3.ZERO, false, PackedByteArray()]]
 		for obj in b.objects:
 			groups.append([obj.filter(standing) if knocked.size() > 0 else obj, b.verts, b.shading, Vector3.ZERO, false])
 		for x in b.xobjs:
@@ -175,7 +189,8 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			if not x.has("anim") or x.anim.size() == 0:
 				continue
 			for pass_i in 2:
-				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, true]], pass_i == 1)
+				# Those from the .col file (see Nfs3Track._parse_col) keep its winding.
+				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, not x.has("col_tex")]], pass_i == 1)
 				if amesh == null:
 					continue
 				var ami := MeshInstance3D.new()
@@ -201,9 +216,11 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		gmi.material_override = mats[pass_i]
 		geo.add_child(gmi)
 
+	var water := _water_quads(t)
 	root.add_child(_scenery_body(t, fence_faces))
 	root.add_child(_camera_blockers(t))
-	root.add_child(_edge_walls(t, road_quads))
+	root.add_child(_water_body(water[0]))
+	root.add_child(_edge_walls(t, road_quads, water))
 	return _make_path(t)
 
 
@@ -708,7 +725,7 @@ static func _solid_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, 
 		if p.tex >= t.textures.size():
 			continue
 		var ti: Nfs3Track.TexInfo = t.textures[p.tex]
-		if ti.is_lane or ti.additive or ti.cutout:
+		if ti.is_lane or ti.additive or ti.cutout or _is_water(t, p, verts):
 			continue
 		if p.v[0] >= verts.size() or p.v[1] >= verts.size() or p.v[2] >= verts.size() or p.v[3] >= verts.size():
 			continue
@@ -724,7 +741,8 @@ static func _solid_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, 
 
 ## One mesh from [polys, verts, shading, offset, mirrored, (road flags)] groups, keeping only
 ## the polys whose texture is (or isn't) additive. Null when nothing matched. Vertex colour
-## alpha is 1 on drivable road polys (a group with road flags), 0 elsewhere.
+## alpha is 1 on drivable road polys (a group with road flags), 0 elsewhere; in the
+## additive pass it is 1 on sunlight (SUNLIGHT_TEXTURES) instead.
 ## Extra objects (xobjs) store their quads mirrored (corners 0<->1, 2<->3) relative to the
 ## texture corners: read as-is, the half-tree quads of a split tree show their trunk on the
 ## outside and the front/back quads of a sign face the wrong way.
@@ -742,13 +760,14 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 		shading: PackedColorArray, offset: Vector3, mirrored: bool, additive: bool, twins: Dictionary,
 		road_flags: Variant = null) -> int:
 	var order: Array = [1, 0, 3, 2] if mirrored else [0, 1, 2, 3]
+	var sunlight: Array = SUNLIGHT_TEXTURES.get(t.name, [])
 	var n := 0
 	for pi in polys.size():
 		var p: Nfs3Track.Poly = polys[pi]
 		if p.tex >= t.textures.size():
 			continue
 		var ti: Nfs3Track.TexInfo = t.textures[p.tex]
-		if ti.is_lane or ti.additive != additive or ti.qfs_index >= t.images.size():
+		if ti.additive != additive or ti.qfs_index >= t.images.size():
 			continue
 		var bad := false
 		for k in 4:
@@ -764,7 +783,9 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 		var frames := _anim_frames(t, p)
 		var anim: float = 2.0 * frames + 16.0 * p.anim_period if frames > 1 else 0.0
 		var road := 0.0
-		if road_flags != null and (pi >= road_flags.size() or Nfs3Track.drivable(road_flags[pi])):
+		if additive:
+			road = 1.0 if p.tex in sunlight else 0.0
+		elif road_flags != null and (pi >= road_flags.size() or Nfs3Track.drivable(road_flags[pi])):
 			road = 1.0
 		for k in Nfs3Track.QUAD:
 			var vi: int = p.v[order[k]]
@@ -892,6 +913,44 @@ static func _drivable_quads(t: Nfs3Track) -> Array:
 			if p.v[0] >= b.verts.size() or p.v[1] >= b.verts.size() or p.v[2] >= b.verts.size() or p.v[3] >= b.verts.size():
 				continue
 			quads.append(PackedVector3Array([b.verts[p.v[0]], b.verts[p.v[1]], b.verts[p.v[2]], b.verts[p.v[3]]]))
+	return [quads, _quad_grid(quads)]
+
+
+## The water surfaces (see _is_water) as [quads, grid], like _drivable_quads.
+static func _water_quads(t: Nfs3Track) -> Array:
+	var quads: Array = []
+	var groups := []
+	for b in t.blocks:
+		for obj in b.objects:
+			groups.append([obj, b.verts, Vector3.ZERO])
+		for x in b.xobjs:
+			if not x.has("anim"):
+				groups.append([x.polys, x.verts, x.ref])
+	for o in t.col_objects:
+		groups.append([o.polys, o.verts, o.ref])
+	for g in groups:
+		var verts: PackedVector3Array = g[1]
+		for p: Nfs3Track.Poly in g[0]:
+			if _is_water(t, p, verts):
+				var off: Vector3 = g[2]
+				quads.append(PackedVector3Array([verts[p.v[0]] + off, verts[p.v[1]] + off, verts[p.v[2]] + off, verts[p.v[3]] + off]))
+	return [quads, _quad_grid(quads)]
+
+
+## Streams and lakes are scenery quads, flat, with an animated texture that isn't blended
+## additively (that is fire). There is no ocean to find: Atlantica's and Aquatica's sea is
+## the horizon panorama.
+static func _is_water(t: Nfs3Track, p: Nfs3Track.Poly, verts: PackedVector3Array) -> bool:
+	if p.anim_frames <= 1 or p.tex >= t.textures.size() or t.textures[p.tex].additive:
+		return false
+	if p.v[0] >= verts.size() or p.v[1] >= verts.size() or p.v[2] >= verts.size() or p.v[3] >= verts.size():
+		return false
+	var n := (verts[p.v[1]] - verts[p.v[0]]).cross(verts[p.v[2]] - verts[p.v[0]])
+	return n.length() > 1e-4 and absf(n.normalized().y) > 0.85
+
+
+## Grid of _edge_cell -> indices of the quads over that cell.
+static func _quad_grid(quads: Array) -> Dictionary:
 	var grid := {}
 	for qi in quads.size():
 		var q: PackedVector3Array = quads[qi]
@@ -906,14 +965,15 @@ static func _drivable_quads(t: Nfs3Track) -> Array:
 				if not grid.has(Vector2i(x, z)):
 					grid[Vector2i(x, z)] = []
 				grid[Vector2i(x, z)].append(qi)
-	return [quads, grid]
+	return grid
 
 
 ## Invisible walls along the edge of the drivable surface, the way NFS3 fences you in. The
 ## virtual road's wall distances can't simply be joined into two lines: where the road
 ## splits around an island (the Lost Canyons temple) or bends tighter than the wall is wide,
-## those lines cut across drivable ground and close off shortcuts.
-static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
+## those lines cut across drivable ground and close off shortcuts. Where the edge faces a
+## stream or a lake (`water`, from _water_quads) it stays open: the car can go in.
+static func _edge_walls(t: Nfs3Track, drivable: Array, water := [[], {}]) -> StaticBody3D:
 	var quads: Array = drivable[0]
 	var quad_grid: Dictionary = drivable[1]
 	# Drivable poly edges, by welded corner ids (blocks don't share vertices); an edge used
@@ -934,6 +994,7 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 
 	var walled: Array[Vector2i] = []
 	var drops := {}   # edge -> true: where the surface ends in a drop onto the road below
+	var open := {}    # edge -> true: left without a wall
 	for key: Vector2i in edges:
 		var e: Array = edges[key]
 		if e[2] != 1:
@@ -948,12 +1009,14 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 		if side == Vector3.ZERO or (_road_near(quads, quad_grid, m + side, 1.5) and _road_near(quads, quad_grid, m - side, 1.5)):
 			continue
 		walled.append(key)
-		if _drop_off(quads, quad_grid, m, -side if _road_near(quads, quad_grid, m + side, 1.5) else side):
+		var out := -side if _road_near(quads, quad_grid, m + side, 1.5) else side
+		if _drop_off(quads, quad_grid, m, out):
 			drops[key] = true
+		if _faces_water(quads, quad_grid, water, m, out):
+			open[key] = true
 	# The end of a ledge that drops onto the road below (the Redrock Ridge skeleton path,
 	# the Empire City rooftops): the car should fall off it, not hit a wall. A drop along
 	# the side of a raised road, longer than a road is wide, keeps its wall.
-	var open := {}
 	for run in _runs(drops.keys()):
 		var length := 0.0
 		for key: Vector2i in run:
@@ -986,6 +1049,60 @@ static func _edge_walls(t: Nfs3Track, drivable: Array) -> StaticBody3D:
 	body.name = "Walls"
 	body.collision_layer = 1
 	body.collision_mask = 0
+	if faces.size() > 0:
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(faces)
+		shape.backface_collision = true
+		var cs := CollisionShape3D.new()
+		cs.shape = shape
+		body.add_child(cs)
+	return body
+
+
+## Whether the road edge at `m`, facing `out`, looks out over a stream or a lake within
+## WATER_REACH, below the road and with no other road in between. Not a bridge's side:
+## there the water runs under the road too.
+static func _faces_water(quads: Array, quad_grid: Dictionary, water: Array, m: Vector3, out: Vector3) -> bool:
+	var dir := out.normalized()
+	if _water_height(water, m - dir * 1.5) > -INF:
+		return false
+	var d := 2.0
+	while d <= WATER_REACH:
+		var p := m + dir * d
+		if _road_near(quads, quad_grid, p, 3.0):
+			return false
+		var h := _water_height(water, p)
+		if h > -INF and h < m.y + 0.5:
+			# Not where the stream passes under the road (a median island over a culvert).
+			for e: float in [2.0, 4.0, 6.0, 8.0]:
+				if _road_near(quads, quad_grid, p + dir * e, 3.0):
+					return false
+			return true
+		d += 2.0
+	return false
+
+
+## Height of the water surface over `p` (from _water_quads), or -INF where there is none.
+static func _water_height(water: Array, p: Vector3) -> float:
+	var h := -INF
+	for qi: int in water[1].get(_edge_cell(p), []):
+		var y := _height_in_quad(water[0][qi], p)
+		if not is_nan(y):
+			h = maxf(h, y)
+	return h
+
+
+## The water surfaces as a body on WATER_LAYER, in the "water" group: cars pass through
+## it (they don't collide with the layer), the race casts rays against it.
+static func _water_body(quads: Array) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "Water"
+	body.collision_layer = WATER_LAYER
+	body.collision_mask = 0
+	body.add_to_group("water")
+	var faces := PackedVector3Array()
+	for q: PackedVector3Array in quads:
+		faces.append_array([q[0], q[1], q[2], q[0], q[2], q[3]])
 	if faces.size() > 0:
 		var shape := ConcavePolygonShape3D.new()
 		shape.set_faces(faces)

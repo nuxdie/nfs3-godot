@@ -171,33 +171,46 @@ static func miles(m: float) -> String:
 
 ## Where a sign by the road goes, from node `i` on (or back, `dir` -1): the first open node
 ## with room for it: [node, ground point], or [].
-func _spot(i: int, s: float, dir := 1, room := 0.4) -> Array:
-	for k in 16:
-		var j := lay.idx(i + k * dir)
-		if lay.kind[j] != Kind.OPEN or (lay.gap_r if s > 0.0 else lay.gap_l)[j]:
-			continue
-		# Past the wall the AI keeps inside (TrackPath's widths), so no racer runs into it.
-		var p := sc._beside(j, s, (lay.wall_r[j] if s > 0.0 else lay.wall_l[j]) + 0.6)
-		if sc.kept(p, room) or lay.on_branch(p.x, p.z, room):
-			continue
-		return [j, p]
+func _spot(i: int, s0: float, dir := 1, room := 0.4) -> Array:
+	# Near the road's level on its own side if it can be (not up a cutting or down a bank),
+	# else on the other side, else on its own side whatever the ground.
+	for pass_ in 3:
+		var s := -s0 if pass_ == 1 else s0
+		for k in 16:
+			var j := lay.idx(i + k * dir)
+			if lay.kind[j] != Kind.OPEN or (lay.gap_r if s > 0.0 else lay.gap_l)[j]:
+				continue
+			# Past the wall the AI keeps inside (TrackPath's widths), so no racer runs into it.
+			var p := sc._beside(j, s, (lay.wall_r[j] if s > 0.0 else lay.wall_l[j]) + 0.6)
+			if sc.kept(p, room) or lay.on_branch(p.x, p.z, room):
+				continue
+			if pass_ < 2 and absf(p.y - lay.pts[j].y) > 1.5:
+				continue
+			return [j, p, s]
 	return []
 
 
+## A post a car touching it within this of its foot knocks over (in its frame).
+const POST_REACH := AABB(Vector3(-0.2, 0.0, -0.25), Vector3(0.4, 1.5, 0.5))
+
+
 ## A sign on a post beside the road at node `i`, facing the traffic: `boards` [uv, size]
-## stacked down from `top` m.
+## stacked down from `top` m. A car knocks it over.
 func _post_sign(i: int, s: float, boards: Array, top := 2.6, dir := 1) -> int:
 	var f := _spot(i, s, dir)
 	if f.is_empty():
 		return -1
 	var j: int = f[0]
+	s = f[2]
 	var xf := ProcScenery._upright(f[1], (-lay.fwd[j] - lay.flat_right[j] * s * 0.12).normalized())
-	art.post(xf, Vector3(0, 0, -0.06), top)
+	var m := art.mark(xf.origin)
+	art.post(xf, Vector3(0, 0, -0.06), top, 0.08, false)
 	var y := top
 	for b: Array in boards:
 		var size: Vector2 = b[1]
 		art.board(xf, Vector3(0, y - size.y * 0.5, 0), size, b[0])
 		y -= size.y + 0.06
+	art.knockable(m, xf, POST_REACH)
 	return j
 
 
@@ -272,9 +285,11 @@ func _no_passing() -> void:
 				continue
 			var j: int = f[0]
 			var xf := ProcScenery._upright(f[1], -lay.fwd[j])
-			art.post(xf, Vector3(0, 0, -0.06), 2.5)
+			var m := art.mark(xf.origin)
+			art.post(xf, Vector3(0, 0, -0.06), 2.5, 0.08, false)
 			# Pointing along the road, over it.
 			art.board(xf, Vector3(0.5, 2.1, 0), Vector2(1.2, 0.9), _pennant())
+			art.knockable(m, xf, POST_REACH)
 
 
 func _bridges() -> void:
@@ -341,18 +356,22 @@ func _mile_markers() -> void:
 		if f.is_empty():
 			continue
 		var xf := ProcScenery._upright(f[1], -lay.fwd[f[0]])
-		art.post(xf, Vector3(0, 0, -0.04), 1.3, 0.05)
+		var m := art.mark(xf.origin)
+		art.post(xf, Vector3(0, 0, -0.04), 1.3, 0.05, false)
 		art.board(xf, Vector3(0, 1.0, 0), Vector2(0.3, 0.7), uv)
+		art.knockable(m, xf, POST_REACH)
 
 
-## An advisory speed under a bend's warning sign, from how tight it is.
+## An advisory speed under a bend's warning sign, from how tight it is (knocked off with it).
 func advisory(xf: Transform3D, radius: float) -> void:
 	var mph := clampi(roundi(sqrt(0.3 * 9.81 * radius) * 2.237 / 5.0) * 5, 15, 50)
 	var i := lay.closest(xf.origin.x, xf.origin.z)
 	if i >= 0 and mph >= LIMITS[lay.zone[i]]:
 		return
+	var m := art.mark(xf.origin)
 	art.board(xf, Vector3(0, 1.45, 0.02), Vector2(0.55, 0.55),
 		_plate("mph%d" % mph, Vector2(0.55, 0.55), SignArt.YELLOW, SignArt.BLACK, [[str(mph), 13.0], ["MPH", 8.0]]))
+	art.knockable(m, xf, POST_REACH)
 
 
 # --- At the side roads -----------------------------------------------------------------------
@@ -376,16 +395,19 @@ func _branch_furniture() -> void:
 		if b.kind != "lookout":
 			var sp := _ground(b.pts[k0] - r0 * (h + kerb))
 			var xf := ProcScenery._upright(sp, t0)
-			art.post(xf, Vector3(0, 0, -0.05), 2.5)
+			var m := art.mark(xf.origin)
+			art.post(xf, Vector3(0, 0, -0.05), 2.5, 0.08, false)
 			art.board(xf, Vector3(0, 2.1, 0), Vector2(0.75, 0.75), _stop(), false)
 			art.board(Transform3D(xf.basis.rotated(Vector3.UP, PI), xf.origin), Vector3(0, 2.1, 0.02), Vector2(0.75, 0.75),
 				_stop_back(), false)
+			art.knockable(m, xf, POST_REACH)
 		# Its name on the corner opposite, readable from the main road.
 		if name != "":
 			var bp := _ground(b.pts[k0] + r0 * (h + kerb))
 			var xf := ProcScenery._upright(bp, t0)
 			var green := SignArt.BROWN if b.kind != "street" and b.kind != "lane" else SignArt.GREEN
-			art.post(xf, Vector3.ZERO, 3.0, 0.06)
+			var m := art.mark(xf.origin)
+			art.post(xf, Vector3.ZERO, 3.0, 0.06, false)
 			var blade := _plate("blade:" + name, Vector2(1.1, 0.24), green, SignArt.WHITE, [[name.to_upper(), 11.0]], false)
 			for turn: float in [PI * 0.5, -PI * 0.5]:
 				art.board(Transform3D(xf.basis.rotated(Vector3.UP, turn), xf.origin), Vector3(0, 2.85, 0.05),
@@ -395,6 +417,7 @@ func _branch_furniture() -> void:
 				for turn: float in [0.0, PI]:
 					art.board(Transform3D(xf.basis.rotated(Vector3.UP, turn), xf.origin), Vector3(0, 2.55, 0.05),
 						Vector2(1.1, 0.24), main, false)
+			art.knockable(m, xf, POST_REACH)
 		if b.closed > 0.0:
 			if b.kind == "forest":
 				_gate(b)
@@ -418,7 +441,8 @@ static func _along(b: ProceduralTrack.Branch, along: float) -> Array:
 	return [b.pts[k].lerp(b.pts[k + 1], t), dir.normalized()]
 
 
-## Sawhorses across a closed road with a ROAD CLOSED sign on the middle one and cones.
+## Sawhorses across a closed road with a ROAD CLOSED sign on the middle one and cones: all
+## knocked flying by a car that runs the roadblock.
 func _barricade(b: ProceduralTrack.Branch) -> void:
 	var a := _along(b, b.closed)
 	var p: Vector3 = a[0]
@@ -430,6 +454,7 @@ func _barricade(b: ProceduralTrack.Branch) -> void:
 	var count := maxi(roundi(h * 2.0 / 2.0), 2)
 	for k in count:
 		var x := -h + (k + 0.5) * h * 2.0 / count
+		var m := art.mark(xf.origin)
 		for y: float in [0.62, 0.95]:
 			art.board(xf, Vector3(x, y, 0.0), Vector2(1.8, 0.2), stripes, false)
 			art.board(Transform3D(xf.basis.rotated(Vector3.UP, PI), xf.origin), Vector3(-x, y, 0.03), Vector2(1.8, 0.2),
@@ -440,16 +465,19 @@ func _barricade(b: ProceduralTrack.Branch) -> void:
 		# An amber lamp on every other one.
 		if k % 2 == 0:
 			art.box(xf, Vector3(x, 1.18, 0.0), Vector3(0.16, 0.2, 0.1), _colour("amber", Color(1.0, 0.7, 0.1)))
-	art.box(xf, Vector3(0, 0.6, 0), Vector3(h * 2.0, 1.2, 0.5), Rect2(), true)
+		art.knockable(m, xf.translated_local(Vector3(x, 0, 0)), AABB(Vector3(-0.9, 0, -0.3), Vector3(1.8, 1.1, 0.6)))
 	var closed := _plate("closed", Vector2(1.2, 0.6), SignArt.WHITE, SignArt.BLACK, [["ROAD", 15.0], ["CLOSED", 15.0]])
+	var m := art.mark(xf.origin)
 	for x: float in [-0.35, 0.35]:
 		art.box(xf, Vector3(x, 1.3, -0.05), Vector3(0.05, 0.9, 0.05), legs)
 	art.board(xf, Vector3(0, 1.45, 0.02), Vector2(1.2, 0.6), closed)
+	art.knockable(m, xf.translated_local(Vector3(0, 0, -0.05)), AABB(Vector3(-0.6, 0.8, -0.2), Vector3(1.2, 1.0, 0.4)))
 	# Cones fanned out in front.
 	for k in rng.randi_range(3, 5):
 		var q := xf * Vector3(rng.randf_range(-h, h), 0, rng.randf_range(1.5, 5.0))
 		q.y = _ground(q).y
-		sc._put("cone", ProcScenery._upright(q, t))
+		var cxf := ProcScenery._upright(q, t)
+		sc.knockable(cxf, AABB(Vector3(-0.25, 0, -0.25), Vector3(0.5, 0.7, 0.5)), [sc._put("cone", cxf)])
 
 
 ## A forest road's gate: a yellow pipe between two posts, closed.
@@ -468,4 +496,4 @@ func _gate(b: ProceduralTrack.Branch) -> void:
 
 
 func flush(root: Node3D) -> void:
-	art.flush(root)
+	art.flush(root, sc.breakables)

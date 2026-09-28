@@ -12,6 +12,8 @@ const ESCAPE_DISTANCE := 380.0
 const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
 const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
+const DROWN_DEPTH := 0.3          # m under a stream or lake surface that counts as in the water
+const DROWN_TIME := 1.5           # s in the water before the car is put back on the road
 const RB_HALF := 2.4              # m, half a cruiser's length (they park across the road)
 const RB_TRACK_RANGE := 80.0      # m short of a roadblock where its cruisers start covering your line
 const RB_COMMIT := 18.0           # m: closer than this they hold still, so a late juke gets through
@@ -27,6 +29,8 @@ var player: Car
 var racers: Array[Dictionary] = []   # {car, name, lap, max_lap, node, progress, total, finished, time, best, lap_start}
 var cops: Array[Car] = []
 var traffic_cars: Array[Car] = []
+var parked_cars: Array[Car] = []
+var _parking: Array = []
 var roadblock: Array[Car] = []
 var spikes: Array[SpikeStrip] = []
 var race_time := 0.0
@@ -42,6 +46,7 @@ var _rb := {}              # roadblock geometry: node, side (+1 gap to the right
 var _finish_order: Array = []
 var _results_dirty := false   # a car finished behind the results screen; refresh the table
 var _reset_check_t := 0.0
+var _water_t := {}         # car -> seconds spent in a stream or a lake
 var _skid_marks: SkidMarks
 var _track_mat: ShaderMaterial   # NFS3 track only: takes the night tint and headlight cones
 var _reflections: Reflections
@@ -66,9 +71,15 @@ func _ready() -> void:
 		await tree.physics_frame
 		if not is_inside_tree():
 			return
+	# Where scenery stands on the road, so the AI steers round it.
+	path.scan_obstacles(get_world_3d().direct_space_state)
 	_spawn_cars()
-	state = State.COUNTDOWN
 	hud.hide_loading()
+	# Nothing to start in free roam: hand over control straight away.
+	if Game.mode == Game.Mode.FREE_ROAM:
+		_go()
+	else:
+		state = State.COUNTDOWN
 
 
 # ------------------------------------------------------------------ world
@@ -76,6 +87,7 @@ func _ready() -> void:
 func _build_world() -> void:
 	var world := TrackWorld.load_track(Game.track_id)
 	add_child(world.root)
+	_parking = world.root.get_meta("parking", [])
 	path = world.path
 	_track_mat = world.track_mat
 	world.light(self, Game.night, Game.weather, get_viewport())
@@ -132,12 +144,18 @@ func _spawn_cars() -> void:
 	var half_w := minf(path.left_width[start], path.right_width[start])
 	var col := clampf(half_w * 0.4, 1.8, 3.5)
 
-	# Player
+	# Player (in spectate mode an AI racer drives it, and `player` is whichever car is watched)
 	player = _make_car(Game.player_car_data())
 	player.is_player = true
 	player.set_headlight_beam(true, true)
-	var pc := PlayerController.new()
-	player.add_child(pc)
+	if spectating():
+		var auto := AIController.new()
+		auto.role = AIController.Role.RACER
+		auto.path = path
+		auto.skill = randf_range(0.9, 1.05)
+		player.add_child(auto)
+	else:
+		player.add_child(PlayerController.new())
 	var audio := CarAudio.new()
 	player.add_child(audio)
 	cam.target = player
@@ -147,7 +165,7 @@ func _spawn_cars() -> void:
 	var grid: Array[Car] = [player]
 	var n_opp := 0
 	match Game.mode:
-		Game.Mode.SINGLE_RACE:
+		Game.Mode.SINGLE_RACE, Game.Mode.SPECTATE:
 			n_opp = Game.opponents
 		Game.Mode.HOT_PURSUIT:
 			n_opp = mini(Game.opponents, 1)
@@ -191,6 +209,8 @@ func _spawn_cars() -> void:
 		_spawn_cops()
 	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
 		_spawn_traffic()
+	# Cars parked where the track leaves room for them (the procedural track's streets and lots).
+	parked_cars = ParkedCars.spawn(get_tree(), _make_car, _parking)
 	# Racers steer around each other, traffic and parked cruisers; traffic pulls around stopped
 	# cars; cops dodge anything but whoever they're chasing.
 	for c in grid + traffic_cars + cops:
@@ -291,8 +311,15 @@ func _physics_process(dt: float) -> void:
 			race_time += dt
 			_update_progress()
 			_check_resets(dt)
-	if Input.is_action_just_pressed("reset_car") and state == State.RACING:
+	if Input.is_action_just_pressed("reset_car") and state == State.RACING and not spectating():
 		_respawn(player)
+	if spectating() and state != State.LOADING:
+		# The arrows too while the race is on (the results screen needs them for its buttons).
+		var arrows := state != State.FINISHED
+		if Input.is_action_just_pressed("watch_next") or arrows and Input.is_action_just_pressed("steer_right"):
+			_watch_step(1)
+		elif Input.is_action_just_pressed("watch_prev") or arrows and Input.is_action_just_pressed("steer_left"):
+			_watch_step(-1)
 
 
 func _process(_dt: float) -> void:
@@ -388,7 +415,8 @@ func _go() -> void:
 		_controller(c).enabled = true
 	for c in cops:
 		_controller(c).enabled = true
-	hud.flash("GO!", 1.0, "go")
+	if Game.mode != Game.Mode.FREE_ROAM:
+		hud.flash("GO!", 1.0, "go")
 
 
 func _update_progress() -> void:
@@ -441,7 +469,13 @@ func _lap_done(r: Dictionary) -> void:
 		if ai:
 			ai.role = AIController.Role.TRAFFIC
 			ai.cruise_speed = 18.0
-		if r.car == player:
+		if spectating():
+			# Nobody to wait for: the results come up once the whole field is home.
+			if state != State.FINISHED and racers.all(func(o: Dictionary) -> bool: return o.finished):
+				_end_race(false)
+			elif state == State.FINISHED:
+				_results_dirty = true
+		elif r.car == player:
 			_end_race(false)
 		elif state == State.FINISHED:
 			_results_dirty = true
@@ -455,6 +489,9 @@ func _end_race(arrested: bool) -> void:
 	for cop in cops:
 		_stop_chase(cop)
 	hud.pursuit = false
+	if spectating():
+		hud.show_results("RACE COMPLETE", _result_rows(), "")
+		return
 	var pc: PlayerController = null
 	for ch in player.get_children():
 		if ch is PlayerController:
@@ -481,12 +518,42 @@ func _end_race(arrested: bool) -> void:
 func _result_rows() -> Array:
 	var rows := []
 	for r in racers:
-		rows.append({"name": r.name, "you": r.car == player,
+		rows.append({"name": r.name, "you": r.car == player and not spectating(),
 			"time": Hud.fmt_time(r.time) if r.finished else "--:--.--",
 			"best": Hud.fmt_time(r.best) if r.best < INF else "--",
 			"t": r.time if r.finished else INF})
 	Game.last_results = rows
 	return rows
+
+
+func spectating() -> bool:
+	return Game.mode == Game.Mode.SPECTATE
+
+
+## Spectate mode: moves the camera (and the HUD, engine sound and reflections with it) to the
+## racer `step` places behind (+1) or ahead (-1) of the one being watched.
+func _watch_step(step: int) -> void:
+	var i := posmod(position_of(player) - 1 + step, racers.size())
+	_watch(racers[i].car)
+
+
+func _watch(car: Car) -> void:
+	if car == player or not is_instance_valid(car):
+		return
+	var old := player
+	old.is_player = false
+	old.set_headlight_beam(Game.night and Game.quality != Game.Quality.LOW)
+	player = car
+	player.is_player = true
+	player.set_headlight_beam(true, true)
+	for ch in old.get_children():
+		if ch is CarAudio:
+			ch.reparent(player, false)
+			ch.car = player
+	cam.target = player
+	_reflections.retarget(player)
+	hud.player = player
+	hud.flash("Watching " + player.display_name, 1.5)
 
 
 func position_of(car: Car) -> int:
@@ -867,14 +934,45 @@ func _check_resets(dt: float) -> void:
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
 		# A shortcut can run further out than the virtual road's walls, so only off the
 		# drivable surface. In free roam the player may wander off: the reset key brings them back.
+		# Heading down a bank to the water isn't lost: the water deals with it.
 		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + path.lost_margin and not _on_road(c) \
-			and not (c == player and Game.mode == Game.Mode.FREE_ROAM)
+			and not (c == player and Game.mode == Game.Mode.FREE_ROAM) and not _near_water(c)
+		# In a stream or a lake: it wades (Car.water_depth), then gets fished out.
+		c.water_depth = _water_depth(c)
+		var drowned := false
+		if c.water_depth > DROWN_DEPTH:
+			_water_t[c] = _water_t.get(c, 0.0) + 0.1
+			drowned = _water_t[c] > DROWN_TIME
+		else:
+			_water_t.erase(c)
 		# AI wedged against scenery that backing up hasn't cleared. A cop out of the player's
 		# sight gets put back on the road sooner: nobody sees it jump.
 		var give_up := 3.0 if c.is_cop and c.global_position.distance_to(player.global_position) > 150.0 else 7.0
 		var stranded: bool = ai != null and ai.stranded_t > give_up
-		if c.is_stuck_upside_down() or fell or lost or stranded:
+		if c.is_stuck_upside_down() or fell or lost or stranded or drowned:
+			_water_t.erase(c)
 			_respawn(c, stranded)
+
+
+## How far (m) the car is under the surface of a stream or a lake (the track's "Water"
+## body), 0 when it isn't.
+func _water_depth(c: Car) -> float:
+	var q := PhysicsRayQueryParameters3D.create(c.global_position + Vector3.UP * 20.0, c.global_position,
+		Nfs3TrackBuilder.WATER_LAYER)
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return 0.0 if hit.is_empty() else hit.position.y - c.global_position.y
+
+
+## Whether there is a stream or a lake within reach of the road's opened edge (see
+## Nfs3TrackBuilder.WATER_REACH), with some to spare for the drop down the bank.
+func _near_water(c: Car) -> bool:
+	var sphere := SphereShape3D.new()
+	sphere.radius = Nfs3TrackBuilder.WATER_REACH + 15.0
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = sphere
+	q.transform = Transform3D(Basis(), c.global_position)
+	q.collision_mask = Nfs3TrackBuilder.WATER_LAYER
+	return not get_world_3d().direct_space_state.intersect_shape(q, 1).is_empty()
 
 
 ## Whether the car is over the track's drivable surface (the "Road" body, not the terrain).
@@ -897,7 +995,7 @@ func _respawn(c: Car, past_blockage := false) -> void:
 	var dir := -1 if ai and ai.reverse_dir else 1
 	# Wedged against something: put it down beyond it, or it drives straight back into it.
 	if past_blockage:
-		n = _node_ahead(n, dir, 12.0)
+		n = path.ahead(n, dir, 12.0)
 	# Near the middle of the road: an overtaking line far out can be over a verge or a drop.
 	var lane := clampf(ai.lane, -3.5, 3.5) if ai else 0.0
 	# Put it down clear of other cars (a parked roadblock, a pile-up) and of solid scenery
@@ -917,7 +1015,7 @@ func _respawn(c: Car, past_blockage := false) -> void:
 				break
 		if found:
 			break
-		m = _node_ahead(m, dir, 4.0)
+		m = path.ahead(m, dir, 4.0)
 	n = spot
 	if ai:
 		ai.stranded_t = 0.0
@@ -926,17 +1024,6 @@ func _respawn(c: Car, past_blockage := false) -> void:
 	if dir < 0:
 		xf = xf.rotated_local(Vector3.UP, PI)
 	c.reset_to(xf, 0.3)
-
-
-## The node at least `metres` further along the road from `n` in direction `dir`.
-func _node_ahead(n: int, dir: int, metres: float) -> int:
-	var m := n
-	var start := path.cumulative[n]
-	for i in path.size():
-		m = path.idx(m + dir)
-		if fposmod((path.cumulative[m] - start) * dir, path.length) >= metres:
-			break
-	return m
 
 
 ## Whether a car put down at `xf` (a point on the road surface) would be inside something

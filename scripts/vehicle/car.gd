@@ -68,6 +68,7 @@ var brake_decel := 10.0    # [18] m/s^2
 var grip := 1.0            # [30] lateral grip multiplier over 3.2, x tyre factor [66]
 var surface_grip := 1.0    # the road under it: below 1 when wet or snowy (set by Weather)
 var off_road := 0.0        # share of the grounded wheels on loose ground (grass, dirt, sand, snow)
+var water_depth := 0.0     # m the car is under a stream or lake surface (set by the race): it wades
 var idle_rpm := 1000.0     # [12]
 var redline := 7000.0      # [13]
 var final_drive := 3.8     # [79] (automatic) or [11]
@@ -699,6 +700,7 @@ func reset_to(xf: Transform3D, drop := 0.1) -> void:
 	gear = 1
 	rpm = idle_rpm
 	flat_t = 0.0
+	water_depth = 0.0
 	_wear = 0.0
 	_gas = 0.0
 	_brake_pedal = 0.0
@@ -972,6 +974,12 @@ func _physics_process(dt: float) -> void:
 		var over := absf(v_side) - slide_cap * abs_speed
 		if over > 0.0 and abs_speed > 5.0 and grounded_wheels > 0:
 			apply_central_force(-global_basis.x * signf(v_side) * over * mass * 0.5 * slide_assist)
+	# In a stream or a lake: the water holds the car back, more the deeper it sits, and
+	# stops it sinking like a stone until the race fishes it out.
+	if water_depth > 0.0:
+		var wade := minf(water_depth / 0.8, 1.0)
+		apply_central_force(-vel * mass * 2.5 * wade)
+		apply_torque(-angular_velocity * inertia.x * 3.0 * wade)
 	# Gentle self-righting in the air so jumps land on the wheels.
 	if grounded_wheels == 0:
 		var axis := up.cross(Vector3.UP)
