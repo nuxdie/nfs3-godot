@@ -22,6 +22,8 @@ const RB_MIN_WAY := 3.0           # m, an opening narrower than this makes a rac
 const MAX_LIGHT_CONES := 16   # MAX_BEAMS in track.gdshader
 const MAX_SHADOWS := 16       # MAX_SHADOWS in track.gdshader
 const TICKET_FINES := [150, 400]   # the third ticket in Hot Pursuit is an arrest; Free Roam keeps fining
+const SPECTATE_GRACE := 30.0   # s after the winner that spectating brings up the results anyway
+const SPECTATE_CUT := 3.0      # s the camera lingers on a finished car before cutting to the race
 
 var state := State.LOADING
 var path: TrackPath
@@ -45,6 +47,7 @@ var _gap := Vector3.INF    # the way through the current roadblock
 var _rb := {}              # roadblock geometry: node, side (+1 gap to the right), w, shift range, shift
 var _finish_order: Array = []
 var _results_dirty := false   # a car finished behind the results screen; refresh the table
+var _cut_t := -1.0            # spectating: counts down to leaving a car that's finished
 var _reset_check_t := 0.0
 var _water_t := {}         # car -> seconds spent in a stream or a lake
 var _skid_marks: SkidMarks
@@ -314,6 +317,7 @@ func _physics_process(dt: float) -> void:
 	if Input.is_action_just_pressed("reset_car") and state == State.RACING and not spectating():
 		_respawn(player)
 	if spectating() and state != State.LOADING:
+		_update_spectate(dt)
 		# The arrows too while the race is on (the results screen needs them for its buttons).
 		var arrows := state != State.FINISHED
 		if Input.is_action_just_pressed("watch_next") or arrows and Input.is_action_just_pressed("steer_right"):
@@ -470,7 +474,9 @@ func _lap_done(r: Dictionary) -> void:
 			ai.role = AIController.Role.TRAFFIC
 			ai.cruise_speed = 18.0
 		if spectating():
-			# Nobody to wait for: the results come up once the whole field is home.
+			if r.car == player:
+				hud.flash("%s finishes %s" % [r.name, Hud.ordinal(_finish_order.size())], 2.5)
+				_cut_t = SPECTATE_CUT
 			if state != State.FINISHED and racers.all(func(o: Dictionary) -> bool: return o.finished):
 				_end_race(false)
 			elif state == State.FINISHED:
@@ -532,6 +538,21 @@ func spectating() -> bool:
 
 ## Spectate mode: moves the camera (and the HUD, engine sound and reflections with it) to the
 ## racer `step` places behind (+1) or ahead (-1) of the one being watched.
+## Spectating: cuts away from a car that's finished to the best-placed one still racing, and
+## brings the results up SPECTATE_GRACE after the winner (stragglers race on behind them).
+func _update_spectate(dt: float) -> void:
+	if _cut_t >= 0.0:
+		_cut_t -= dt
+		if _cut_t < 0.0:
+			for r in racers:
+				if not r.finished:
+					_watch(r.car)
+					break
+	if state == State.RACING and not _finish_order.is_empty() \
+			and race_time - _finish_order[0].time > SPECTATE_GRACE:
+		_end_race(false)
+
+
 func _watch_step(step: int) -> void:
 	var i := posmod(position_of(player) - 1 + step, racers.size())
 	_watch(racers[i].car)
@@ -540,6 +561,7 @@ func _watch_step(step: int) -> void:
 func _watch(car: Car) -> void:
 	if car == player or not is_instance_valid(car):
 		return
+	_cut_t = -1.0
 	var old := player
 	old.is_player = false
 	old.set_headlight_beam(Game.night and Game.quality != Game.Quality.LOW)

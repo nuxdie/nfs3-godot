@@ -63,13 +63,18 @@ func _physics_process(dt: float) -> void:
 	if "--ram" in OS.get_cmdline_user_args() and race.state == 2:
 		_ram(p, dt)
 	elif race.spectating():
-		# Nothing to drive: flick through the field every few seconds instead.
-		if race.state == 2 and int(t / 6.0) != int((t - dt) / 6.0):
+		# Nothing to drive: flick through the field for a while instead.
+		if race.state == 2 and t < 30.0 and int(t / 6.0) != int((t - dt) / 6.0):
 			race._watch_step(1)
 	elif race.path and r.size() > 0:
 		_drive(p)
 	if int(t * 2) != int((t - dt) * 2):
 		print("t=%.1f state=%d kmh=%d gear=%d rpm=%d wheels=%d lap=%d node=%d pos=%d slip=%.2f" % [t, race.state, p.kmh(), p.gear, p.rpm, p.grounded_wheels, r.get("lap", -9), r.get("node", -1), race.position_of(p), p.slip])
+		if race.spectating():
+			var rs := []
+			for rr: Dictionary in race.racers:
+				rs.append("%s L%d%s %dkmh" % [rr.name.left(10), rr.lap, "F" if rr.finished else "", rr.car.kmh()])
+			print("  field ", " | ".join(rs))
 		if not race.cops.is_empty():
 			var cs := []
 			for c: Car in race.cops:
