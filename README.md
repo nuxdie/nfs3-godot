@@ -41,11 +41,13 @@ What's read:
 | `carmodel/traffic/pursuit/*` | Police cars |
 | `carmodel/traffic/NNNN` | Traffic |
 
-### Need for Speed: High Stakes tracks
+### Need for Speed: High Stakes tracks and cars
 
 With a High Stakes install present its 19 tracks join the list (after NFS3's): the ten
 new ones (Celtic Ruins, Landstrasse, Dolphin Cove, Kindiak Park, Route Adonf, Durham Road,
-Snowy Ridge, Raceway 1–3) and its remakes of the NFS3 tracks, marked "HS". The first `Data`
+Snowy Ridge, Raceway 1–3) and its remakes of the NFS3 tracks, marked "HS". Its 28 cars
+(pursuit versions included) join the car list after NFS3's, those NFS3 also has marked "HS".
+On its tracks the police and traffic are its own. The first `Data`
 folder that contains `tracks` and `gameart` wins:
 
 1. `NFS4_DATA` environment variable
@@ -60,12 +62,20 @@ folder that contains `tracks` and `gameart` wins:
 | `Tracks/<name>/tr.ini`, `trn.ini`, `trw.ini`, `trnw.ini` | The same sky, fog, weather and ambient settings as NFS3's `.hrz`, as named keys |
 | `Tracks/<name>/sky.qfs` | Horizon panorama (`HDC0-7` day, `HNC` night, `HDW`/`HNW` weather), clouds, sun and moon |
 | `GameArt/sfx.fsh` | Lane marking sprites |
+| `Cars/<id>/car.viv` → `car.fce`, `car00.tga`, `carp.txt`, `fedata.eng` | Cars, as NFS3's: FCE4 mesh (high body, mirrors, T-top, pop-up lamps, wheels), skin, driving model (its 500 rpm torque steps resampled to NFS3's 256), name |
+| `Cars/traffic/pursuit/*`, `Cars/traffic/<name>` | Police cars and traffic for its tracks (the snowplow only on Snowy Ridge) |
 
 High Stakes draws its tracks at 1/1.3 of NFS3's scale (its remakes are the NFS3 tracks
 shrunk exactly 1.3 times), so they're scaled up to fit the NFS3 cars. Its polys have no
 surface flags: those between the virtual road's walls, facing up, are the drivable ones.
 The night versions some tracks have (`trn.frd`, `trn0.qfs`) aren't used yet: night is the
 day track, darkened, as on the NFS3 tracks.
+
+Its skins mark the paint with alpha ~224 and the interior with ~160 (NFS3: ~117 for paint);
+they're converted on loading, the interior tinted with the car's first interior colour. Unlike
+NFS3 it honours the TGA's top-down flag. Not used: the driver and cockpit (hidden behind the
+opaque glass), the damaged-mesh tables, `dash.fce`, the busting officer (`cop.fce`) and the
+helicopter.
 
 ## Modes
 
@@ -185,7 +195,7 @@ tools/track_shots.gd photograph a track's road at points round the lap (fraction
 tools/postcards.gd re-render the menu's track pictures and copy them to shots/:
                    godot --path . -- --postcards [track ...]
 tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, front and rear, saved to shots/:
-                   godot --path . -- --carshots [traffic|cops|cars] [id ...] [--track=trk000 [--night]]
+                   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops] [id ...] [--track=trk000 [--night]]
                    (--big / --low / --yaw=DEG / --wire for close inspection)
 tools/car_calib.gd flat-out drag test of every car against the original game's acceleration table:
                    godot --headless --path . -s tools/car_calib.gd [-- name-filter]

@@ -342,12 +342,15 @@ func _build_settings() -> void:
 	_settings_panel.add_child(_status)
 	if Game.has_game_data():
 		_status.text = "%s\n%d tracks · %d cars · %d police · %d traffic models" % [
-			Game.data_root, Game.tracks.filter(func(id: String) -> bool: return not Game.is_hs_track(id) and id != Game.PROCEDURAL_TRACK).size(), Game.cars.size(), Game.cop_cars.size(), Game.traffic_cars.size()]
+			Game.data_root, Game.tracks.filter(func(id: String) -> bool: return not Game.is_hs_track(id) and id != Game.PROCEDURAL_TRACK).size(),
+			Game.cars.filter(func(c: Dictionary) -> bool: return not c.id.begins_with(Game.HS_PREFIX)).size(), Game.cop_cars.size(), Game.traffic_cars.size()]
 	else:
 		_status.text = "No NFS3 data found, so you get the procedural circuit and stand-in cars. Point the NFS3_DATA environment variable at a folder containing gamedata/ (see README)."
 	if Game.hs_root != "":
-		_status.text += "\nHigh Stakes: %s\n%d tracks" % [Game.hs_root,
-			Game.tracks.filter(func(id: String) -> bool: return Game.is_hs_track(id)).size()]
+		_status.text += "\nHigh Stakes: %s\n%d tracks · %d cars · %d police · %d traffic models" % [Game.hs_root,
+			Game.tracks.filter(func(id: String) -> bool: return Game.is_hs_track(id)).size(),
+			Game.cars.filter(func(c: Dictionary) -> bool: return c.id.begins_with(Game.HS_PREFIX)).size(),
+			Game.hs_cop_cars.size(), Game.hs_traffic_cars.size()]
 
 
 func _layout() -> void:

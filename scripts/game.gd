@@ -30,9 +30,11 @@ const SETTINGS_PATH := "user://settings.cfg"
 var data_root := ""          # folder containing gamedata/
 var hs_root := ""            # High Stakes Data/ folder (containing tracks/ and gameart/), or ""
 var tracks: Array[String] = []   # track ids (folder names), plus PROCEDURAL_TRACK
-var cars: Array[Dictionary] = [] # {id, name, path}
+var cars: Array[Dictionary] = [] # {id, name, path}; High Stakes ones after NFS3's, ids HS_PREFIX + folder
 var cop_cars: Array[String] = []
 var traffic_cars: Array[String] = []
+var hs_cop_cars: Array[String] = []      # High Stakes' police and traffic, for its tracks
+var hs_traffic_cars: Array[String] = []
 
 var mode := Mode.SINGLE_RACE
 var track_id := PROCEDURAL_TRACK
@@ -107,6 +109,8 @@ func scan_data() -> void:
 	cars.clear()
 	cop_cars.clear()
 	traffic_cars.clear()
+	hs_cop_cars.clear()
+	hs_traffic_cars.clear()
 	var roots := PackedStringArray([data_root]) + candidate_roots()
 	data_root = ""
 	for r in roots:
@@ -137,7 +141,7 @@ func scan_data() -> void:
 			for c in _sorted_dirs(traffic_dir):
 				if c.is_valid_int() and find_ci(traffic_dir.path_join(c), "car.viv") != "":
 					traffic_cars.append(traffic_dir.path_join(c))
-	_scan_hs_tracks()
+	_scan_hs()
 	tracks.append(PROCEDURAL_TRACK)
 	if cars.is_empty():
 		for i in ProceduralCar.PRESETS.size():
@@ -147,8 +151,9 @@ func scan_data() -> void:
 	car_index = clampi(car_index, 0, cars.size() - 1)
 
 
-## Adds the High Stakes tracks, in the game's order and then any others (add-on tracks).
-func _scan_hs_tracks() -> void:
+## Adds the High Stakes tracks, in the game's order and then any others (add-on tracks),
+## and its cars.
+func _scan_hs() -> void:
 	var roots := PackedStringArray([hs_root]) + candidate_hs_roots()
 	hs_root = ""
 	for r in roots:
@@ -168,6 +173,58 @@ func _scan_hs_tracks() -> void:
 	for t in found:
 		if not HS_TRACK_NAMES.has(t):
 			tracks.append(HS_PREFIX + t)
+	_scan_hs_cars(find_ci(hs_root, "cars"))
+
+
+## High Stakes cars join the list after NFS3's; one NFS3 also has ("Ferrari 550 Maranello")
+## is marked "HS". Its police cars and traffic are kept for its own tracks.
+func _scan_hs_cars(cdir: String) -> void:
+	if cdir == "":
+		return
+	var nfs3_names := {}
+	for c in cars:
+		nfs3_names[c.name.to_lower()] = true
+	for c in _sorted_dirs(cdir):
+		var p := cdir.path_join(c)
+		if c.to_lower() == "traffic" or find_ci(p, "car.viv") == "":
+			continue
+		var n := Nfs3Car.peek_name(p)
+		if n == "":
+			continue
+		if nfs3_names.has(n.to_lower()):
+			n += " HS"
+		cars.append({"id": HS_PREFIX + c.to_lower(), "name": n, "path": p})
+	var pursuit := find_ci(cdir, "traffic/pursuit")
+	for c in _sorted_dirs(pursuit):
+		if find_ci(pursuit.path_join(c), "car.viv") != "":
+			hs_cop_cars.append(pursuit.path_join(c))
+	# Its traffic folders are named (sedan2, semi, ...); "choppers" holds the helicopter.
+	var traffic_dir := find_ci(cdir, "traffic")
+	for c in _sorted_dirs(traffic_dir):
+		if c.to_lower() != "pursuit" and find_ci(traffic_dir.path_join(c), "car.viv") != "":
+			hs_traffic_cars.append(traffic_dir.path_join(c))
+
+
+## The police cars for the chosen track: High Stakes' on its tracks, NFS3's on the others
+## (either game's when the other has none).
+func cop_models() -> Array[String]:
+	if (is_hs_track(track_id) or cop_cars.is_empty()) and not hs_cop_cars.is_empty():
+		return hs_cop_cars
+	return cop_cars
+
+
+## The traffic for the chosen track, as cop_models(). High Stakes' snowplow only turns out
+## on its snowy track.
+func traffic_models() -> Array[String]:
+	if (is_hs_track(track_id) or traffic_cars.is_empty()) and not hs_traffic_cars.is_empty():
+		if track_id == HS_PREFIX + "snowy":
+			return hs_traffic_cars
+		var out: Array[String] = []
+		for p in hs_traffic_cars:
+			if p.get_file().to_lower() != "snowplow":
+				out.append(p)
+		return out
+	return traffic_cars
 
 
 func has_game_data() -> bool:

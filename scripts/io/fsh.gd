@@ -67,7 +67,7 @@ static func _text(d: PackedByteArray, off: int) -> String:
 		if a + 8 > d.size():
 			break
 		if d[a] == 0x6F:
-			return d.slice(a + 8, mini(a + 8 + d.decode_u32(a + 4), d.size())).get_string_from_ascii()
+			return d.slice(a + 8, mini(a + 8 + d.decode_u32(a + 4), d.size())).get_string_from_ascii().strip_edges()
 	return ""
 
 

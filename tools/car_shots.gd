@@ -1,6 +1,6 @@
 extends Node
 ## Photographs cars in a plain studio, parked on their springs:
-##   godot --path . -- --carshots [traffic|cops|cars] [id ...] [--lights] [--big] [--low]
+##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops] [id ...] [--lights] [--big] [--low]
 ##       [--yaw=DEG ...] [--dist=M] [--wire] [--track=ID [--at=LAP FRACTION] [--night] [--weather]]
 ##       [--tag=NAME]
 ## Each car is shot from the front and rear three-quarters (or from each --yaw, 0 = dead
@@ -43,6 +43,8 @@ func _run() -> void:
 	var paths: Array = []
 	match set_name:
 		"cops": paths = Game.cop_cars
+		"hscops": paths = Game.hs_cop_cars
+		"hstraffic": paths = Game.hs_traffic_cars
 		"cars": paths = Game.cars.map(func(c): return c.path)
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)

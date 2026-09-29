@@ -335,8 +335,9 @@ func _controller(c: Node) -> AIController:
 
 
 func _cop_data(i: int) -> Object:
-	if Game.cop_cars.size() > 0:
-		return Game.load_car(Game.cop_cars[i % Game.cop_cars.size()], 3)
+	var models := Game.cop_models()
+	if models.size() > 0:
+		return Game.load_car(models[i % models.size()], 3)
 	return Game.load_car("", 3)
 
 
@@ -378,8 +379,9 @@ func _spawn_traffic() -> void:
 	var count := 8 if Game.mode != Game.Mode.FREE_ROAM else 12
 	for i in count:
 		var data: Object
-		if Game.traffic_cars.size() > 0:
-			data = Game.load_car(Game.traffic_cars[randi() % Game.traffic_cars.size()], 4)
+		var models := Game.traffic_models()
+		if models.size() > 0:
+			data = Game.load_car(models[randi() % models.size()], 4)
 		else:
 			data = ProceduralCar.make(4, Color.from_hsv(randf(), 0.4, 0.8))
 		var tc := _make_car(data)

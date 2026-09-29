@@ -17,8 +17,9 @@ static func spawn(tree: SceneTree, make_car: Callable, spots: Array) -> Array[Ca
 	for xf: Transform3D in spots:
 		var data: Object
 		var tint := Color(0, 0, 0, 0)
-		if Game.traffic_cars.size() > 0:
-			data = Game.load_car(Game.traffic_cars[randi() % Game.traffic_cars.size()], 4)
+		var models := Game.traffic_models()
+		if models.size() > 0:
+			data = Game.load_car(models[randi() % models.size()], 4)
 		else:
 			# The traffic's stand-in: its sedan, in any colour.
 			data = Game.load_car("", 4)
