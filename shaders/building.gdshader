@@ -3,7 +3,11 @@ shader_type spatial;
 // and at night a warm light in some of the windows. The texture's alpha marks the glass;
 // each window (a `cells` share of a texture tile) is lit or not by a hash of where it is.
 
+#ifdef LOW_QUALITY
+uniform sampler2D albedo_tex : source_color, filter_linear_mipmap, repeat_enable;
+#else
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+#endif
 uniform vec2 cells = vec2(1.0);
 uniform float lit_share = 0.45;
 uniform float night = 0.0;

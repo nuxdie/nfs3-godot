@@ -12,6 +12,16 @@ const DENT_DEPTH := 0.26    # m a full hit pushes in at the centre
 const MAX_DENT := 0.4       # m any vertex can be pushed in over the race
 const HIT_WEAR := 0.14      # overall damage from one full hit
 const MAX_PULL := 0.05      # steering pull at its worst, as a fraction of the lock
+## A dent only visits the vertices near it: each surface's are filed in a grid of cells this
+## big by where they sit at rest (a vertex is never more than MAX_DENT from there).
+const CELL := 0.5
+
+## The grid by model surface ("mesh id:surface"), shared by every car of that model:
+## Vector3i cell -> PackedInt32Array of vertex indices.
+static var _grid_cache := {}
+## Dents waiting for their turn: [CarDamage, car-local point, direction, radius, depth].
+static var _queue: Array = []
+static var _queue_frame := -1
 
 var damage := 0.0           # 0..1 overall, mirrored into the car's handling
 
@@ -38,16 +48,37 @@ func _ready() -> void:
 			if src.surface_get_primitive_type(s) != Mesh.PRIMITIVE_TRIANGLES or arrays[Mesh.ARRAY_VERTEX] == null:
 				continue
 			surfaces.append({"arrays": arrays, "rest": (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).duplicate(),
-				"normals": arrays[Mesh.ARRAY_NORMAL], "material": src.surface_get_material(s)})
+				"normals": arrays[Mesh.ARRAY_NORMAL], "material": src.surface_get_material(s),
+				"key": "%d:%d" % [src.get_instance_id(), s]})
 		if not surfaces.is_empty():
 			# Loaded cars share their meshes between everyone driving that model: dent a copy.
 			_parts.append({"mi": mi, "mesh": ArrayMesh.new(), "surfaces": surfaces})
+
+
+func _process(_dt: float) -> void:
+	# Whichever car's damage runs first this frame deals with the next dent in line.
+	var frame := Engine.get_process_frames()
+	if _queue_frame == frame or _queue.is_empty():
+		return
+	_queue_frame = frame
+	var d: Array = _queue.pop_front()
+	var who: CarDamage = d[0]
+	if is_instance_valid(who):
+		who._dent(who._nearest_vertex(d[1]), d[2], d[3], d[4])
+
+
+func _exit_tree() -> void:
+	_queue = _queue.filter(func(d: Array) -> bool: return d[0] != self)
 
 
 func _physics_process(dt: float) -> void:
 	# The body collides as a box, so the solver's change to the car's velocity across the
 	# step is the crash: pushed back hard along a contact's normal means a hit there.
 	var v := _car.linear_velocity
+	if _car.freeze:
+		# Parked asleep or moved by hand (far-off traffic): nothing to hit.
+		_prev_vel = v
+		return
 	var dv := v - _prev_vel
 	_prev_vel = v
 	_cooldown = maxf(_cooldown - dt, 0.0)
@@ -88,10 +119,13 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 	# the bodywork: a hit from the side dents at the body's mid-height instead.
 	if absf(dir.y) < 0.5:
 		p.y = _mid_y
-	p = _nearest_vertex(p)
 	var radius := DENT_RADIUS * lerpf(0.6, 1.0, s)
 	var depth := DENT_DEPTH * lerpf(0.25, 1.0, s)
-	_dent(p, dir, radius, depth)
+	# Reshaping the body is the costly part: one car's dent a frame, whoever's turn it is,
+	# so a pile-up spreads over a few frames instead of stalling one.
+	# (Out of sight it isn't seen at all: the car takes the damage without the dent.)
+	if not _car.far:
+		_queue.append([self, p, dir, radius, depth])
 	for n in _car.fittings():
 		var f := 1.0 - n.position.distance_to(p) / radius
 		if f > 0.0:
@@ -104,18 +138,59 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 
 
 ## The box's corners stand clear of the rounded bodywork: move the hit onto the body itself.
+## The nearest vertex in the first cells out from the point that hold any (near enough: it
+## only has to be on the body, under the hit).
 func _nearest_vertex(p: Vector3) -> Vector3:
-	var best := INF
-	var out := p
-	for part in _parts:
-		var o: Vector3 = part.mi.position
-		for sf in part.surfaces:
-			for v: Vector3 in sf.arrays[Mesh.ARRAY_VERTEX]:
-				var d := (v + o).distance_squared_to(p)
-				if d < best:
-					best = d
-					out = v + o
+	var reach := CELL * 0.8
+	while reach < 8.0:
+		var best := INF
+		var out := p
+		for part in _parts:
+			var o: Vector3 = part.mi.position
+			var lp := p - o
+			for sf in part.surfaces:
+				var verts: PackedVector3Array = sf.arrays[Mesh.ARRAY_VERTEX]
+				for i in _near(sf, lp, reach, 0.0):
+					var d := verts[i].distance_squared_to(lp)
+					if d < best:
+						best = d
+						out = verts[i] + o
+		if best < INF:
+			return out
+		reach *= 2.0
+	return p
+
+
+## Indices of `sf`'s vertices that can be within `reach` of `lp` (car-part local), given
+## they've moved up to `slack` from where they're filed.
+static func _near(sf: Dictionary, lp: Vector3, reach: float, slack: float) -> PackedInt32Array:
+	var grid := _grid(sf)
+	var r := reach + slack
+	var lo := Vector3i(floori((lp.x - r) / CELL), floori((lp.y - r) / CELL), floori((lp.z - r) / CELL))
+	var hi := Vector3i(floori((lp.x + r) / CELL), floori((lp.y + r) / CELL), floori((lp.z + r) / CELL))
+	var out := PackedInt32Array()
+	for x in range(lo.x, hi.x + 1):
+		for y in range(lo.y, hi.y + 1):
+			for z in range(lo.z, hi.z + 1):
+				var c: Variant = grid.get(Vector3i(x, y, z))
+				if c != null:
+					out.append_array(c)
 	return out
+
+
+## `sf`'s grid (see CELL), filed the first time a car of its model is hit.
+static func _grid(sf: Dictionary) -> Dictionary:
+	if not _grid_cache.has(sf.key):
+		var rest: PackedVector3Array = sf.rest
+		var grid := {}
+		for i in rest.size():
+			var v := rest[i]
+			var c := Vector3i(floori(v.x / CELL), floori(v.y / CELL), floori(v.z / CELL))
+			if not grid.has(c):
+				grid[c] = PackedInt32Array()
+			grid[c].append(i)
+		_grid_cache[sf.key] = grid
+	return _grid_cache[sf.key]
 
 
 func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
@@ -128,8 +203,10 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 			var arrays: Array = sf.arrays
 			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 			var rest: PackedVector3Array = sf.rest
-			var moved := false
-			for i in verts.size():
+			# The first vertex of each triangle that moved, for the creases.
+			var moved := {}
+			var slack: float = sf.get("slack", 0.0)
+			for i in _near(sf, lp, radius, slack):
 				var d := verts[i].distance_to(lp)
 				if d >= radius:
 					continue
@@ -139,11 +216,15 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 				var r := rest[i]
 				var jitter := 0.6 + 0.8 * absf(fmod(sin(r.dot(Vector3(12.99, 78.23, 37.72))) * 43758.55, 1.0))
 				var off := verts[i] + dir * depth * f * f * (3.0 - 2.0 * f) * jitter - r
-				verts[i] = r + off.limit_length(MAX_DENT)
-				moved = true
-			if moved:
+				off = off.limit_length(MAX_DENT)
+				verts[i] = r + off
+				slack = maxf(slack, off.length())
+				moved[i - i % 3] = true
+			# How far this car's dents have pushed anything: where the next one has to look.
+			sf.slack = slack
+			if not moved.is_empty():
 				arrays[Mesh.ARRAY_VERTEX] = verts
-				_crease_normals(arrays, sf)
+				_crease_normals(arrays, sf, PackedInt32Array(moved.keys()))
 				changed = true
 		if changed:
 			mesh.clear_surfaces()
@@ -154,15 +235,16 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 
 
 ## Bent panels catch the light as flat facets: turn the normals of moved triangles toward
-## their face normal, the further the more they were pushed in.
-static func _crease_normals(arrays: Array, sf: Dictionary) -> void:
+## their face normal, the further the more they were pushed in. Only the `triangles` (first
+## vertex of each) a dent just moved change; the rest keep what earlier dents gave them.
+static func _crease_normals(arrays: Array, sf: Dictionary, triangles: PackedInt32Array) -> void:
 	var orig = sf.normals
 	if orig == null or arrays[Mesh.ARRAY_INDEX] != null:
 		return
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var rest: PackedVector3Array = sf.rest
-	var normals: PackedVector3Array = (orig as PackedVector3Array).duplicate()
-	for t in range(0, verts.size() - 2, 3):
+	var normals: PackedVector3Array = sf.get("creased", (orig as PackedVector3Array).duplicate())
+	for t in triangles:
 		var bend := 0.0
 		for k in 3:
 			bend = maxf(bend, verts[t + k].distance_to(rest[t + k]))
@@ -177,4 +259,5 @@ static func _crease_normals(arrays: Array, sf: Dictionary) -> void:
 		var w := clampf(bend / 0.06, 0.0, 0.8)
 		for k in 3:
 			normals[t + k] = orig[t + k].lerp(fn, w).normalized()
+	sf.creased = normals
 	arrays[Mesh.ARRAY_NORMAL] = normals

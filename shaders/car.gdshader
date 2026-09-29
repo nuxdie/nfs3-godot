@@ -32,13 +32,18 @@ void fragment() {
 	ROUGHNESS = mix(mix(0.6, 1.0 - gloss, painted), 0.08, glass);
 	METALLIC = 0.15 * painted;
 	SPECULAR = mix(0.5, 0.8, glass);
+#ifndef LOW_QUALITY
+	// (Low quality: no clearcoat, a second specular lobe on every car pixel.)
 	CLEARCOAT = 0.5 * painted;
 	CLEARCOAT_ROUGHNESS = 0.3;
+#endif
 	if (wheel) {
 		float rubber = 1.0 - painted;
 		ROUGHNESS = mix(ROUGHNESS, 0.9, rubber);
 		SPECULAR = mix(SPECULAR, 0.3, rubber);
+#ifndef LOW_QUALITY
 		CLEARCOAT *= 0.3;
+#endif
 	}
 	// Back faces are the insides of panels that tuck under the body, seen along the bottom
 	// edges; reflecting the sky they flicker as bright specks, so light them matte.
@@ -46,6 +51,8 @@ void fragment() {
 		ROUGHNESS = 1.0;
 		SPECULAR = 0.0;
 		METALLIC = 0.0;
+#ifndef LOW_QUALITY
 		CLEARCOAT = 0.0;
+#endif
 	}
 }

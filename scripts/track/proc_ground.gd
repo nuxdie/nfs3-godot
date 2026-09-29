@@ -51,13 +51,13 @@ static func build(root: Node3D, lay: ProceduralTrack.Layout) -> void:
 	var fine := _noise_tex(1.0 / 24.0, 256)
 	var coarse := _noise_tex(1.0 / 40.0, 256)
 	var road_mat := ShaderMaterial.new()
-	road_mat.shader = preload("res://shaders/proc_road.gdshader")
+	road_mat.shader = Game.shader("res://shaders/proc_road.gdshader")
 	road_mat.set_shader_parameter("noise_fine", fine)
 	road_mat.set_shader_parameter("noise_coarse", coarse)
 	road_mat.set_shader_parameter("half_width", ProceduralTrack.ROAD_HALF)
 	road_mat.set_shader_parameter("lap_length", lay.n * ProceduralTrack.STEP)
 	var ground_mat := ShaderMaterial.new()
-	ground_mat.shader = preload("res://shaders/proc_ground.gdshader")
+	ground_mat.shader = Game.shader("res://shaders/proc_ground.gdshader")
 	ground_mat.set_shader_parameter("noise_fine", fine)
 	ground_mat.set_shader_parameter("noise_coarse", coarse)
 	ground_mat.set_shader_parameter("water_line", lay.water)
@@ -357,6 +357,7 @@ static func _branch_roads(root: Node3D, lay: ProceduralTrack.Layout, road_mat: M
 		mi.material_override = k.mat
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.visibility_range_end = 900.0
+		mi.set_meta("landscape", true)   # keeps its range on Low quality (see Race)
 		root.add_child(mi)
 	if faces.is_empty():
 		return
@@ -687,6 +688,8 @@ static func _road_marks(lay: ProceduralTrack.Layout, road_mat: ShaderMaterial) -
 					dup = dup or absf(c - v) < 12.0
 				if not dup and crossings.size() < 16:
 					crossings.append(v)
+	road_mat.set_shader_parameter("gap_count", gaps.size())
+	road_mat.set_shader_parameter("crossing_count", crossings.size())
 	while gaps.size() < 32:
 		gaps.append(Vector4(-1e6, -1e6, 0.0, 0.0))
 	while crossings.size() < 16:

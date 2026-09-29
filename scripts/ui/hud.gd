@@ -16,6 +16,20 @@ var pursuit := false
 
 var _root: Control
 var _draw: Control
+# The moving parts are drawn in as few batches as possible (a weak GPU and CPU pay per draw
+# call, and every shape or change of font size is one): all the shapes in one triangle array
+# on _draw, then all the text's outlines and then its fills on two layers over it, grouped by
+# font and size.
+var _text_ol: Control
+var _text_fg: Control
+var _texts := {}         # font and size -> [[pos, text, align, width, colour, outline size, outline colour]]
+var _tri_pts := PackedVector2Array()
+var _tri_cols := PackedColorArray()
+var _tri_idx := PackedInt32Array()
+var _static: Control
+var _static_key := []          # what the static layer was drawn for; redrawn when it changes
+var _tach_segs: Array[PackedVector2Array] = []   # the tach's segments as polygons, at _tach_c
+var _tach_c := Vector2.INF
 var _mirror: TextureRect
 var _mirror_vp: SubViewport
 var _mirror_cam: Camera3D
@@ -58,11 +72,28 @@ func _ready() -> void:
 	_root.theme = UiKit.theme()
 	add_child(_root)
 	_setup_mirror()
+	# What doesn't change from frame to frame (the map's outline, the tach's dial) is drawn
+	# once on a layer of its own; _draw redraws only the moving parts over it every frame.
+	_static = Control.new()
+	_static.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_static.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_static.draw.connect(_on_draw_static)
+	_root.add_child(_static)
 	_draw = Control.new()
 	_draw.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_draw.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_draw.draw.connect(_on_draw)
 	_root.add_child(_draw)
+	_text_ol = Control.new()
+	_text_ol.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_text_ol.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_text_ol.draw.connect(_on_draw_text.bind(true))
+	_root.add_child(_text_ol)
+	_text_fg = Control.new()
+	_text_fg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_text_fg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_text_fg.draw.connect(_on_draw_text.bind(false))
+	_root.add_child(_text_fg)
 	_build_pause()
 	_loading = Control.new()
 	_loading.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -74,6 +105,10 @@ func _ready() -> void:
 	_root.add_child(_loading)
 
 
+func mirror_viewport() -> SubViewport:
+	return _mirror_vp
+
+
 func _setup_mirror() -> void:
 	_mirror_vp = SubViewport.new()
 	_mirror_vp.size = Vector2i(400, 100)
@@ -81,7 +116,7 @@ func _setup_mirror() -> void:
 	add_child(_mirror_vp)
 	_mirror_cam = Camera3D.new()
 	_mirror_cam.fov = 40
-	_mirror_cam.far = 500
+	_mirror_cam.far = 250 if Game.quality == Game.Quality.LOW else 500
 	_mirror_vp.add_child(_mirror_cam)
 	_mirror = TextureRect.new()
 	_mirror.texture = _mirror_vp.get_texture()
@@ -90,6 +125,8 @@ func _setup_mirror() -> void:
 	_mirror.position = Vector2(-200, 16)
 	_mirror.flip_h = true
 	_mirror.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# It's a second view of the whole scene: on Low it starts off (M turns it on).
+	_mirror.visible = Game.quality != Game.Quality.LOW
 	_root.add_child(_mirror)
 
 
@@ -272,6 +309,11 @@ func _process(dt: float) -> void:
 		_cam_name = n
 	_record_splits()
 	_draw.queue_redraw()
+	var key := [player, _draw.size, _mirror.visible, _pause.visible or _results != null, race.path if race else null,
+		Game.units_kmh]
+	if key != _static_key:
+		_static_key = key
+		_static.queue_redraw()
 
 
 func _record_splits() -> void:
@@ -289,22 +331,76 @@ func _record_splits() -> void:
 
 
 func _on_draw() -> void:
+	_texts.clear()
+	_tri_pts.clear()
+	_tri_cols.clear()
+	_tri_idx.clear()
+	# (Drawn after this, from what it records; queued now so an early return clears them too.)
+	_text_ol.queue_redraw()
+	_text_fg.queue_redraw()
 	if player == null or not is_instance_valid(player) or race == null or race.path == null:
 		return
 	if _pause.visible or _results:
 		return
 	var size := _draw.size
-	if _mirror.visible:
-		var mr := _mirror.get_rect()
-		_draw.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
 	_draw_tach(Vector2(size.x - M - 118, size.y - M - 104))
 	_draw_info(size)
 	_draw_map(Rect2(M, size.y - M - 190, 190, 190))
 	if pursuit:
 		_draw_pursuit(size)
 	_draw_banner(size)
+	if not _tri_idx.is_empty():
+		RenderingServer.canvas_item_add_triangle_array(_draw.get_canvas_item(), _tri_idx, _tri_pts, _tri_cols)
 	_draw_countdown(size)
 	_draw_hints(size)
+
+
+## The text recorded by _on_draw: its outlines, or the text itself over them.
+func _on_draw_text(outlines: bool) -> void:
+	var ci := _text_ol if outlines else _text_fg
+	for key: Array in _texts:
+		var f: Font = key[0]
+		var fsize: int = key[1]
+		for t: Array in _texts[key]:
+			if not outlines:
+				ci.draw_string(f, t[0], t[1], t[2], t[3], fsize, t[4])
+			elif t[5] > 0:
+				ci.draw_string_outline(f, t[0], t[1], t[2], t[3], fsize, t[5], t[6])
+
+
+## Text for the text layers, optionally outlined.
+func _text(f: Font, pos: Vector2, s: String, align: HorizontalAlignment, width: float, fsize: int, color: Color,
+		outline := 0, outline_color := Color(0, 0, 0, 0)) -> void:
+	# Grouped by font and size, each of which has a texture of its own: one batch per group.
+	var key := [f, fsize]
+	if not _texts.has(key):
+		_texts[key] = []
+	_texts[key].append([pos, s, align, width, color, outline, outline_color])
+
+
+## A convex (or star-shaped about its first point) polygon into this frame's batch of shapes.
+func _poly(pts: PackedVector2Array, color: Color) -> void:
+	var base := _tri_pts.size()
+	_tri_pts.append_array(pts)
+	for k in pts.size():
+		_tri_cols.append(color)
+	for k in range(1, pts.size() - 1):
+		_tri_idx.append_array([base, base + k, base + k + 1])
+
+
+func _rect(r: Rect2, color: Color) -> void:
+	_poly(PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)]), color)
+
+
+func _slant(r: Rect2, color: Color, slant := UiKit.SLANT) -> void:
+	_poly(UiKit.slant_points(r, slant), color)
+
+
+func _circle(c: Vector2, radius: float, color: Color) -> void:
+	var pts := PackedVector2Array()
+	for k in 12:
+		pts.append(c + Vector2.from_angle(k * TAU / 12.0) * radius)
+	_poly(pts, color)
 
 
 # ------------------------------------------------------------------ drawing
@@ -312,47 +408,115 @@ func _on_draw() -> void:
 func _str(s: String, pos: Vector2, kind: String, fsize: int, color: Color, align := HORIZONTAL_ALIGNMENT_LEFT,
 		width := -1.0, tracking := 0, tabular := false) -> void:
 	# A soft dark outline keeps text legible over bright sky without looking 1998.
-	var f := UiKit.font(kind, tracking, tabular)
-	_draw.draw_string_outline(f, pos, s, align, width, fsize, maxi(fsize / 7, 3), Color(0, 0, 0, 0.35 * color.a))
-	_draw.draw_string(f, pos, s, align, width, fsize, color)
+	_text(UiKit.font(kind, tracking, tabular), pos, s, align, width, fsize, color, maxi(fsize / 7, 3),
+		Color(0, 0, 0, 0.35 * color.a))
 
 
+## The static layer: the mirror's frame, the tach's dial and the map's outline.
+func _on_draw_static() -> void:
+	if player == null or not is_instance_valid(player) or race == null or race.path == null:
+		return
+	if _pause.visible or _results:
+		return
+	var size := _static.size
+	if _mirror.visible:
+		var mr := _mirror.get_rect()
+		_static.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
+	_draw_tach_dial(Vector2(size.x - M - 118, size.y - M - 104))
+	_draw_map_outline(Rect2(M, size.y - M - 190, 190, 190))
+
+
+## Unlit segments, the thousands and the units under the speed.
+func _draw_tach_dial(c: Vector2) -> void:
+	var r := TACH_R
+	var max_rpm := _tach_max_rpm()
+	var red_frac := player.redline / max_rpm
+	# The unlit segments, all in one batch of triangles.
+	_tach_polys(c)
+	var pts := PackedVector2Array()
+	var cols := PackedColorArray()
+	var tris := PackedInt32Array()
+	for i in TACH_SEGS:
+		var col := Color(1, 1, 1, 0.13) if (i + 0.5) / TACH_SEGS < red_frac else Color(RED, 0.3)
+		var base := pts.size()
+		pts.append_array(_tach_segs[i])
+		for k in _tach_segs[i].size():
+			cols.append(col)
+		for k in range(1, _tach_segs[i].size() - 1):
+			tris.append_array([base, base + k, base + k + 1])
+	RenderingServer.canvas_item_add_triangle_array(_static.get_canvas_item(), tris, pts, cols)
+	var kf := UiKit.font("cond", 0, true)
+	for k in int(max_rpm / 1000.0) + 1:
+		var a := lerpf(TACH_A0, TACH_A1, k * 1000.0 / max_rpm)
+		var p := c + Vector2(cos(a), sin(a)) * (r - 30)
+		_static.draw_string(kf, p + Vector2(-8, 5), str(k), HORIZONTAL_ALIGNMENT_CENTER, 16, 13,
+			Color(RED, 0.9) if k * 1000.0 >= player.redline else UiKit.INK_DIM)
+	var f := UiKit.font("cond", 3)
+	var pos := c + Vector2(-80, 44)
+	var units := "KM/H" if Game.units_kmh else "MPH"
+	_static.draw_string_outline(f, pos, units, HORIZONTAL_ALIGNMENT_CENTER, 160, 13, 3, Color(0, 0, 0, 0.35 * UiKit.INK_DIM.a))
+	_static.draw_string(f, pos, units, HORIZONTAL_ALIGNMENT_CENTER, 160, 13, UiKit.INK_DIM)
+
+
+const TACH_R := 104.0
+const TACH_SEGS := 40
+const TACH_A0 := deg_to_rad(140)
+const TACH_A1 := deg_to_rad(400)
+
+
+## The tach's scale: one for every car, so a lazy V12's redline sits well short of a racer's.
+func _tach_max_rpm() -> float:
+	return maxf(10000.0, ceilf(player.redline / 1000.0 + 1.0) * 1000.0)
+
+
+## Segment i of the tach: an arc from s0 to s1, thickening towards the top of the range like a
+## modern digital cluster.
+func _tach_seg(i: int) -> Array:
+	var span := (TACH_A1 - TACH_A0) / TACH_SEGS
+	var s0 := TACH_A0 + i * span + span * 0.12
+	var mid := (i + 0.5) / TACH_SEGS
+	return [s0, s0 + span * 0.76, lerpf(9.0, 15.0, mid), mid]
+
+
+## Each of the tach's segments as a polygon round the dial centred on `c`, built once.
+func _tach_polys(c: Vector2) -> void:
+	if c == _tach_c:
+		return
+	_tach_c = c
+	_tach_segs.clear()
+	for i in TACH_SEGS:
+		var sg := _tach_seg(i)
+		var pts := PackedVector2Array()
+		for k in 5:
+			var a: float = lerpf(sg[0], sg[1], k / 4.0)
+			pts.append(c + Vector2(cos(a), sin(a)) * TACH_R)
+		for k in 5:
+			var a: float = lerpf(sg[1], sg[0], k / 4.0)
+			pts.append(c + Vector2(cos(a), sin(a)) * (TACH_R - sg[2]))
+		_tach_segs.append(pts)
+
+
+## The tach's lit segments over the dial (_draw_tach_dial, on the static layer), speed and gear.
 func _draw_tach(c: Vector2) -> void:
-	var r := 104.0
-	# One scale for every car, so a lazy V12's redline sits well short of a racer's.
-	var max_rpm := maxf(10000.0, ceilf(player.redline / 1000.0 + 1.0) * 1000.0)
-	var a0 := deg_to_rad(140)
-	var a1 := deg_to_rad(400)
-	var segs := 40
+	var r := TACH_R
+	var max_rpm := _tach_max_rpm()
 	var frac := clampf(player.rpm / max_rpm, 0.0, 1.0)
 	var red_frac := player.redline / max_rpm
 	var shift := player.rpm > player.redline * 0.96 and fmod(_time * 12.0, 2.0) < 1.0
-	var span := (a1 - a0) / segs
-	for i in segs:
-		var s0 := a0 + i * span + span * 0.12
-		var s1 := s0 + span * 0.76
-		var mid := (i + 0.5) / segs
+	_tach_polys(c)
+	for i in TACH_SEGS:
+		var mid := (i + 0.5) / TACH_SEGS
+		if mid > frac:
+			break
 		var in_red := mid >= red_frac
-		var col := Color(1, 1, 1, 0.13) if not in_red else Color(RED, 0.3)
-		if mid <= frac:
-			col = RED if in_red or shift else (UiKit.ACCENT if mid > red_frac * 0.72 else UiKit.INK)
-		# Segments thicken towards the top of the range, like a modern digital cluster.
-		var w := lerpf(9.0, 15.0, mid)
-		_draw.draw_arc(c, r - w * 0.5, s0, s1, 4, col, w, true)
-	var kf := UiKit.font("cond", 0, true)
-	for k in int(max_rpm / 1000.0) + 1:
-		var a := lerpf(a0, a1, k * 1000.0 / max_rpm)
-		var p := c + Vector2(cos(a), sin(a)) * (r - 30)
-		_draw.draw_string(kf, p + Vector2(-8, 5), str(k), HORIZONTAL_ALIGNMENT_CENTER, 16, 13,
-			Color(RED, 0.9) if k * 1000.0 >= player.redline else UiKit.INK_DIM)
+		_poly(_tach_segs[i], RED if in_red or shift else (UiKit.ACCENT if mid > red_frac * 0.72 else UiKit.INK))
 	var spd := player.kmh() if Game.units_kmh else player.kmh() / 1.609
 	_str("%d" % roundi(spd), c + Vector2(-80, 22), "display", 62, UiKit.INK, HORIZONTAL_ALIGNMENT_CENTER, 160, 0, true)
-	_str("KM/H" if Game.units_kmh else "MPH", c + Vector2(-80, 44), "cond", 13, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_CENTER, 160, 3)
 	# Gear in a slanted chip in the gap at the bottom of the arc.
 	var g := "R" if player.gear < 0 else ("N" if player.gear == 0 else str(player.gear))
 	var gr := Rect2(c + Vector2(-22, r - 26), Vector2(44, 36))
-	UiKit.draw_slant(_draw, gr, RED if player.gear < 0 else UiKit.ACCENT)
-	_draw.draw_string(UiKit.font("display"), gr.position + Vector2(0, 29), g, HORIZONTAL_ALIGNMENT_CENTER, gr.size.x, 32, UiKit.BG)
+	_slant(gr, RED if player.gear < 0 else UiKit.ACCENT)
+	_text(UiKit.font("display"), gr.position + Vector2(0, 29), g, HORIZONTAL_ALIGNMENT_CENTER, gr.size.x, 32, UiKit.BG)
 
 
 func _draw_info(size: Vector2) -> void:
@@ -373,8 +537,8 @@ func _draw_info(size: Vector2) -> void:
 		_str("BEST  " + fmt_time(r.best), Vector2(M, map_y - 12), "cond", 15, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_RIGHT, 190, 1, true)
 	var pr := Rect2(M, map_y - 4, 190, 3)
 	var frac := clampf(float(r.node) / maxf(race.path.size(), 1.0), 0.0, 1.0) if r.lap >= 0 else 0.0
-	_draw.draw_rect(pr, Color(1, 1, 1, 0.15))
-	_draw.draw_rect(Rect2(pr.position, Vector2(pr.size.x * frac, pr.size.y)), UiKit.ACCENT)
+	_rect(pr, Color(1, 1, 1, 0.15))
+	_rect(Rect2(pr.position, Vector2(pr.size.x * frac, pr.size.y)), UiKit.ACCENT)
 
 
 ## Timing tower: every racer in order, the leader with the race clock, the rest with their
@@ -390,7 +554,7 @@ func _draw_tower(at: Vector2) -> float:
 		var you: bool = rr.car == player
 		var ink := UiKit.BG if you else UiKit.INK
 		if you:
-			UiKit.draw_slant(_draw, Rect2(at.x - 8, y, w + 16, h - 2), UiKit.ACCENT, 0.3)
+			_slant(Rect2(at.x - 8, y, w + 16, h - 2), UiKit.ACCENT, 0.3)
 		var base := y + h - 7
 		_str(str(i + 1), Vector2(at.x, base), "display", 20, ink, HORIZONTAL_ALIGNMENT_RIGHT, 22, 0, true)
 		var nm: String = rr.name.to_upper()
@@ -426,7 +590,7 @@ func _gap(rr: Dictionary, lead: Dictionary, L: float) -> String:
 func _draw_cop_block(y: float) -> void:
 	if pursuit:
 		var on := fmod(_time * 4.0, 2.0) < 1.0
-		_draw.draw_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
+		_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
 		_str("PURSUIT", Vector2(M + 14, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
 		y += 22
 		_pips("HEAT", y, 3, race.heat)
@@ -440,15 +604,15 @@ func _draw_cop_block(y: float) -> void:
 func _pips(label: String, y: float, n: int, lit: int) -> void:
 	_str(label, Vector2(M, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
 	for k in n:
-		UiKit.draw_slant(_draw, Rect2(M + 84 + k * 26, y - 11, 22, 10), RED if k < lit else EMPTY_PIP, 0.5)
+		_slant(Rect2(M + 84 + k * 26, y - 11, 22, 10), RED if k < lit else EMPTY_PIP, 0.5)
 
 
 ## While chased: a thin light bar along the top edge, red and blue halves taking turns.
 func _draw_pursuit(size: Vector2) -> void:
 	var on := fmod(_time * 4.0, 2.0) < 1.0
 	var h := size.x * 0.5
-	_draw.draw_rect(Rect2(0, 0, h, 3), Color(RED, 0.85 if on else 0.15))
-	_draw.draw_rect(Rect2(h, 0, h, 3), Color(UiKit.COP_BLUE, 0.15 if on else 0.85))
+	_rect(Rect2(0, 0, h, 3), Color(RED, 0.85 if on else 0.15))
+	_rect(Rect2(h, 0, h, 3), Color(UiKit.COP_BLUE, 0.15 if on else 0.85))
 
 
 func _draw_banner(size: Vector2) -> void:
@@ -471,10 +635,10 @@ func _draw_banner(size: Vector2) -> void:
 			ink = UiKit.INK
 		"go":
 			col = GO
-	UiKit.draw_slant(_draw, Rect2(r.position + Vector2(6, 6), r.size), Color(0, 0, 0, 0.3 * fade))
-	UiKit.draw_slant(_draw, r, Color(col, fade))
+	_slant(Rect2(r.position + Vector2(6, 6), r.size), Color(0, 0, 0, 0.3 * fade))
+	_slant(r, Color(col, fade))
 	if grow > 0.6:
-		_draw.draw_string(f, Vector2(size.x * 0.5 - tw * 0.5, r.position.y + 44), _msg, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
+		_text(f, Vector2(size.x * 0.5 - tw * 0.5, r.position.y + 44), _msg, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
 			Color(ink, fade * (grow - 0.6) / 0.4))
 
 
@@ -492,8 +656,7 @@ func _draw_countdown(size: Vector2) -> void:
 	var s := str(n)
 	var tw := f.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var a := clampf(sub * 3.0, 0.0, 1.0)
-	_draw.draw_string_outline(f, c + Vector2(-tw * 0.5, fs * 0.35), s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 14, Color(0, 0, 0, 0.3 * a))
-	_draw.draw_string(f, c + Vector2(-tw * 0.5, fs * 0.35), s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(UiKit.INK, a))
+	_text(f, c + Vector2(-tw * 0.5, fs * 0.35), s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(UiKit.INK, a), 14, Color(0, 0, 0, 0.3 * a))
 
 
 func _draw_hints(size: Vector2) -> void:
@@ -520,9 +683,46 @@ func _to_map(p: Vector3) -> Vector2:
 	return _map_origin + Vector2(_map_max.x - p.x, _map_max.y - p.z) * _map_scale
 
 
-func _draw_map(rect: Rect2) -> void:
+## The track's outline and the start line (on the static layer).
+func _draw_map_outline(rect: Rect2) -> void:
+	_map_layout(rect)
 	var path: TrackPath = race.path
-	# The outline only depends on the track and the map rect; build it once, not every frame.
+	_static.draw_polyline(_map_pts, Color(0, 0, 0, 0.45), 7, true)
+	_static.draw_polyline(_map_pts, Color(1, 1, 1, 0.8), 3, true)
+	# Start/finish: a short bar across the track, perpendicular to its direction at node 0.
+	var s0 := _to_map(path.points[0])
+	var across := (_to_map(path.points[1]) - s0).normalized().orthogonal() * 7.0
+	_static.draw_line(s0 - across, s0 + across, UiKit.ACCENT, 3)
+
+
+## The cars on the map, over its outline.
+func _draw_map(rect: Rect2) -> void:
+	_map_layout(rect)
+	var blink := fmod(_time * 4.0, 2.0) < 1.0
+	for c in race.cops:
+		if is_instance_valid(c):
+			var cc := RED if pursuit and blink else UiKit.COP_BLUE
+			_circle(_to_map(c.global_position), 5, Color(0, 0, 0, 0.5))
+			_circle(_to_map(c.global_position), 3.5, cc)
+	for rr in race.racers:
+		if rr.car == player:
+			continue
+		_circle(_to_map(rr.car.global_position), 5.5, Color(0, 0, 0, 0.5))
+		_circle(_to_map(rr.car.global_position), 4, UiKit.INK)
+	# The player as an arrow pointing along the car's heading.
+	var p := _to_map(player.global_position)
+	var fwd3 := player.global_transform.basis.z
+	var d := Vector2(-fwd3.x, -fwd3.z).normalized()
+	var n := d.orthogonal()
+	var tri := PackedVector2Array([p + d * 9, p - d * 6 + n * 6, p - d * 3, p - d * 6 - n * 6])
+	_poly(PackedVector2Array([p + d * 11, p - d * 8 + n * 8, p - d * 4, p - d * 8 - n * 8]), Color(0, 0, 0, 0.5))
+	_poly(tri, UiKit.ACCENT)
+
+
+## Fits the track into the map's rect; the outline only depends on the track and the rect,
+## so it's built once, not every frame.
+func _map_layout(rect: Rect2) -> void:
+	var path: TrackPath = race.path
 	if _map_path != path or _map_rect != rect:
 		_map_path = path
 		_map_rect = rect
@@ -539,31 +739,6 @@ func _draw_map(rect: Rect2) -> void:
 		for i in range(0, path.size(), 2):
 			_map_pts.append(_to_map(path.points[i]))
 		_map_pts.append(_map_pts[0])
-	_draw.draw_polyline(_map_pts, Color(0, 0, 0, 0.45), 7, true)
-	_draw.draw_polyline(_map_pts, Color(1, 1, 1, 0.8), 3, true)
-	# Start/finish: a short bar across the track, perpendicular to its direction at node 0.
-	var s0 := _to_map(path.points[0])
-	var across := (_to_map(path.points[1]) - s0).normalized().orthogonal() * 7.0
-	_draw.draw_line(s0 - across, s0 + across, UiKit.ACCENT, 3)
-	var blink := fmod(_time * 4.0, 2.0) < 1.0
-	for c in race.cops:
-		if is_instance_valid(c):
-			var cc := RED if pursuit and blink else UiKit.COP_BLUE
-			_draw.draw_circle(_to_map(c.global_position), 5, Color(0, 0, 0, 0.5))
-			_draw.draw_circle(_to_map(c.global_position), 3.5, cc)
-	for rr in race.racers:
-		if rr.car == player:
-			continue
-		_draw.draw_circle(_to_map(rr.car.global_position), 5.5, Color(0, 0, 0, 0.5))
-		_draw.draw_circle(_to_map(rr.car.global_position), 4, UiKit.INK)
-	# The player as an arrow pointing along the car's heading.
-	var p := _to_map(player.global_position)
-	var fwd3 := player.global_transform.basis.z
-	var d := Vector2(-fwd3.x, -fwd3.z).normalized()
-	var n := d.orthogonal()
-	var tri := PackedVector2Array([p + d * 9, p - d * 6 + n * 6, p - d * 3, p - d * 6 - n * 6])
-	_draw.draw_colored_polygon(PackedVector2Array([p + d * 11, p - d * 8 + n * 8, p - d * 4, p - d * 8 - n * 8]), Color(0, 0, 0, 0.5))
-	_draw.draw_colored_polygon(tri, UiKit.ACCENT)
 
 
 # ------------------------------------------------------------------ pause / results

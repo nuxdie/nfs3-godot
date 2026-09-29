@@ -28,7 +28,7 @@ static func spawn(tree: SceneTree, make_car: Callable, spots: Array) -> Array[Ca
 		car.handbrake = true
 		car.brake = 1.0
 		for g in car.find_children("*", "GeometryInstance3D", true, false):
-			(g as GeometryInstance3D).visibility_range_end = DRAW_DISTANCE
+			(g as GeometryInstance3D).visibility_range_end = DRAW_DISTANCE * (0.5 if Game.quality == Game.Quality.LOW else 1.0)
 		_sleep_later(tree, car)
 		out.append(car)
 	return out

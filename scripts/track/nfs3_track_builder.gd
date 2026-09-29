@@ -151,6 +151,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			mi.visibility_range_end = DRAW_DISTANCE
 			mi.visibility_range_end_margin = 40.0
+			mi.set_meta("landscape", true)   # keeps its range on Low quality (see Race)
 			geo.add_child(mi)
 
 		# Collision: the block's ground (road and terrain).

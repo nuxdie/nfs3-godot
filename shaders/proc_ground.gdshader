@@ -3,7 +3,12 @@ shader_type spatial;
 // on the far mountains, in world space so the terrain grid and the strips along the road
 // match. Vertex colour R paints gravel verges, G paved pavements.
 
+#ifdef LOW_QUALITY
+// Low quality (Game.shader): two noise samples rather than ten.
+uniform sampler2D noise_fine : filter_linear_mipmap, repeat_enable;
+#else
 uniform sampler2D noise_fine : filter_linear_mipmap_anisotropic, repeat_enable;
+#endif
 uniform sampler2D noise_coarse : filter_linear_mipmap, repeat_enable;
 uniform vec3 grass_a : source_color = vec3(0.30, 0.42, 0.17);
 uniform vec3 grass_b : source_color = vec3(0.45, 0.47, 0.22);
@@ -34,9 +39,14 @@ void fragment() {
 	vec3 n = normalize(wnrm);
 	float slope = 1.0 - n.y;
 	float f1 = texture(noise_fine, wpos.xz / 6.0).r;
+	float c2 = texture(noise_coarse, wpos.xz / 45.0).r;
+#ifdef LOW_QUALITY
+	float f2 = f1;
+	float c1 = c2;
+#else
 	float f2 = texture(noise_fine, wpos.xz / 1.3).r;
 	float c1 = texture(noise_coarse, wpos.xz / 240.0).r;
-	float c2 = texture(noise_coarse, wpos.xz / 45.0).r;
+#endif
 
 	vec3 grass = mix(grass_a, grass_b, smoothstep(0.35, 0.7, c1 * 0.7 + c2 * 0.4));
 	grass *= 0.8 + 0.3 * f1;
@@ -45,10 +55,16 @@ void fragment() {
 	// Mud and pebbles along the water's edge.
 	grass = mix(grass, dirt * 0.8, 1.0 - smoothstep(0.4, 1.6, wpos.y - water_line));
 
+#ifdef LOW_QUALITY
+	// No triplanar rock: the noise already sampled, broken up by the bedding lines below.
+	float r1 = c2;
+	float r2 = f1;
+#else
 	vec3 bw = pow(abs(n), vec3(4.0));
 	bw /= bw.x + bw.y + bw.z;
 	float r1 = tri(wpos, bw, 7.0);
 	float r2 = tri(wpos, bw, 1.9);
+#endif
 	vec3 rock = mix(rock_a, rock_b, r1);
 	rock *= 0.78 + 0.35 * r2;
 	// Bedding lines across the cut faces.

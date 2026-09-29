@@ -77,6 +77,10 @@ func _ready() -> void:
 	# Where scenery stands on the road, so the AI steers round it.
 	path.scan_obstacles(get_world_3d().direct_space_state)
 	_spawn_cars()
+	# Resolution that gives way when the GPU can't keep up (the preset's scale is its ceiling).
+	var drs := DynamicResolution.new()
+	add_child(drs)
+	drs.watch(hud.mirror_viewport())
 	hud.hide_loading()
 	# Nothing to start in free roam: hand over control straight away.
 	if Game.mode == Game.Mode.FREE_ROAM:
@@ -89,6 +93,9 @@ func _ready() -> void:
 
 func _build_world() -> void:
 	var world := TrackWorld.load_track(Game.track_id)
+	if Game.quality == Game.Quality.LOW:
+		_trim_draw_distance(world.root)
+		_merge_land(world.root)
 	add_child(world.root)
 	_parking = world.root.get_meta("parking", [])
 	path = world.path
@@ -104,6 +111,96 @@ func _build_world() -> void:
 	_reflections.setup(world.root, path, world.env, _track_mat, w)
 
 
+const LOW_CAR_RANGE := 250.0   # m: how far off cars are drawn on Low quality
+const LOW_SCENERY_RANGE := 0.6  # share of its draw distance scenery keeps on Low quality
+
+
+const MERGE_CELL := 600.0   # m: Low quality merges the land's meshes into squares this big
+
+
+## Low quality: the procedural track's land and road come in hundreds of small meshes, each
+## a draw call, which a weak GPU pays for more than for their vertices. Merged into big
+## squares (per material, and per draw distance and the like) they're a few dozen.
+static func _merge_land(root: Node) -> void:
+	var shaders := [Game.shader("res://shaders/proc_ground.gdshader"), Game.shader("res://shaders/proc_road.gdshader")]
+	var groups := {}
+	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+		var m := mi.material_override as ShaderMaterial
+		if m == null or not m.shader in shaders or mi.get_script() != null or not mi.visible \
+				or mi.mesh == null or mi.mesh.get_surface_count() != 1 or mi.get_child_count() > 0:
+			continue
+		# Where it sits under the root (which isn't in the tree yet).
+		var xf := mi.transform
+		var p := mi.get_parent()
+		while p != root and p is Node3D:
+			xf = (p as Node3D).transform * xf
+			p = p.get_parent()
+		var c := xf * mi.mesh.get_aabb().get_center()
+		var key := [m.get_instance_id(), mi.mesh.surface_get_format(0), floori(c.x / MERGE_CELL), floori(c.z / MERGE_CELL),
+			mi.visibility_range_end, mi.cast_shadow, mi.layers]
+		if not groups.has(key):
+			groups[key] = []
+		groups[key].append([mi, xf])
+	for key: Array in groups:
+		var list: Array = groups[key]
+		if list.size() < 2:
+			continue
+		var out := []
+		out.resize(Mesh.ARRAY_MAX)
+		var n := 0
+		for entry: Array in list:
+			var mi: MeshInstance3D = entry[0]
+			var xf: Transform3D = entry[1]
+			var a := mi.mesh.surface_get_arrays(0)
+			var verts: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			if xf != Transform3D.IDENTITY:
+				verts = xf * verts
+				if a[Mesh.ARRAY_NORMAL] != null:
+					var nb := xf.basis.inverse().transposed()
+					var nrm: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+					for k in nrm.size():
+						nrm[k] = (nb * nrm[k]).normalized()
+					a[Mesh.ARRAY_NORMAL] = nrm
+			a[Mesh.ARRAY_VERTEX] = verts
+			var idx: PackedInt32Array = a[Mesh.ARRAY_INDEX] if a[Mesh.ARRAY_INDEX] != null else PackedInt32Array(range(verts.size()))
+			for k in idx.size():
+				idx[k] += n
+			a[Mesh.ARRAY_INDEX] = idx
+			for t in Mesh.ARRAY_MAX:
+				if a[t] == null:
+					continue
+				if out[t] == null:
+					out[t] = a[t]
+				else:
+					out[t].append_array(a[t])
+			n += verts.size()
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
+		var first: MeshInstance3D = list[0][0]
+		var merged := MeshInstance3D.new()
+		merged.mesh = mesh
+		merged.material_override = first.material_override
+		merged.visibility_range_end = first.visibility_range_end
+		merged.visibility_range_end_margin = first.visibility_range_end_margin
+		merged.cast_shadow = first.cast_shadow
+		merged.layers = first.layers
+		for meta in first.get_meta_list():
+			merged.set_meta(meta, first.get_meta(meta))
+		root.add_child(merged)
+		# Gone at once (the root isn't in the tree yet): the rain cover mustn't find them too.
+		for entry: Array in list:
+			entry[0].free()
+
+
+## Low quality: the scenery (trees, buildings, signs, rails) is drawn out to only part of its
+## usual distance, as a weak GPU pays for each of them however small in the fog. The land and
+## road themselves ("landscape") keep theirs, or they'd leave holes to the sky.
+static func _trim_draw_distance(root: Node) -> void:
+	for g: GeometryInstance3D in root.find_children("*", "GeometryInstance3D", true, false):
+		if g.visibility_range_end > 0.0 and not g.has_meta("landscape"):
+			g.visibility_range_end *= LOW_SCENERY_RANGE
+
+
 func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
 	var c := Car.new()
 	c.setup(data, tint)
@@ -116,6 +213,10 @@ func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
 	c.add_child(CarEffects.new(_skid_marks))
 	if Game.damage:
 		c.add_child(CarDamage.new())
+	if Game.quality == Game.Quality.LOW:
+		# Each car is a dozen draws; out in the fog they aren't worth them.
+		for g in c.find_children("*", "GeometryInstance3D", true, false):
+			(g as GeometryInstance3D).visibility_range_end = LOW_CAR_RANGE
 	add_child(c)
 	return c
 
@@ -223,8 +324,13 @@ func _spawn_cars() -> void:
 
 
 func _controller(c: Node) -> AIController:
+	# Looked up many times a tick: remembered on the car once found.
+	var ai: AIController = c.get_meta("ai") if c.has_meta("ai") else null
+	if is_instance_valid(ai) and ai.get_parent() == c:
+		return ai
 	for ch in c.get_children():
 		if ch is AIController:
+			c.set_meta("ai", ch)
 			return ch
 	return null
 

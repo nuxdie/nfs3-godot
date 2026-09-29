@@ -77,6 +77,9 @@ func _unhandled_input(e: InputEvent) -> void:
 		return
 	var prev := "ui_left" if horizontal else "ui_up"
 	var next := "ui_right" if horizontal else "ui_down"
+	# Taken first: an activated item can take this list out of the tree (quit to the menu,
+	# restart), and then it has no viewport left to mark the event handled in.
+	var vp := get_viewport()
 	if e.is_action_pressed(prev, true):
 		focus = posmod(focus - 1, items.size())
 	elif e.is_action_pressed(next, true):
@@ -85,7 +88,7 @@ func _unhandled_input(e: InputEvent) -> void:
 		activated.emit(focus)
 	else:
 		return
-	get_viewport().set_input_as_handled()
+	vp.set_input_as_handled()
 
 
 func _process(dt: float) -> void:

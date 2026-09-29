@@ -75,12 +75,30 @@ func closest(pos: Vector3, hint := -1, window := 24) -> int:
 				best_d = dd
 				best = i
 		return best
-	for k in range(-window, window + 1):
-		var i := idx(hint + k)
-		var dd := points[i].distance_squared_to(pos)
-		if dd < best_d:
-			best_d = dd
-			best = i
+	# Walk each way from the hint while it keeps getting closer, carrying on over a few nodes
+	# that don't (the spacing is uneven) - a car moves under a node a tick, so this is a
+	# handful of distances rather than the whole window's.
+	hint = ((hint % n) + n) % n
+	best = hint
+	best_d = points[hint].distance_squared_to(pos)
+	for dir in [1, -1]:
+		var i := hint
+		var misses := 0
+		for k in window:
+			i += dir
+			if i >= n:
+				i -= n
+			elif i < 0:
+				i += n
+			var dd := points[i].distance_squared_to(pos)
+			if dd < best_d:
+				best_d = dd
+				best = i
+				misses = 0
+			else:
+				misses += 1
+				if misses > 4:
+					break
 	return best
 
 

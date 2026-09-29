@@ -36,6 +36,12 @@ const GRIP_KNEE := 0.85
 
 ## The GTA IV-style additions, for A/B testing against the plain NFS3 handling (F6 toggles).
 static var body_sway := true
+## Beyond this (m) from the camera nobody sees the wheels turn, the body sway or the tyre
+## effects: the car skips them (see `far`).
+const DETAIL_RANGE := 140.0
+const REST_AFTER := 1.0   # s an AI car is held motionless before it sleeps
+## Whether brake and reversing lamps cast real light (Low quality: just the glowing lamps).
+static var lamp_lights := true
 static var progressive_grip := true
 
 # --- control inputs, written by a controller every physics frame
@@ -55,6 +61,8 @@ var steer_angle := 0.0
 var display_name := ""
 var is_player := false
 var is_cop := false
+var far := false          # out past DETAIL_RANGE from the camera (updated each frame)
+var resting := false      # held still and asleep in the physics engine (see REST_AFTER)
 
 # --- tuning (filled from car data; the carp.txt field number is in brackets)
 ## NFS3 counts pedal, steering and gearbox ramps in physics ticks, with the pedals and the
@@ -147,6 +155,10 @@ var _siren_glows: Array[MeshInstance3D] = []
 var _siren_pos: Array[Vector3] = []
 var _siren := false
 var _siren_t := 0.0
+var _braking_lit := false
+var _rest_t := 0.0
+var _reversing_lit := false
+var _ray_q: PhysicsRayQueryParameters3D   # the wheels' suspension ray, reused every tick
 var _brake_lights: Array[Node3D] = []
 var _lamps: Array[Node3D] = []   # head and running tail glows, shown while the headlights are on
 var _head_glows: Array[Node3D] = []
@@ -206,7 +218,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	var wheel_mat: Material = null
 	if data.texture:
 		var sm := ShaderMaterial.new()
-		sm.shader = preload("res://shaders/car.gdshader")
+		sm.shader = Game.shader("res://shaders/car.gdshader")
 		sm.set_shader_parameter("albedo_tex", data.texture)
 		var paint := tint
 		if paint.a == 0.0:
@@ -652,20 +664,24 @@ func enable_siren(on: bool) -> void:
 			ends.reverse()
 		for k in 2:
 			var c: Color = [Color(1, 0.05, 0.05), Color(0.1, 0.2, 1)][k]
-			var l := OmniLight3D.new()
-			l.light_color = c
-			l.omni_range = 14.0
-			l.light_energy = 0.0
-			l.position = ends[k] + Vector3.UP * 0.1
-			_body_tilt.add_child(l)
-			_siren_lights.append(l)
+			# The light they throw round about only where the quality allows (see lamp_lights).
+			if lamp_lights:
+				var l := OmniLight3D.new()
+				l.light_color = c
+				l.omni_range = 14.0
+				l.light_energy = 6.0
+				l.visible = false
+				l.position = ends[k] + Vector3.UP * 0.1
+				_body_tilt.add_child(l)
+				_siren_lights.append(l)
 			var glow := _lamp_glow(ends[k] + Vector3.UP * 0.05, c, 0.55)
 			_body_tilt.add_child(glow)
 			_siren_glows.append(glow)
-	for l in _siren_lights:
-		l.visible = on
-	for g in _siren_glows:
-		g.visible = on
+	if not on:
+		for l in _siren_lights:
+			l.visible = false
+		for g in _siren_glows:
+			g.visible = false
 
 
 func forward_dir() -> Vector3:
@@ -689,6 +705,8 @@ func tyres_flat() -> bool:
 ## `drop` above it: tall cars and trucks would otherwise spawn with their tyres in the road
 ## and the suspension would fire them into the air.
 func reset_to(xf: Transform3D, drop := 0.1) -> void:
+	if resting:
+		_wake()
 	var tyre_drop := 0.0
 	for w in _wheels:
 		tyre_drop = maxf(tyre_drop, w.radius - w.center.y)
@@ -724,6 +742,12 @@ func _gear_index(g: int) -> int:
 
 
 func _physics_process(dt: float) -> void:
+	if resting:
+		# Asleep in the physics engine until something runs into it (which wakes it) or it's
+		# asked to drive off.
+		if hold and sleeping:
+			return
+		_wake()
 	var fwd := global_basis.z
 	var up := global_basis.y
 	var vel := linear_velocity
@@ -814,9 +838,11 @@ func _physics_process(dt: float) -> void:
 	steer_angle = move_toward(steer_angle, steer_to, steer_steps * steps * lock * _steer_speed)
 
 	var space := get_world_3d().direct_space_state
-	var q := PhysicsRayQueryParameters3D.new()
-	q.exclude = [get_rid()]
-	q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
+	if _ray_q == null:
+		_ray_q = PhysicsRayQueryParameters3D.new()
+		_ray_q.exclude = [get_rid()]
+		_ray_q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
+	var q := _ray_q
 	grounded_wheels = 0
 	var total_slip := 0.0
 	var loose_wheels := 0
@@ -989,13 +1015,29 @@ func _physics_process(dt: float) -> void:
 		_upside_timer += dt
 	else:
 		_upside_timer = 0.0
+	# An AI car held still (a cruiser parked by the road, the grid before the start) that has
+	# settled on its springs: nothing to work out until it's hit or let go.
+	if hold and not is_player and grounded_wheels == 4 and vel.length_squared() < 0.0025 \
+			and angular_velocity.length_squared() < 0.0025:
+		_rest_t += dt
+		if _rest_t > REST_AFTER:
+			resting = true
+			can_sleep = true
+			sleeping = true
+			slip = 0.0
+	else:
+		_rest_t = 0.0
 
 	# Hidden rather than zero energy: an active light costs culling and shading even when dark.
 	var braking_lit := brake > 0.1 and gear > 0
-	for bl in _brake_lights:
-		bl.visible = braking_lit
-	for rl in _reverse_lights:
-		rl.visible = gear < 0
+	if braking_lit != _braking_lit or (gear < 0) != _reversing_lit:
+		_braking_lit = braking_lit
+		_reversing_lit = gear < 0
+		# The glows always; the real lights they cast on the road only where the quality allows.
+		for bl in _brake_lights:
+			bl.visible = braking_lit and (lamp_lights or not bl is Light3D)
+		for rl in _reverse_lights:
+			rl.visible = _reversing_lit and (lamp_lights or not rl is Light3D)
 
 
 ## The body's mesh instances (not wheels or pop-up lamps), for CarDamage to dent.
@@ -1021,6 +1063,19 @@ func is_stuck_upside_down() -> bool:
 
 
 func _process(dt: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	far = cam != null and cam.global_position.distance_squared_to(global_position) > DETAIL_RANGE * DETAIL_RANGE
+	if _siren:
+		_siren_t += dt
+		var phase := fmod(_siren_t * 3.0, 1.0)
+		# Hidden, not dimmed: a light at zero energy still costs its culling and shading.
+		for k in _siren_lights.size():
+			_siren_lights[k].visible = (phase < 0.5) == (k == 0)
+		_siren_glows[0].visible = phase < 0.5
+		_siren_glows[1].visible = phase >= 0.5
+	# Far off (or parked asleep) the wheels and body keep the pose they had.
+	if far or freeze or resting:
+		return
 	# The body leans back under power, dips under braking and rolls out of a bend [45].
 	var lean := Vector2(-_acc.y, _acc.x) * pitch_roll
 	if body_sway:
@@ -1049,13 +1104,6 @@ func _process(dt: float) -> void:
 		w.visual.position.y = lerpf(w.visual.position.y, y, 1.0 - exp(-55.0 * dt))
 		w.visual.rotation.y = steer_angle if w.front else 0.0
 		w.spin_node.rotation.x = fmod(w.spin, TAU)
-	if _siren:
-		_siren_t += dt
-		var phase := fmod(_siren_t * 3.0, 1.0)
-		_siren_lights[0].light_energy = 6.0 if phase < 0.5 else 0.0
-		_siren_lights[1].light_energy = 6.0 if phase >= 0.5 else 0.0
-		_siren_glows[0].visible = phase < 0.5
-		_siren_glows[1].visible = phase >= 0.5
 
 
 func _on_body_entered(other: Node) -> void:
@@ -1070,6 +1118,34 @@ func _on_body_entered(other: Node) -> void:
 			car.apply_central_impulse(away.normalized() * minf(impulse, 20.0) * car.mass * 0.02 * push_factor)
 	if impulse > 4.0:
 		crashed.emit(impulse)
+
+
+## Stops simulating the car: it becomes a kinematic body whoever holds it moves by hand
+## (AIController's far-off traffic).
+func suspend() -> void:
+	if resting:
+		_wake()
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	freeze = true
+	set_physics_process(false)
+	slip = 0.0
+
+
+## Back to driving after suspend(), moving at `velocity`.
+func resume(velocity: Vector3) -> void:
+	freeze = false
+	set_physics_process(true)
+	linear_velocity = velocity
+	angular_velocity = Vector3.ZERO
+	_prev_vel = velocity
+	speed = velocity.dot(global_basis.z)
+
+
+func _wake() -> void:
+	resting = false
+	_rest_t = 0.0
+	can_sleep = false
+	sleeping = false
 
 
 ## Room above a tyre (hub `c`, radius `r`, half-width `hw`) before it meets the bodywork

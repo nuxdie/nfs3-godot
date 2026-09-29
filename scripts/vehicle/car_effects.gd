@@ -23,6 +23,7 @@ var _dust: Array[CPUParticles3D] = []    # per rear wheel
 var _sparks: CPUParticles3D
 var _splash: CPUParticles3D
 var _wet := false           # in a stream or a lake last step
+var _idle := false          # skipping the effects (parked or far off), emitters off
 var _spark_t := 0.0
 var _crash_t := 0.0         # a crash was reported; spark at its contact once physics has it
 var _crash_v := 0.0         # ... and how fast the car was going into it, m/s
@@ -55,6 +56,17 @@ func _ready() -> void:
 
 
 func _physics_process(dt: float) -> void:
+	# Parked asleep, or too far off to see: no marks, smoke, dust or sparks to make.
+	if _car.freeze or _car.far or _car.resting:
+		if not _idle:
+			_idle = true
+			_last.fill(null)
+			for p in _smoke + _dust:
+				p.emitting = false
+			_sparks.emitting = false
+		_wet = _car.water_depth > 0.0
+		return
+	_idle = false
 	var wheels := _car.wheel_states()
 	var moving := absf(_car.speed) > 2.0
 	# Weak GPUs: only the player's car smokes (overdraw is what they run out of).

@@ -33,10 +33,27 @@ var _dodge := 0.0            # TRAFFIC: temporary sideways shift around a stoppe
 var _dodge_t := 0.0
 var others: Array = []       # cars to avoid (set by the race)
 
+const GHOST_ENTER := 320.0   # m from the camera and every non-traffic car: far-off traffic glides
+const GHOST_LEAVE := 300.0   # ...and drives again inside this
+var _ghost := false
+var _ghost_check := 0.0
+var _ghost_f := 0.0          # m past `node` along the road
+var _ghost_h := 0.0          # m the body rides over the road
+
+const LIMIT_TICKS := 3       # physics ticks between refreshes of the speed limit
+var _limit := 0.0
+var _limit_ticks := 0
+var _limit_dir := 0
+var _limit_chase := false
+
 
 func _ready() -> void:
 	car = get_parent() as Car
 	process_physics_priority = -10
+	_limit_ticks = randi() % LIMIT_TICKS
+	_ghost_check = randf() * 0.25
+	if role == Role.TRAFFIC:
+		car.set_meta("traffic", true)
 
 
 func _physics_process(dt: float) -> void:
@@ -46,6 +63,8 @@ func _physics_process(dt: float) -> void:
 		car.throttle = 0.0
 		car.hold = true
 		car.steer = 0.0
+		return
+	if role == Role.TRAFFIC and _ghost_step(dt):
 		return
 	node = path.closest(car.global_position, node)
 	var chase := role == Role.COP and chasing and is_instance_valid(target)
@@ -78,7 +97,15 @@ func _physics_process(dt: float) -> void:
 		lane = clear
 	off = clear
 	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * off
-	var desired := _speed_limit(dir)
+	# The look-ahead over the next 300 m is the AI's biggest cost: refreshed every few ticks
+	# (staggered between the cars), which moves the braking point by well under a metre.
+	_limit_ticks -= 1
+	if _limit_ticks <= 0 or dir != _limit_dir or chase != _limit_chase:
+		_limit = _speed_limit(dir)
+		_limit_ticks = LIMIT_TICKS
+		_limit_dir = dir
+		_limit_chase = chase
+	var desired := _limit
 	car.power_scale = 1.0
 	if chase:
 		var plan := _chase(aim, desired)
@@ -155,6 +182,72 @@ func _physics_process(dt: float) -> void:
 		_stuck_t = 0.0
 
 
+## TRAFFIC far from the camera and from every car that isn't traffic: nobody sees it or meets
+## it, so rather than drive it (suspension, tyres and all) it glides along its lane at its
+## cruising speed as a kinematic body, and drives again before anyone comes near. Returns
+## whether it's gliding this tick.
+func _ghost_step(dt: float) -> bool:
+	_ghost_check -= dt
+	if _ghost_check <= 0.0:
+		_ghost_check = 0.25
+		var near := _nearest_watcher()
+		if not _ghost and near > GHOST_ENTER and _dodge == 0.0 and absf(car.speed) > cruise_speed * 0.8 \
+				and car.grounded_wheels == 4 and absf(path.lateral(car.global_position, node) - lane) < 1.0:
+			_ghost_enter()
+		elif _ghost and near < GHOST_LEAVE:
+			_ghost_leave()
+	if not _ghost:
+		return false
+	# Along the road from node to node, `_ghost_f` metres past the current one.
+	var dir := -1 if reverse_dir else 1
+	_ghost_f += cruise_speed * dt
+	var nxt := path.idx(node + dir)
+	var seg := path.points[node].distance_to(path.points[nxt])
+	while _ghost_f > seg:
+		_ghost_f -= seg
+		node = nxt
+		nxt = path.idx(node + dir)
+		seg = path.points[node].distance_to(path.points[nxt])
+	var t := _ghost_f / maxf(seg, 0.01)
+	var right := path.rights[node].lerp(path.rights[nxt], t)
+	var up := path.ups[node].lerp(path.ups[nxt], t) if path.ups.size() > nxt else Vector3.UP
+	var fwd := (path.points[nxt] - path.points[node]).normalized()
+	var pos := path.points[node].lerp(path.points[nxt], t) + right * lane + up * _ghost_h
+	car.global_transform = Transform3D(Basis.looking_at(-fwd, up), pos)
+	stranded_t = 0.0
+	_progress_node = node
+	return true
+
+
+## Metres to the camera or the nearest car that isn't traffic, whichever is closer.
+func _nearest_watcher() -> float:
+	var p := car.global_position
+	var cam := get_viewport().get_camera_3d()
+	var d := cam.global_position.distance_to(p) if cam else INF
+	for o in others:
+		if is_instance_valid(o) and not o.has_meta("traffic"):
+			d = minf(d, (o as Node3D).global_position.distance_to(p))
+	return d
+
+
+func _ghost_enter() -> void:
+	_ghost = true
+	node = path.closest(car.global_position, node)
+	var dir := -1 if reverse_dir else 1
+	var nxt := path.idx(node + dir)
+	# Carry on from where it is: how far past the node, and how high its body rides over the road.
+	var along := (path.points[nxt] - path.points[node]).normalized()
+	_ghost_f = clampf((car.global_position - path.points[node]).dot(along), 0.0, path.points[node].distance_to(path.points[nxt]))
+	var up := path.ups[node] if path.ups.size() > node else Vector3.UP
+	_ghost_h = (car.global_position - path.points[node] - path.rights[node] * lane).dot(up)
+	car.suspend()
+
+
+func _ghost_leave() -> void:
+	_ghost = false
+	car.resume(car.global_basis.z * cruise_speed)
+
+
 ## Time spent making no headway. Measured as progress along the road, so a car that keeps
 ## backing off a wall and driving into it again still counts as stranded. A chasing cop
 ## goes wherever its target goes, so it only counts time spent (nearly) stationary.
@@ -182,15 +275,28 @@ func _update_stranded(dt: float, desired: float, dir: int) -> void:
 ## right once the car is already in a long bend such as a hairpin.
 func _speed_limit(dir: int) -> float:
 	var worst := car.top_speed
-	var a_brake := car.brake_decel * 0.6 * _ground_grip()
+	var ground := _ground_grip()
+	var a2 := 2.0 * car.brake_decel * 0.6 * ground
+	# _corner_speed's per-car factors, hoisted out of the loop: it runs over 32 nodes.
+	var k0 := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * ground
+	var c := car.downforce_k * 0.5
+	var pts := path.points
+	var radii := path.radius
+	var n := pts.size()
 	var dist := 0.0
 	var prev := node
 	for k in range(0, 64, 2):
-		var i := path.idx(node + k * dir)
-		dist += path.points[prev].distance_to(path.points[i])
+		var i := node + k * dir
+		i = ((i % n) + n) % n
+		dist += pts[prev].distance_to(pts[i])
 		prev = i
-		var v := _corner_speed(path.radius[i])
-		v = sqrt(v * v + 2.0 * a_brake * maxf(dist - 6.0, 0.0))
+		var r: float = radii[i]
+		var kr := k0 * r
+		var v2 := kr * 1.45
+		if kr * c < 1.0:
+			v2 = minf(kr / (1.0 - kr * c), v2)
+		var v := (sqrt(v2) + 1.5) * car.bend_speed_factor(r)
+		v = sqrt(v * v + a2 * maxf(dist - 6.0, 0.0))
 		worst = minf(worst, v)
 		if dist > 320.0:
 			break
@@ -199,7 +305,7 @@ func _speed_limit(dir: int) -> float:
 
 ## Cornering speed for a bend of radius r: 95% of what the tyres hold (mu = 1.25 * grip *
 ## surface_grip on the weaker axle, see Car), with the extra grip that downforce gives at speed, plus a little for the line
-## cutting across the inside of the bend.
+## cutting across the inside of the bend. (_speed_limit inlines this.)
 func _corner_speed(r: float) -> float:
 	var k := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * _ground_grip() * r
 	# Car's downforce adds 0.5 * min(downforce_k v^2, 0.9) g-units of load: v^2 = k (1 + c v^2).

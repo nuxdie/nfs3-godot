@@ -393,12 +393,20 @@ func _update_lightning(dt: float) -> void:
 			_thunder_audio.play()
 
 
+var _applied_flash := 0.0
+
+
 func _apply() -> void:
 	var f := _flash
-	_env.fog_light_color = _fog_color.lerp(Color(0.85, 0.88, 1.0), f * 0.6)
-	_env.fog_density = _fog_density
-	if not _lightning:
+	# Only when something changed: each set is a change to the environment on the render side.
+	var fog := _fog_color.lerp(Color(0.85, 0.88, 1.0), f * 0.6)
+	if fog != _env.fog_light_color:
+		_env.fog_light_color = fog
+	if _fog_density != _env.fog_density:
+		_env.fog_density = _fog_density
+	if not _lightning or (f == 0.0 and _applied_flash == 0.0):
 		return
+	_applied_flash = f
 	# The background multiplier doesn't re-render the sky's radiance map, so it's cheap.
 	_env.background_energy_multiplier = _base_bg_energy * (1.0 + f * 2.0)
 	_env.ambient_light_energy = _base_ambient_energy * (1.0 + f * 3.0)

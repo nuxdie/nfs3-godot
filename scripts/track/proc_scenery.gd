@@ -198,7 +198,9 @@ func _flush() -> void:
 			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mmi.visibility_range_end = m.range
 		mmi.visibility_range_end_margin = 40.0
-		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		# Fading draws them blended; Low just pops them (the fog is thick by then).
+		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF if Game.quality != Game.Quality.LOW \
+				else GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 		root.add_child(mmi)
 		_mm_of[key] = mm
 
@@ -278,6 +280,11 @@ func _make_meshes() -> void:
 	_paint.vertex_color_use_as_albedo = true
 	_paint.vertex_color_is_srgb = true
 	_paint.roughness = 0.7
+	if Game.quality == Game.Quality.LOW:
+		# Whole forests fill the screen: plain colour rather than three texture samples a
+		# pixel for the speckle.
+		_veg.albedo_texture = null
+		_veg.uv1_triplanar = false
 	var metal := _paint.duplicate() as StandardMaterial3D
 	metal.metallic = 0.55
 	metal.roughness = 0.4
@@ -551,7 +558,7 @@ func _buildings() -> void:
 ## under "night_materials".
 func _building_mat(tex: Texture2D, cells: Vector2, lit: float) -> ShaderMaterial:
 	var m := ShaderMaterial.new()
-	m.shader = preload("res://shaders/building.gdshader")
+	m.shader = Game.shader("res://shaders/building.gdshader")
 	m.set_shader_parameter("albedo_tex", tex)
 	m.set_shader_parameter("cells", cells)
 	m.set_shader_parameter("lit_share", lit)

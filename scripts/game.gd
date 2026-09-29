@@ -34,6 +34,8 @@ var weather := false      # the track's rain or snow
 var damage := true        # crashes dent the cars and cost power (not in the original)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
+var render_scale := 0.0   # where DynamicResolution left the 3D resolution: the next race starts there
+var render_scale_quality := -1   # ...if it's on the same quality preset
 var last_results: Array = []
 
 var _car_cache := {}
@@ -234,8 +236,28 @@ func default_quality() -> Quality:
 	return Quality.LOW if weak_gpu or OS.get_processor_count() <= 2 else Quality.HIGH
 
 
+var _shader_variants := {}
+
+
+## The shader at `path` for the current quality: on Low, a copy compiled with
+## `#define LOW_QUALITY`, which the heavier shaders use to skip their costliest detail
+## (fill rate is what an iGPU runs out of first).
+func shader(path: String) -> Shader:
+	var base: Shader = load(path)
+	if quality != Quality.LOW:
+		return base
+	if not _shader_variants.has(path):
+		var s := Shader.new()
+		var code := base.code
+		var at := code.find(";", code.find("shader_type")) + 1
+		s.code = code.substr(0, at) + "\n#define LOW_QUALITY\n" + code.substr(at)
+		_shader_variants[path] = s
+	return _shader_variants[path]
+
+
 ## Applies the quality preset to the race's main view and sun.
 func apply_quality(vp: Viewport, sun: DirectionalLight3D) -> void:
+	Car.lamp_lights = quality != Quality.LOW
 	match quality:
 		Quality.LOW:
 			sun.shadow_enabled = false

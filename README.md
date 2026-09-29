@@ -73,6 +73,25 @@ What's read:
 | Toggle rear-view mirror | M | |
 | Pause | Esc / P | Start |
 
+## Graphics quality
+
+Integrated GPUs and dual-core CPUs start on **Low** (Settings → Graphics), which is tuned to
+hold 60 fps on a Haswell HD GT1 with a 1.4 GHz dual-core Celeron in every mode, by day or
+night, rain or not, including a Hot Pursuit at heat 3. On Low:
+
+- the 3D view renders at up to 75% resolution, and `DynamicResolution` lowers that in steps
+  (to 50% at the least; the HUD stays sharp) where the GPU is missing frames, and raises it
+  back once it keeps up;
+- the procedural track's road, land, cars and buildings use cheaper shader variants (fewer
+  texture samples, no clearcoat); its land and road are merged into a few big meshes, and
+  scenery is drawn out to 60% of its usual distance, cars to 250 m;
+- brake, reversing and siren lamps glow but don't light their surroundings, and the rear-view
+  mirror starts off (M turns it on).
+
+Whatever the quality, far-off traffic glides along its lane rather than being simulated,
+cars out of sight skip their wheel, body and tyre effects, and AI cars held still (parked
+cruisers, the grid) sleep until they're hit or drive off.
+
 ## Layout
 
 ```
@@ -101,6 +120,7 @@ scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_str
                    track_world.gd (the track plus its sun, sky, fog and ambient for the conditions),
                    weather.gd (fog regions, rain/snow, lightning and thunder, wet/snowy grip),
                    rain_cover.gd (top-down height map: no rain under bridges or in tunnels),
+                   dynamic_resolution.gd (3D resolution that gives way when the GPU misses frames),
                    reflections.gd (wet road sheen, lamp streaks and High-quality mirror; the
                    reflection probe on the player's car)
 scripts/ui/        main_menu.gd (showroom front end), track_postcards.gd (renders each track by day and
@@ -119,6 +139,17 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
                    (--classic drops the body sway and progressive grip, --no-traffic empties the road)
                    (--ram, procedural track: drives into some knockable props and a guardrail
                    instead, printing what came loose and bent, shots/ram_*.png)
+                   (--perf: frame-time report every --perfwin=S (5) seconds and at the end - fps,
+                   percentiles, missed frames, physics/process/draw time, GPU time, 3D scale -
+                   run without --disable-vsync to see what players get; --heat=N puts every cop
+                   on the player at heat N; --opponents=N, --quality=0..2, --scale=F override;
+                   --hide=cars,mm,ground,road,std,rails,precip,mirror,hud and --kill=audio,parked,
+                   particles,effects,hud switch things off to see what they cost; --drawstats
+                   counts the draws in view by kind)
+                   (--resttest, --ghosttest, --dentbench check sleeping cruisers, far-off traffic
+                   and the cost of a crash's dent)
+tools/gdprof.py    per-function GDScript times and per-pass GPU times of a run, through the remote
+                   debugger (Python, no editor needed; usage at the top of the file)
 tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with
                    draw-call and triangle counts: godot --path . -- --trackshots <track> [0.25 ...]
                    (--night / --weather; --up= --back= --ahead= --side= --lookside= aim the eye;

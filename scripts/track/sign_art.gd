@@ -265,7 +265,9 @@ func flush(root: Node3D, breakables: Breakables = null) -> void:
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF   # thin: not worth the draw calls
 		mi.visibility_range_end = 500.0
 		mi.visibility_range_end_margin = 40.0
-		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		# Fading draws them blended; Low just pops them (the fog is thick by then).
+		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF if Game.quality != Game.Quality.LOW \
+				else GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 		root.add_child(mi)
 	if breakables:
 		for k: Array in _knockable:

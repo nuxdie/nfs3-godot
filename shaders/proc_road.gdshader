@@ -6,7 +6,12 @@ shader_type spatial;
 // 6 m, at each node) rather than the sky. Worn wheel tracks, patches, tar snakes and painted lines
 // are drawn here rather than baked.
 
+#ifdef LOW_QUALITY
+// Low quality (Game.shader): three noise samples rather than nine (no tar snakes).
+uniform sampler2D noise_fine : filter_linear_mipmap, repeat_enable;
+#else
 uniform sampler2D noise_fine : filter_linear_mipmap_anisotropic, repeat_enable;
+#endif
 uniform sampler2D noise_coarse : filter_linear_mipmap, repeat_enable;
 uniform float half_width = 7.0;
 uniform float lap_length = 1000.0;
@@ -15,6 +20,9 @@ uniform float wetness : hint_range(0.0, 1.0) = 0.0;   // set by Reflections
 // the zebra crossings.
 uniform vec4 gaps[32];
 uniform float crossings[16];
+// How many of each are in use: every road pixel loops over them.
+uniform int gap_count = 32;
+uniform int crossing_count = 16;
 
 varying vec3 wpos;
 varying float style;
@@ -39,7 +47,11 @@ void fragment() {
 	float v = UV.y;
 	float ax = abs(x);
 	float f1 = texture(noise_fine, wpos.xz / 2.3).r;
+#ifdef LOW_QUALITY
+	float f2 = f1;
+#else
 	float f2 = texture(noise_fine, wpos.xz / 0.55).r;
+#endif
 	float c1 = texture(noise_coarse, wpos.xz / 70.0).r;
 	float c2 = texture(noise_coarse, wpos.xz / 17.0).r;
 
@@ -53,6 +65,7 @@ void fragment() {
 	float oil = exp(-pow(lane / 0.35, 2.0)) * (0.5 + 0.5 * c2);
 	col *= 1.0 - 0.14 * tracks - 0.1 * oil;
 	col *= 0.9 + 0.2 * c1;
+#ifndef LOW_QUALITY
 	// Tar snakes: sealed cracks wandering over the older stretches, a few cm wide (the
 	// noise's contour, its distance from it taken from the noise's slope).
 	vec2 tp = wpos.xz / 11.0;
@@ -64,6 +77,7 @@ void fragment() {
 	float tar = (1.0 - smoothstep(0.012, 0.012 + tpx, td)) * smoothstep(0.62, 0.7, c1) * smoothstep(0.4, 0.6, c2);
 	tar *= 1.0 - smoothstep(0.05, 0.12, tpx);   // gone before it would shimmer
 	col = mix(col, vec3(0.14, 0.14, 0.15), tar * 0.6);
+#endif
 
 	// Paint: edge lines, the centre line, and the chequered start line; worn in places.
 	vec3 paint_col = vec3(0.92, 0.92, 0.88);
@@ -81,7 +95,7 @@ void fragment() {
 		// The edge lines, broken where a side road joins.
 		float edge_l = 1.0;
 		float edge_r = 1.0;
-		for (int k = 0; k < 32; k++) {
+		for (int k = 0; k < gap_count; k++) {
 			float in_gap = step(gaps[k].x, sv) * step(sv, gaps[k].y);
 			edge_r *= 1.0 - in_gap * step(0.0, gaps[k].z);
 			edge_l *= 1.0 - in_gap * step(gaps[k].z, 0.0);
@@ -95,7 +109,7 @@ void fragment() {
 		}
 		// Zebra crossings: bars along the road, 0.6 m wide.
 		float zebra = 0.0;
-		for (int k = 0; k < 16; k++) {
+		for (int k = 0; k < crossing_count; k++) {
 			zebra = max(zebra, band(sv, crossings[k] - 1.5, crossings[k] + 1.5));
 		}
 		zebra *= step(fract((x + 0.3) / 1.2), 0.5) * band(ax, -1.0, half_width - 0.5);
