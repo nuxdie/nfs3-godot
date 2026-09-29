@@ -139,7 +139,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			if _is_prop(t, x):
 				props.add_child(_make_prop(t, x, mats[0]))
 			else:
-				groups.append([x.polys.filter(standing) if knocked.size() > 0 else x.polys, x.verts, x.shading, x.ref, true])
+				groups.append([x.polys.filter(standing) if knocked.size() > 0 else x.polys, x.verts, x.shading, x.ref, _mirrored(x)])
 		for pass_i in 2:
 			var mesh := _mesh(t, groups, pass_i == 1)
 			if mesh == null:
@@ -190,8 +190,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			if not x.has("anim") or x.anim.size() == 0:
 				continue
 			for pass_i in 2:
-				# Those from the .col file (see Nfs3Track._parse_col) keep its winding.
-				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, not x.has("col_tex")]], pass_i == 1)
+				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, _mirrored(x)]], pass_i == 1)
 				if amesh == null:
 					continue
 				var ami := MeshInstance3D.new()
@@ -274,7 +273,7 @@ static func _post_boxes(t: Nfs3Track) -> Array[AABB]:
 		for x in b.xobjs:
 			if x.has("anim") or _is_prop(t, x):
 				continue
-			_trunk_boxes(t, x.polys, x.verts, x.ref, true, boxes, seen)
+			_trunk_boxes(t, x.polys, x.verts, x.ref, _mirrored(x), boxes, seen)
 			var box := _poly_box(x.polys, x.verts)
 			if maxf(box.size.x, box.size.z) <= 2.0 and box.size.y >= 2.0 and _has_solid(t, x.polys):
 				var size := Vector3(maxf(box.size.x, TRUNK_WIDTH.x), minf(box.size.y, POST_HEIGHT),
@@ -421,7 +420,7 @@ static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
 		sources.append([obj, b.verts, b.shading, Vector3.ZERO, false])
 	for x in b.xobjs:
 		if not x.has("anim"):
-			sources.append([x.polys, x.verts, x.shading, x.ref, true])
+			sources.append([x.polys, x.verts, x.shading, x.ref, _mirrored(x)])
 	var by_corners := {}
 	var panels := []
 	for src in sources:
@@ -619,8 +618,11 @@ static func _add_rail(t: Nfs3Track, panel: Dictionary, out: Array) -> void:
 				out[1].append(clampf((cp[k].y - lo) / height, 0.0, 1.0) if height > 0.0 else 1.0)
 
 
-## Sign-sized extra objects drawn only with opaque textures (foliage cut-outs are left
-## standing: the car passes through them anyway).
+## Sign-sized extra objects with an opaque post or plate and no foliage (foliage cut-outs are
+## left standing: the car passes through them anyway). A cut-out plate is still a sign: High
+## Stakes' round and triangular ones are see-through at the corners.
+static var _foliage_cache := {}
+
 static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 	if not x.has("prop"):
 		x.prop = false
@@ -629,14 +631,18 @@ static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 		var box := _poly_box(x.polys, x.verts)
 		if box.size != Vector3.ZERO and maxf(box.size.x, box.size.z) <= PROP_MAX_WIDTH \
 				and box.size.y >= PROP_HEIGHT.x and box.size.y <= PROP_HEIGHT.y:
+			var opaque := false
 			x.prop = true
 			for p in x.polys:
 				if p.tex >= t.textures.size():
 					continue
 				var ti: Nfs3Track.TexInfo = t.textures[p.tex]
-				if ti.cutout or ti.additive or ti.is_lane:
+				if ti.additive or ti.is_lane or ti.qfs_index >= t.images.size() \
+						or ti.cutout and _is_foliage(t, ti.qfs_index, _foliage_cache.get_or_add(t.get_instance_id(), {})):
 					x.prop = false
 					break
+				opaque = opaque or not ti.cutout
+			x.prop = x.prop and opaque
 	return x.prop
 
 
@@ -673,7 +679,7 @@ static func _make_prop(t: Nfs3Track, x: Dictionary, material: Material) -> Knock
 		hull.append(v - foot)
 	var prop := KnockableProp.new()
 	prop.position = x.ref + foot
-	prop.setup(_mesh(t, [[x.polys, x.verts, x.shading, -foot, true]], false), material,
+	prop.setup(_mesh(t, [[x.polys, x.verts, x.shading, -foot, _mirrored(x)]], false), material,
 			reach, hull, DRAW_DISTANCE)
 	return prop
 
@@ -738,6 +744,12 @@ static func _solid_faces(t: Nfs3Track, polys: Array, verts: PackedVector3Array, 
 		return
 	if not large_only or (maxf(box.size.x, box.size.z) >= 6.0 and box.size.y >= 2.5):
 		out.append_array(tris)
+
+
+## Whether extra object `x` stores its quads mirrored (see _mesh): the FRD's do, those from
+## the .col file (see Nfs3Track._parse_col) and High Stakes' (see Nfs4Track) don't.
+static func _mirrored(x: Dictionary) -> bool:
+	return not x.get("unmirrored", false)
 
 
 ## One mesh from [polys, verts, shading, offset, mirrored, (road flags)] groups, keeping only

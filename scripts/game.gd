@@ -13,10 +13,22 @@ const TRACK_NAMES := {
 	"trk003": "Rocky Pass", "trk004": "Country Woods", "trk005": "Lost Canyons",
 	"trk006": "Aquatica", "trk007": "The Summit", "trk008": "Empire City",
 }
+## High Stakes track folders in the game's order, with their names; ids are HS_PREFIX + the
+## folder name, lower case. The last nine are its versions of the NFS3 tracks.
+const HS_PREFIX := "hs_"
+const HS_TRACK_NAMES := {
+	"uk": "Celtic Ruins", "germany": "Landstrasse", "coastal": "Dolphin Cove",
+	"park": "Kindiak Park", "france": "Route Adonf", "hills": "Durham Road",
+	"snowy": "Snowy Ridge", "gt1": "Raceway", "gt2": "Raceway 2", "gt3": "Raceway 3",
+	"hometown": "Hometown HS", "redrock": "Redrock Ridge HS", "atlantic": "Atlantica HS",
+	"rockypas": "Rocky Pass HS", "country": "Country Woods HS", "lostcany": "Lost Canyons HS",
+	"aquatica": "Aquatica HS", "summit": "The Summit HS", "empire": "Empire City HS",
+}
 const PROCEDURAL_TRACK := "procedural"
 const SETTINGS_PATH := "user://settings.cfg"
 
 var data_root := ""          # folder containing gamedata/
+var hs_root := ""            # High Stakes Data/ folder (containing tracks/ and gameart/), or ""
 var tracks: Array[String] = []   # track ids (folder names), plus PROCEDURAL_TRACK
 var cars: Array[Dictionary] = [] # {id, name, path}
 var cop_cars: Array[String] = []
@@ -77,6 +89,19 @@ func candidate_roots() -> PackedStringArray:
 	])
 
 
+## Where a Need for Speed: High Stakes install's Data folder may be, first match wins.
+func candidate_hs_roots() -> PackedStringArray:
+	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var home := OS.get_environment("HOME")
+	var lutris := "need-for-speed-high-stakes/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - High Stakes/Data"
+	return PackedStringArray([
+		OS.get_environment("NFS4_DATA"),
+		res.get_base_dir().path_join("OpenNFS/resources/NFS_4/data"),
+		res.get_base_dir().path_join(lutris),
+		home.path_join("Games").path_join(lutris),
+	])
+
+
 func scan_data() -> void:
 	tracks.clear()
 	cars.clear()
@@ -112,6 +137,7 @@ func scan_data() -> void:
 			for c in _sorted_dirs(traffic_dir):
 				if c.is_valid_int() and find_ci(traffic_dir.path_join(c), "car.viv") != "":
 					traffic_cars.append(traffic_dir.path_join(c))
+	_scan_hs_tracks()
 	tracks.append(PROCEDURAL_TRACK)
 	if cars.is_empty():
 		for i in ProceduralCar.PRESETS.size():
@@ -121,17 +147,52 @@ func scan_data() -> void:
 	car_index = clampi(car_index, 0, cars.size() - 1)
 
 
+## Adds the High Stakes tracks, in the game's order and then any others (add-on tracks).
+func _scan_hs_tracks() -> void:
+	var roots := PackedStringArray([hs_root]) + candidate_hs_roots()
+	hs_root = ""
+	for r in roots:
+		if r != "" and find_ci(r, "tracks") != "" and find_ci(r, "gameart") != "":
+			hs_root = r
+			break
+	if hs_root == "":
+		return
+	var tdir := find_ci(hs_root, "tracks")
+	var found: Array[String] = []
+	for t in _sorted_dirs(tdir):
+		if Nfs4Track.is_track_dir(tdir.path_join(t)):
+			found.append(t.to_lower())
+	for t in HS_TRACK_NAMES:
+		if t in found:
+			tracks.append(HS_PREFIX + t)
+	for t in found:
+		if not HS_TRACK_NAMES.has(t):
+			tracks.append(HS_PREFIX + t)
+
+
 func has_game_data() -> bool:
 	return data_root != ""
+
+
+func is_hs_track(id: String) -> bool:
+	return id.begins_with(HS_PREFIX)
 
 
 func track_name(id: String) -> String:
 	if id == PROCEDURAL_TRACK:
 		return ProcPlaces.names(ProceduralTrack.SEED).town
+	if is_hs_track(id):
+		var folder := id.trim_prefix(HS_PREFIX)
+		return HS_TRACK_NAMES.get(folder, folder.capitalize())
 	return TRACK_NAMES.get(id, id)
 
 
+## The track's folder, or "" for the procedural track (or a track whose data is gone).
 func track_dir(id: String) -> String:
+	if id == PROCEDURAL_TRACK:
+		return ""
+	if is_hs_track(id):
+		return find_ci(find_ci(hs_root, "tracks"), id.trim_prefix(HS_PREFIX))
 	return find_ci(find_ci(data_root, "gamedata/tracks"), id)
 
 

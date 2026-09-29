@@ -24,7 +24,7 @@ class Block:
 	var road_flags := PackedByteArray()   # per road poly; see drivable()
 	var lanes: Array = []       # Array[Poly] (chunk 6, lane markings)
 	var objects: Array = []     # Array[Array[Poly]] block-local scenery
-	var xobjs: Array = []       # Array[Dictionary] {ref, verts, shading, polys, anim}
+	var xobjs: Array = []       # Array[Dictionary] {ref, verts, shading, polys, anim, unmirrored}
 	var lights: PackedVector3Array = []
 
 class TexInfo:
@@ -134,7 +134,10 @@ func _has_anim_xobj(o: Dictionary) -> bool:
 
 # --------------------------------------------------------------------- loading
 
+## Loads an NFS3 track folder, or a High Stakes one (see Nfs4Track) into the same data.
 static func load_dir(dir: String) -> Nfs3Track:
+	if Nfs4Track.is_track_dir(dir):
+		return Nfs4Track.load_dir(dir)
 	var t := Nfs3Track.new()
 	t.name = dir.get_file().to_lower()
 	var short := t.name.replace("k0", "")  # trk000 -> tr00
@@ -180,6 +183,8 @@ func _add_lane_images(sfx: Fsh) -> void:
 ## Just the block centres along the lap (Godot space), read from the FRD headers without
 ## building anything: enough for the menu's track map. Empty if the file is missing or bad.
 static func peek_outline(dir: String) -> PackedVector3Array:
+	if Nfs4Track.is_track_dir(dir):
+		return Nfs4Track.peek_outline(dir)
 	var out := PackedVector3Array()
 	var short := dir.get_file().to_lower().replace("k0", "")
 	var frd_path := DataPath.find_ci(dir, short + ".frd")
@@ -436,7 +441,7 @@ func _parse_col(d: PackedByteArray) -> bool:
 				if s >= structs.size():
 					p += size
 					continue
-				var o := {"ref": Vector3.ZERO, "verts": structs[s].verts, "shading": structs[s].shading, "polys": structs[s].polys, "col_tex": true}
+				var o := {"ref": Vector3.ZERO, "verts": structs[s].verts, "shading": structs[s].shading, "polys": structs[s].polys, "unmirrored": true}
 				if typ == 1 and size >= 16:
 					o.ref = fixed(d, p + 4)
 					col_objects.append(o)

@@ -22,7 +22,7 @@ static func load_track(track_id: String) -> TrackWorld:
 	w.id = track_id
 	w.root = Node3D.new()
 	w.root.name = "Track"
-	if track_id != Game.PROCEDURAL_TRACK and Game.has_game_data():
+	if Game.track_dir(track_id) != "":
 		var t := Nfs3Track.load_dir(Game.track_dir(track_id))
 		if t.error == "" and t.vroad.size() > 10:
 			w.path = Nfs3TrackBuilder.build(t, w.root)

@@ -342,9 +342,12 @@ func _build_settings() -> void:
 	_settings_panel.add_child(_status)
 	if Game.has_game_data():
 		_status.text = "%s\n%d tracks · %d cars · %d police · %d traffic models" % [
-			Game.data_root, Game.tracks.size() - 1, Game.cars.size(), Game.cop_cars.size(), Game.traffic_cars.size()]
+			Game.data_root, Game.tracks.filter(func(id: String) -> bool: return not Game.is_hs_track(id) and id != Game.PROCEDURAL_TRACK).size(), Game.cars.size(), Game.cop_cars.size(), Game.traffic_cars.size()]
 	else:
 		_status.text = "No NFS3 data found, so you get the procedural circuit and stand-in cars. Point the NFS3_DATA environment variable at a folder containing gamedata/ (see README)."
+	if Game.hs_root != "":
+		_status.text += "\nHigh Stakes: %s\n%d tracks" % [Game.hs_root,
+			Game.tracks.filter(func(id: String) -> bool: return Game.is_hs_track(id)).size()]
 
 
 func _layout() -> void:
@@ -623,7 +626,7 @@ func _on_track_changed(animate: bool) -> void:
 	_track_map.set_outline(_outlines[id])
 	_show_backdrop(animate)
 	# The weather is the track's own: rain on most, snow on some.
-	var snow := id != Game.PROCEDURAL_TRACK and Game.has_game_data() \
+	var snow := Game.track_dir(id) != "" \
 		and Nfs3Horizon.peek_precip(Game.track_dir(id)) == Nfs3Horizon.Precip.SNOW
 	_rows[Row.WEATHER].set_items(PackedStringArray(["Clear", "Snow" if snow else "Rain"]), _rows[Row.WEATHER].index)
 	_tint_backdrop()
@@ -672,7 +675,7 @@ func _track_photo(id: String) -> Texture2D:
 	if _photos.has(id):
 		return _photos[id]
 	var tex: Texture2D = null
-	if id != Game.PROCEDURAL_TRACK and Game.has_game_data():
+	if id != Game.PROCEDURAL_TRACK and not Game.is_hs_track(id) and Game.has_game_data():
 		var n := id.trim_prefix("trk").to_int()
 		var fsh := Fsh.load_file(Game.find_ci(Game.data_root, "fedata/art/slides/t%d_00.qfs" % n))
 		if fsh and fsh.images.size() > 0 and fsh.images[0].get_width() >= 640:

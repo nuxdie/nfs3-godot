@@ -39,6 +39,10 @@ var _gap_tail := 0       # last physics callback -> process start: the step, def
 var _ticks := 0
 var _subvps: Array[Node] = []
 var _tick_first := 0
+## --stoplog: every car that goes from over 50 km/h to a standstill within 1.5 s is printed
+## with its virtual road node and the solid things within a few metres of it.
+var _speeds := {}   # Car -> its last 90 physics ticks' speeds
+var _stopped := {}  # Car -> race time of its last logged stop
 
 
 func _ready() -> void:
@@ -205,6 +209,8 @@ func _physics_process(dt: float) -> void:
 	t += dt
 	var p: Car = race.player
 	var r: Dictionary = race.player_racer()
+	if "--stoplog" in OS.get_cmdline_user_args() and race.state == 2:
+		_log_stops()
 	if "--dentbench" in OS.get_cmdline_user_args() and race.state == 2 and not _dented:
 		_dented = true
 		var dmg: CarDamage = null
@@ -662,3 +668,28 @@ func _ghost_test() -> void:
 			print("  %s 0.5 s later: wheels=%d up=%.2f speed=%.1f (cruise %.1f) lateral=%.1f (lane %.1f)" % [c.name,
 				c.grounded_wheels, c.global_basis.y.y, c.speed, ai.cruise_speed, race.path.lateral(c.global_position, ai.node), ai.lane])
 		_gt_state[c] = st
+
+
+func _log_stops() -> void:
+	for rr: Dictionary in race.racers:
+		var c: Car = rr.car
+		var h: Array = _speeds.get_or_add(c, [])
+		h.append(c.kmh())
+		if h.size() > 90:
+			h.pop_front()
+		if h.size() < 90 or h[0] < 50 or c.kmh() > 8 or t - _stopped.get(c, -99.0) < 5.0:
+			continue
+		_stopped[c] = t
+		var q := PhysicsShapeQueryParameters3D.new()
+		var sphere := SphereShape3D.new()
+		sphere.radius = 3.5
+		q.shape = sphere
+		q.transform = Transform3D(Basis(), c.global_position + Vector3.UP)
+		q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
+		q.exclude = [c.get_rid()]
+		var near := []
+		for hit in c.get_world_3d().direct_space_state.intersect_shape(q, 16):
+			var o: Node = hit.collider
+			near.append("car" if o is Car else "%s/%s" % [o.get_parent().name, o.name])
+		print("stop t=%.1f %s node=%d at %s from %d km/h, near: %s" % [t, rr.name, rr.get("node", -1),
+			c.global_position.round(), h[0], ", ".join(near)])

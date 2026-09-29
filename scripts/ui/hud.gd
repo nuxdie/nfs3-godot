@@ -561,7 +561,13 @@ func _draw_tower(at: Vector2) -> float:
 		if nm.length() > 16:
 			nm = nm.left(15) + "."
 		_str(nm, Vector2(at.x + 34, base), "cond", 16, ink, HORIZONTAL_ALIGNMENT_LEFT, -1, 1)
-		_str(_gap(rr, lead, L), Vector2(at.x, base), "cond", 16, Color(ink, 1.0 if i == 0 or you else 0.7),
+		var gap := _gap(rr, lead, L)
+		if rr.finished:
+			# The race runs on past the winner until you're home: show each finisher's time and flag them.
+			gap = fmt_time(rr.time)
+			_str("FIN", Vector2(at.x, base), "cond", 13, UiKit.BG if you else UiKit.ACCENT,
+				HORIZONTAL_ALIGNMENT_RIGHT, w - 76, 2)
+		_str(gap, Vector2(at.x, base), "cond", 16, Color(ink, 1.0 if i == 0 or you else 0.7),
 			HORIZONTAL_ALIGNMENT_RIGHT, w, 0, true)
 		y += h
 	return y

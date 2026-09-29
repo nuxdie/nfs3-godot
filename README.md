@@ -41,6 +41,32 @@ What's read:
 | `carmodel/traffic/pursuit/*` | Police cars |
 | `carmodel/traffic/NNNN` | Traffic |
 
+### Need for Speed: High Stakes tracks
+
+With a High Stakes install present its 19 tracks join the list (after NFS3's): the ten
+new ones (Celtic Ruins, Landstrasse, Dolphin Cove, Kindiak Park, Route Adonf, Durham Road,
+Snowy Ridge, Raceway 1–3) and its remakes of the NFS3 tracks, marked "HS". The first `Data`
+folder that contains `tracks` and `gameart` wins:
+
+1. `NFS4_DATA` environment variable
+2. `../OpenNFS/resources/NFS_4/data`
+3. `../need-for-speed-high-stakes/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - High Stakes/Data`
+4. The same under `~/Games`
+
+| File | Used for |
+|---|---|
+| `Tracks/<name>/tr.frd` | Geometry, baked lighting, scenery, animated objects and physics props, the virtual road (it has no `.col`) |
+| `Tracks/<name>/tr0.qfs` | Textures; the ids skip the `<mirrored>` copies of lettered ones (for mirrored tracks) |
+| `Tracks/<name>/tr.ini`, `trn.ini`, `trw.ini`, `trnw.ini` | The same sky, fog, weather and ambient settings as NFS3's `.hrz`, as named keys |
+| `Tracks/<name>/sky.qfs` | Horizon panorama (`HDC0-7` day, `HNC` night, `HDW`/`HNW` weather), clouds, sun and moon |
+| `GameArt/sfx.fsh` | Lane marking sprites |
+
+High Stakes draws its tracks at 1/1.3 of NFS3's scale (its remakes are the NFS3 tracks
+shrunk exactly 1.3 times), so they're scaled up to fit the NFS3 cars. Its polys have no
+surface flags: those between the virtual road's walls, facing up, are the drivable ones.
+The night versions some tracks have (`trn.frd`, `trn0.qfs`) aren't used yet: night is the
+day track, darkened, as on the NFS3 tracks.
+
 ## Modes
 
 - **Single Race** – up to 7 AI opponents, 1–8 laps.
@@ -96,7 +122,8 @@ cruisers, the grid) sleep until they're hit or drive off.
 
 ```
 scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd, nfs3_car.gd,
-                   nfs3_horizon.gd (.hrz sky/fog), data_path.gd (case-insensitive lookups)
+                   nfs3_horizon.gd (.hrz sky/fog, and High Stakes' .ini), nfs4_track.gd (High Stakes
+                   tracks, read into nfs3_track.gd's data), data_path.gd (case-insensitive lookups)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
                    procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges,
                    and the roads off it: town streets, farm lanes, forest roads, the campground's
@@ -148,6 +175,7 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
                    counts the draws in view by kind)
                    (--resttest, --ghosttest, --dentbench check sleeping cruisers, far-off traffic
                    and the cost of a crash's dent)
+                   (--stoplog prints where any car stops dead and what solid is around it)
 tools/gdprof.py    per-function GDScript times and per-pass GPU times of a run, through the remote
                    debugger (Python, no editor needed; usage at the top of the file)
 tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with

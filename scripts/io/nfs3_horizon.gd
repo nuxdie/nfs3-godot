@@ -58,6 +58,8 @@ var sun: Image                   # the sun by day, the moon (or an aurora) at ni
 ## it's missing or too short to be a horizon file. `track_images` are the track's decoded
 ## texture archive.
 static func load_dir(dir: String, night: bool, weather := false, track_images: Array[Image] = []) -> Nfs3Horizon:
+	if Nfs4Track.is_track_dir(dir):
+		return _load_hs(dir, night, weather)
 	var short := dir.get_file().to_lower().replace("trk0", "3tr")  # trk001 -> 3tr01
 	var path := DataPath.find_ci(dir, short + ("n" if night else "") + ("w" if weather else "") + ".hrz")
 	if path == "":
@@ -77,6 +79,10 @@ static func load_dir(dir: String, night: bool, weather := false, track_images: A
 
 ## Just the kind of weather the track folder `dir` has, without loading its sky images.
 static func peek_precip(dir: String) -> Precip:
+	if Nfs4Track.is_track_dir(dir):
+		var ini := DataPath.find_ci(dir, "trw.ini")
+		var hs := from_ini(FileAccess.get_file_as_string(ini)) if ini != "" else null
+		return hs.precip if hs else Precip.NONE
 	var short := dir.get_file().to_lower().replace("trk0", "3tr")
 	var path := DataPath.find_ci(dir, short + "w.hrz")
 	var h := from_text(FileAccess.get_file_as_string(path)) if path != "" else null
@@ -141,6 +147,105 @@ static func from_text(text: String) -> Nfs3Horizon:
 	p += 8
 	if v.size() >= p + 3:
 		h.ambient = Color(v[p] / 100.0, v[p + 1] / 100.0, v[p + 2] / 100.0)
+	return h
+
+
+## A High Stakes track's horizon: tr.ini (trn night, trw weather, trnw both) holds the same
+## settings as NFS3's .hrz, as named keys; its sky.qfs holds the panorama (HDC0-7 by day,
+## HNC at night, HDW/HNW in weather) as well as the clouds and sun.
+static func _load_hs(dir: String, night: bool, weather: bool) -> Nfs3Horizon:
+	var path := DataPath.find_ci(dir, "tr" + ("n" if night else "") + ("w" if weather else "") + ".ini")
+	if path == "":
+		return null
+	var h := from_ini(FileAccess.get_file_as_string(path))
+	if h == null:
+		return null
+	var fsh := Fsh.load_file(DataPath.find_ci(dir, "sky.qfs"))
+	if fsh:
+		var prefix := "H" + ("N" if night else "D") + ("W" if weather else "C")
+		var tiles: Array[Image] = []
+		for i in PANORAMA_TILES:
+			if fsh.by_name.has(prefix + str(i)):
+				tiles.append(fsh.by_name[prefix + str(i)])
+		if h.has_pixmap and tiles.size() == PANORAMA_TILES:
+			h.panorama = _stitch(tiles)
+		h.clouds = fsh.by_name.get(("CLWN" if weather else "CLDN") if night else ("CLWD" if weather else "CLDD"))
+		h.sun = fsh.by_name.get(("SNNW" if weather else "SUNN") if night else ("SUNW" if weather else "SUND"),
+			fsh.by_name.get("SUNN" if night else "SUND"))
+	return h
+
+
+## Parses a High Stakes horizon .ini (see _load_hs); null when it has no [strip] section.
+static func from_ini(text: String) -> Nfs3Horizon:
+	var sec := {}
+	var cur := {}
+	for raw in text.split("\n"):
+		var line := raw.strip_edges()
+		if line.begins_with("["):
+			cur = {}
+			sec[line.trim_prefix("[").trim_suffix("]").to_lower()] = cur
+		elif "=" in line:
+			cur[line.get_slice("=", 0).strip_edges()] = line.substr(line.find("=") + 1).strip_edges()
+	if not sec.has("strip"):
+		return null
+	var s: Dictionary = sec.strip
+	var c: Dictionary = sec.get("clouds", {})
+	var f: Dictionary = sec.get("fog", {})
+	var w: Dictionary = sec.get("weather", {})
+	var l: Dictionary = sec.get("light", {})
+	var lt: Dictionary = sec.get("lightning", {})
+	var h := Nfs3Horizon.new()
+	var num := func(d: Dictionary, key: String, fallback := 0.0) -> float:
+		return float(d[key]) if d.has(key) else fallback
+	var col := func(d: Dictionary, key: String, fallback := Color.GRAY) -> Color:
+		var m := RegEx.create_from_string("(-?\\d+)\\D+(-?\\d+)\\D+(-?\\d+)").search(d.get(key, ""))
+		if m == null:
+			return fallback
+		return Color8(clampi(int(m.get_string(1)), 0, 255), clampi(int(m.get_string(2)), 0, 255),
+			clampi(int(m.get_string(3)), 0, 255))
+	h.fog_color = col.call(f, "fogColor", Color.WHITE)
+	h.fog_density = num.call(f, "fogDensity")
+	h.fog_on_pixmap = num.call(f, "fogHorizon") * 100.0
+	for r in int(num.call(f, "fogNumRegions")):
+		var fr: Dictionary = sec.get("fog region %d" % r, {})
+		if fr.is_empty():
+			continue
+		h.fog_regions.append({
+			"colors": [col.call(fr, "s_color"), col.call(fr, "c_color"), col.call(fr, "e_color")],
+			"densities": [num.call(fr, "s_density"), num.call(fr, "c_density"), num.call(fr, "e_density")],
+			"slices": [int(num.call(fr, "startSlice")), int(num.call(fr, "centerSlice")), int(num.call(fr, "endSlice"))],
+		})
+	h.cloud_type = int(num.call(c, "cloudType"))
+	h.cloud_bright = clampf(num.call(c, "cloudBright") / 255.0, 0.0, 1.0)
+	h.cloud_variance = clampf(num.call(c, "cloudVariance") / 255.0, 0.0, h.cloud_bright)
+	h.wind_mph = int(num.call(c, "windSpeed"))
+	h.wind_dir = int(num.call(c, "windDir"))
+	h.lightning_chance = maxi(int(num.call(lt, "lightningChance")), 0)
+	h.lightning_ticks = maxi(int(num.call(lt, "lightningOffTicks")), 0)
+	h.mirror = num.call(s, "hrzMirror") != 0.0
+	h.radius = maxf(num.call(s, "hrzfRadius", 1500.0), 100.0)
+	h.rotation = num.call(s, "hrzAngle") * 360.0   # a fraction of a turn
+	h.has_pixmap = num.call(s, "hrzHasPMX") != 0.0
+	var base: float = num.call(s, "hrzBottomYOff", -1200.0)
+	h.band_base = base
+	h.band_top = base + num.call(s, "hrzGouraudHeight", 1800.0)
+	h.band_mid = base + num.call(s, "hrzGouraudMiddle", 1200.0)
+	h.pixmap_top = base + num.call(s, "hrzPmxTop", 1350.0)
+	h.pixmap_bottom = base + num.call(s, "hrzPmxBottom", 1150.0)
+	h.earth_top = col.call(s, "hrzEarthTopColor")
+	h.earth_base = col.call(s, "hrzEarthBotColor")
+	h.sky_top = col.call(s, "hrzSkyTopColor", Color.SKY_BLUE)
+	h.sky_sun = col.call(s, "hrzSunColor", Color.WHITE)
+	h.sky_away = col.call(s, "hrzOppositeSunColor", Color.WHITE)
+	h.precip = clampi(int(num.call(w, "type")), 0, Precip.SNOW) as Precip
+	h.precip_start = int(num.call(w, "startSlice"))
+	h.precip_end = int(num.call(w, "endSlice"))
+	h.precip_fade = maxi(int(num.call(w, "fade")), 0)
+	h.precip_cycle = PackedInt32Array([int(num.call(w, "stayTimeOn")), int(num.call(w, "fadeTimeOff")),
+		int(num.call(w, "stayTimeOff")), int(num.call(w, "fadeTimeOn"))])
+	if l.has("AmbientRed"):
+		h.ambient = Color(num.call(l, "AmbientRed") / 100.0, num.call(l, "AmbientGreen") / 100.0,
+			num.call(l, "AmbientBlue") / 100.0)
 	return h
 
 

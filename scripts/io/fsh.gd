@@ -4,6 +4,9 @@ class_name Fsh
 
 var names: PackedStringArray = []
 var images: Array[Image] = []
+## Per image, the text of its text attachment (code 0x6F), or "": High Stakes tags the
+## copies of lettered textures that its mirrored tracks use "<mirrored>".
+var tags: PackedStringArray = []
 var by_name := {}
 
 const BITMAP_CODES := [0x78, 0x7B, 0x7D, 0x7E, 0x7F, 0x6D]
@@ -53,7 +56,19 @@ func _parse(d: PackedByteArray) -> void:
 			continue
 		names.append(entry_names[i])
 		images.append(img)
+		tags.append(_text(d, off))
 		by_name[entry_names[i]] = img
+
+
+static func _text(d: PackedByteArray, off: int) -> String:
+	var a := off
+	while _next_attachment(d, a) > 0:
+		a += _next_attachment(d, a)
+		if a + 8 > d.size():
+			break
+		if d[a] == 0x6F:
+			return d.slice(a + 8, mini(a + 8 + d.decode_u32(a + 4), d.size())).get_string_from_ascii()
+	return ""
 
 
 static func _next_attachment(d: PackedByteArray, off: int) -> int:

@@ -22,7 +22,6 @@ const RB_MIN_WAY := 3.0           # m, an opening narrower than this makes a rac
 const MAX_LIGHT_CONES := 16   # MAX_BEAMS in track.gdshader
 const MAX_SHADOWS := 16       # MAX_SHADOWS in track.gdshader
 const TICKET_FINES := [150, 400]   # the third ticket in Hot Pursuit is an arrest; Free Roam keeps fining
-const SPECTATE_GRACE := 30.0   # s after the winner that spectating brings up the results anyway
 const SPECTATE_CUT := 3.0      # s the camera lingers on a finished car before cutting to the race
 
 var state := State.LOADING
@@ -644,8 +643,8 @@ func spectating() -> bool:
 
 ## Spectate mode: moves the camera (and the HUD, engine sound and reflections with it) to the
 ## racer `step` places behind (+1) or ahead (-1) of the one being watched.
-## Spectating: cuts away from a car that's finished to the best-placed one still racing, and
-## brings the results up SPECTATE_GRACE after the winner (stragglers race on behind them).
+## Spectating: cuts away from a car that's finished to the best-placed one still racing. The
+## results only come up once the whole field is home; until then the tower shows who's finished.
 func _update_spectate(dt: float) -> void:
 	if _cut_t >= 0.0:
 		_cut_t -= dt
@@ -654,9 +653,6 @@ func _update_spectate(dt: float) -> void:
 				if not r.finished:
 					_watch(r.car)
 					break
-	if state == State.RACING and not _finish_order.is_empty() \
-			and race_time - _finish_order[0].time > SPECTATE_GRACE:
-		_end_race(false)
 
 
 func _watch_step(step: int) -> void:
