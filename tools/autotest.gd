@@ -691,5 +691,8 @@ func _log_stops() -> void:
 		for hit in c.get_world_3d().direct_space_state.intersect_shape(q, 16):
 			var o: Node = hit.collider
 			near.append("car" if o is Car else "%s/%s" % [o.get_parent().name, o.name])
-		print("stop t=%.1f %s node=%d at %s from %d km/h, near: %s" % [t, rr.name, rr.get("node", -1),
-			c.global_position.round(), h[0], ", ".join(near)])
+		var n: int = rr.get("node", 0)
+		var ai: AIController = race._controller(c)
+		print("stop t=%.1f %s node=%d at %s (%.1f m right of the line, lane %.1f) from %d km/h, near: %s" % [
+			t, rr.name, n, c.global_position.round(), race.path.lateral(c.global_position, n),
+			ai.lane if ai else 0.0, h[0], ", ".join(near)])

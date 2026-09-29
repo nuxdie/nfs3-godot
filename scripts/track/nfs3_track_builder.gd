@@ -102,6 +102,7 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 
 	var road_quads := _drivable_quads(t)
 	var foliage := {}
+	t.set_meta("foliage", foliage)   # for _is_prop too
 	var fence_faces := PackedVector3Array()
 	for bi in t.blocks.size():
 		var b: Nfs3Track.Block = t.blocks[bi]
@@ -621,8 +622,6 @@ static func _add_rail(t: Nfs3Track, panel: Dictionary, out: Array) -> void:
 ## Sign-sized extra objects with an opaque post or plate and no foliage (foliage cut-outs are
 ## left standing: the car passes through them anyway). A cut-out plate is still a sign: High
 ## Stakes' round and triangular ones are see-through at the corners.
-static var _foliage_cache := {}
-
 static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 	if not x.has("prop"):
 		x.prop = false
@@ -632,13 +631,15 @@ static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 		if box.size != Vector3.ZERO and maxf(box.size.x, box.size.z) <= PROP_MAX_WIDTH \
 				and box.size.y >= PROP_HEIGHT.x and box.size.y <= PROP_HEIGHT.y:
 			var opaque := false
+			# build()'s _is_foliage answers for this track (builds run on worker threads).
+			var foliage: Dictionary = t.get_meta("foliage", {})
 			x.prop = true
 			for p in x.polys:
 				if p.tex >= t.textures.size():
 					continue
 				var ti: Nfs3Track.TexInfo = t.textures[p.tex]
 				if ti.additive or ti.is_lane or ti.qfs_index >= t.images.size() \
-						or ti.cutout and _is_foliage(t, ti.qfs_index, _foliage_cache.get_or_add(t.get_instance_id(), {})):
+						or ti.cutout and _is_foliage(t, ti.qfs_index, foliage):
 					x.prop = false
 					break
 				opaque = opaque or not ti.cutout

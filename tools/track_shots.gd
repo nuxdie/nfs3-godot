@@ -2,9 +2,11 @@ extends Node
 ## Photographs a track from the road at points round the lap, without a race:
 ##   godot --path . -- --trackshots <track> [lap fraction ...] [--night] [--weather]
 ##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--lookside=M] [--tag=NAME] [--hazards]
+##       [--clearmap=FROM-TO]
 ## Saves shots/track_<tag><fraction>.png. The eye stands --back m behind the node and --up m
 ## over the road, --side m to the right, and looks at the road --ahead m on (--lookside m to
-## the right of it).
+## the right of it). --clearmap prints where the AI's obstacle scan finds room for a car on
+## virtual road nodes FROM to TO.
 
 
 func _ready() -> void:
@@ -45,6 +47,13 @@ func _run() -> void:
 	add_child(w.root)
 	if "--hazards" in args and id == Game.PROCEDURAL_TRACK:
 		_hazards(w.root)
+	for a: String in args:
+		if a.begins_with("--clearmap="):
+			for k in 2:
+				await get_tree().physics_frame
+			w.path.scan_obstacles(get_viewport().world_3d.direct_space_state)
+			var r := a.get_slice("=", 1)
+			_clear_map(w.path, int(r.get_slice("-", 0)), int(r.get_slice("-", 1)))
 	w.light(self, "--night" in args, "--weather" in args, get_viewport())
 	var cam := Camera3D.new()
 	cam.far = 6000.0
@@ -69,6 +78,21 @@ func _run() -> void:
 			Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000,
 			Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)])
 	get_tree().quit()
+
+
+## Prints what scan_obstacles found on nodes `from`..`to`: a column per metre across the road
+## (left to right, within the walls), "#" where a car doesn't fit, "." where it does.
+func _clear_map(path: TrackPath, from: int, to: int) -> void:
+	for i in range(from, to + 1):
+		i = path.idx(i)
+		var s := ""
+		for k in 2 * TrackPath.SPAN + 1:
+			var off := k - TrackPath.SPAN
+			if off < -path.left_width[i] or off > path.right_width[i]:
+				s += " "
+			else:
+				s += "." if not path.obstructed[i] or (path.clear_bits[i] >> k) & 1 else "#"
+		print("clear %4d L%5.1f R%5.1f |%s|" % [i, path.left_width[i], path.right_width[i], s])
 
 
 ## Lists the procedural track's solid scenery standing inside the walls the AI drives between

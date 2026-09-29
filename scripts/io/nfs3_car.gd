@@ -71,6 +71,22 @@ static func peek_name(dir: String) -> String:
 	return read_name(viv.get_file("fedata.eng"), dir.get_file(), is_fce4(viv.get_file("car.fce")))
 
 
+## Name and carp.txt only (no mesh or skin): what a menu needs to list and rate the car.
+static func peek_spec(dir: String) -> Nfs3Car:
+	var c := Nfs3Car.new()
+	c.id = dir.get_file()
+	var viv := Viv.load_file(DataPath.find_ci(dir, "car.viv"))
+	if viv == null:
+		c.error = "missing car.viv"
+		return c
+	c.high_stakes = is_fce4(viv.get_file("car.fce"))
+	c.display_name = read_name(viv.get_file("fedata.eng"), c.id, c.high_stakes)
+	c.carp = parse_carp(viv.get_file("carp.txt").get_string_from_ascii())
+	if c.high_stakes:
+		c._convert_hs_carp()
+	return c
+
+
 ## FCE4 files start with 0x00101014; FCE3 ones with anything, 0x00101013 included.
 static func is_fce4(fce: PackedByteArray) -> bool:
 	return fce.size() >= 4 and fce.decode_u32(0) == 0x101014

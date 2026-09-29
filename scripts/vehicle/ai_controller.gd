@@ -96,6 +96,10 @@ func _physics_process(dt: float) -> void:
 		# Keep to the clear line rather than being pulled back into the obstacles after each one.
 		lane = clear
 	off = clear
+	# Aiming a second ahead cuts across the inside of a bend: where pillars stand along it,
+	# aim nearer until the straight way there misses them.
+	while aim_node != path.idx(node + 2 * dir) and not path.chord_clear(car.global_position, node, aim_node, off, dir):
+		aim_node = path.idx(aim_node - dir)
 	var aim: Vector3 = path.points[aim_node] + path.rights[aim_node] * off
 	# The look-ahead over the next 300 m is the AI's biggest cost: refreshed every few ticks
 	# (staggered between the cars), which moves the braking point by well under a metre.

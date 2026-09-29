@@ -1,93 +1,114 @@
 extends Control
-## Front end: a showroom with the selected car on a turntable, the race setup down
-## the left, the track map top right and the start button bottom right. Everything
-## is driven by up/down + left/right (keys or pad) and also works with the mouse.
+## Front end, built for a mouse and keyboard first (a pad works too). Mode tabs across the
+## top; down the left the race setup: the track and car, each a click (or T / C) away from
+## a browser of all of them, then one-click options. The selected car sits on a turntable
+## over the track's postcard, with the track map top right and the start button bottom right.
 
 const MODE_NOTES := [
 	"Race up to seven rivals over a set number of laps.",
 	"One rival, and every cop in the county after you both.",
 	"Just you and the clock. No rivals, no traffic.",
 	"No laps, no rivals. Cruise the track with traffic and patrols.",
-	"Sit back and watch the AI race your car and its rivals. ←→ switch cars.",
-]
-const CONTROLS := [
-	[["↑↓", "W", "S"], "Throttle · brake"], [["←→", "A", "D"], "Steer"], [["SPACE"], "Handbrake"],
-	[["C"], "Change camera"], [["B"], "Look back"], [["R"], "Reset car"], [["H"], "Horn"],
-	[["L", "K"], "Lights · high beam"], [["M"], "Mirror"], [["ESC"], "Pause"],
+	"Sit back and watch the AI race your car and its rivals.",
 ]
 const M := 48.0               # screen margin
+const TOP := 88.0             # below the top bar
 const PODIUM_TOP := -0.595
 const CAM_DIST := 14.0
 const CAM_Y := 2.6
-const DROP_HEIGHT := 0.6         # tyres this far above the podium when a car is dropped in
+const DROP_HEIGHT := 0.6      # tyres this far above the podium when a car is dropped in
+const CAR_PREVIEW_DELAY := 0.14   # s a browsed car must keep focus before its model loads
 
-enum Row { MODE, TRACK, CAR, LAPS, OPPONENTS, TRAFFIC, TIME, WEATHER }
-
-var _rows: Array[SelectorRow] = []
-var _settings_rows: Array[SelectorRow] = []
-var _focus := 0
-var _settings_focus := 0
-var _opp_value := 3           # remembered across modes that cap or hide it
-
+var _tabs: TabStrip
 var _left: Control
+var _track_row: PickerRow
+var _car_row: PickerRow
+var _laps: OptionRow
+var _opp: OptionRow
+var _traffic: OptionRow
+var _time_row: OptionRow
+var _weather: OptionRow
+var _nav: Array = []             # the setup rows in focus order (PickerRows, then OptionRows)
+var _focus := 0
+var _opp_value := 3              # remembered across modes that cap or hide it
+
+var _track_i := 0                # picked
+var _car_i := 0
+var _track_shown := 0            # shown: the picked one, or the one in focus in a browser
+var _car_shown := 0
+
 var _overlay: Control
 var _track_map: TrackMap
 var _stats: CarStats
 var _start_btn: Control
-var _settings: Control
-var _settings_panel: Control
-var _status: Label
+var _chips: Array[Control] = []
+var _settings: SettingsPanel
+var _tracks: TrackBrowser
+var _cars: CarBrowser
 var _fade: ColorRect
 var _photo_back: TextureRect
 var _photo_front: TextureRect
-var _photo_drift: Node2D       # carries the photos' drift: a Control's position snaps to whole pixels
-var _chips: Array[Control] = []
+var _photo_drift: Node2D         # carries the photos' drift: a Control's position snaps to whole pixels
 
+var _showroom: SubViewportContainer
 var _preview: SubViewport
 var _cam: Camera3D
-var _rig: Node3D              # camera and lights orbiting the car (a physics body can't ride a turntable)
+var _rig: Node3D                 # camera and lights orbiting the car (a physics body can't ride a turntable)
 var _floor: MeshInstance3D
-var _preview_car: Car         # a real, simulated car dropped onto the podium, so it lands and sags
+var _preview_car: Car            # a real, simulated car dropped onto the podium, so it lands and sags
 var _shadow: MeshInstance3D
-var _spin_vel := 0.5          # orbit speed, rad/s; a flick sets it, then it eases back
+var _spin_vel := 0.5             # orbit speed, rad/s; a flick sets it, then it eases back
 var _dragging := false
 var _last_drag_ms := 0
-var _car_slide := 0.0          # start: how far the car has slid out
+var _car_slide := 0.0            # start: how far the car has slid out
 var _slide_from := Vector3.ZERO
+var _car_pending := -1           # car to load into the showroom once browsing settles on it
+var _car_pending_t := 0.0
 
-var _photos := {}             # track id -> Texture2D (or null)
-var _postcards: TrackPostcards  # rendered stills of the tracks, filled in in the background
-var _outlines := {}           # track id -> PackedVector3Array
+var _photos := {}                # track id -> Texture2D (or null)
+var _postcards: TrackPostcards   # rendered stills of the tracks, filled in in the background
+var _outlines := {}              # track id -> PackedVector3Array
 var _time := 0.0
-var _start_hot := 0.0         # start-button hover/flash
+var _start_hot := 0.0            # start-button hover/flash
 var _quit_armed_until := 0
 var _starting := false
 
 
 func _ready() -> void:
 	theme = UiKit.theme()
+	_track_i = maxi(Game.tracks.find(Game.track_id), 0)
+	_car_i = Game.car_index
+	_track_shown = _track_i
+	_car_shown = _car_i
+	_postcards = TrackPostcards.new()
+	add_child(_postcards)
 	_build_backdrop()
 	_build_showroom()
 	_build_overlay()
-	_build_rows()
+	_build_tabs()
+	_build_setup()
 	_build_start()
 	_build_chips()
-	_build_settings()
+	_build_browsers()
+	_settings = SettingsPanel.new()
+	_settings.closed.connect(func(): _layout())
+	_settings.changed.connect(_on_settings_changed)
+	add_child(_settings)
 	_fade = ColorRect.new()
 	_fade.color = Color.BLACK
 	_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_fade.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(_fade)
 	resized.connect(_layout)
-	_layout()
-	_postcards = TrackPostcards.new()
-	add_child(_postcards)
 	_postcards.rendered.connect(_on_postcard_rendered)
-	_on_track_changed(false)
 	for id in Game.tracks:
 		_postcards.request(id)
-	_on_car_changed(0)
 	_on_mode_changed()
+	_show_track(false)
+	_update_track_row(0)
+	_show_car_now(_car_i)
+	_update_car_row(0)
+	_layout()
 	_set_focus(0)
 	_intro()
 
@@ -121,18 +142,18 @@ func _build_backdrop() -> void:
 
 
 func _build_showroom() -> void:
-	var svc := SubViewportContainer.new()
-	svc.stretch = true
-	svc.set_anchors_preset(Control.PRESET_FULL_RECT)
-	svc.mouse_default_cursor_shape = Control.CURSOR_DRAG
-	svc.gui_input.connect(_on_preview_input)
-	add_child(svc)
+	_showroom = SubViewportContainer.new()
+	_showroom.stretch = true
+	_showroom.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_showroom.mouse_default_cursor_shape = Control.CURSOR_DRAG
+	_showroom.gui_input.connect(_on_preview_input)
+	add_child(_showroom)
 	_preview = SubViewport.new()
 	_preview.own_world_3d = true
 	_preview.transparent_bg = true
 	_preview.msaa_3d = Viewport.MSAA_4X if Game.quality == Game.Quality.HIGH else Viewport.MSAA_2X \
 		if Game.quality == Game.Quality.MEDIUM else Viewport.MSAA_DISABLED
-	svc.add_child(_preview)
+	_showroom.add_child(_preview)
 
 	var w := Node3D.new()
 	_preview.add_child(w)
@@ -230,6 +251,24 @@ void fragment() {
 	return s
 
 
+static var _shadow_sh: Shader
+
+static func _shadow_shader() -> Shader:
+	if _shadow_sh == null:
+		_shadow_sh = Shader.new()
+		_shadow_sh.code = """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, shadows_disabled;
+void fragment() {
+	vec2 d = UV * 2.0 - 1.0;
+	float r = length(d);
+	ALBEDO = vec3(0.0);
+	ALPHA = pow(1.0 - smoothstep(0.2, 1.0, r), 1.6) * 0.85;
+}
+"""
+	return _shadow_sh
+
+
 func _build_overlay() -> void:
 	_overlay = Control.new()
 	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -244,42 +283,55 @@ func _build_overlay() -> void:
 	_overlay.add_child(_stats)
 
 
-func _build_rows() -> void:
+func _build_tabs() -> void:
+	_tabs = TabStrip.new(PackedStringArray(Game.MODE_NAMES), TabStrip.Style.TABS)
+	_tabs.keys = PackedStringArray(["Q", "E"])
+	_tabs.set_items(_tabs.items, Game.mode)
+	_tabs.changed.connect(func(_i): _on_mode_changed())
+	add_child(_tabs)
+
+
+func _build_setup() -> void:
 	_left = Control.new()
 	_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_left)
-	var track_names := PackedStringArray()
-	var track_i := 0
-	for i in Game.tracks.size():
-		track_names.append(Game.track_name(Game.tracks[i]))
-		if Game.tracks[i] == Game.track_id:
-			track_i = i
-	var car_names := PackedStringArray()
-	for c in Game.cars:
-		car_names.append(c.name)
-	var laps := PackedStringArray()
-	for n in range(1, 9):
-		laps.append("%d lap%s" % [n, "" if n == 1 else "s"])
+	_track_row = PickerRow.new("Track", "T")
+	_track_row.browse_text = "ALL %d" % Game.tracks.size()
+	_track_row.browse.connect(_open_tracks)
+	_track_row.stepped.connect(func(d: int): _set_track(posmod(_track_i + d, Game.tracks.size()), d))
+	_car_row = PickerRow.new("Car", "C")
+	_car_row.browse_text = "ALL %d" % Game.cars.size()
+	_car_row.browse.connect(_open_cars)
+	_car_row.stepped.connect(func(d: int): _set_car(posmod(_car_i + d, Game.cars.size()), d))
+	var nums := func(from: int, to: int) -> PackedStringArray:
+		var out := PackedStringArray()
+		for n in range(from, to + 1):
+			out.append(str(n))
+		return out
 	_opp_value = Game.opponents
-	var defs := [
-		["Mode", PackedStringArray(Game.MODE_NAMES), Game.mode],
-		["Track", track_names, track_i],
-		["Car", car_names, Game.car_index],
-		["Laps", laps, Game.laps - 1],
-		["Opponents", PackedStringArray(), 0],
-		["Traffic", PackedStringArray(["Off", "On"]), int(Game.traffic)],
-		["Time of day", PackedStringArray(["Day", "Night"]), int(Game.night)],
-		["Weather", PackedStringArray(["Clear", "Rain"]), int(Game.weather)],
-	]
-	for i in defs.size():
-		var r := SelectorRow.new(defs[i][0], defs[i][1])
-		r.index = defs[i][2]
-		r.hovered.connect(func(): if not _settings.visible and not _rows[i].disabled: _set_focus(i))
-		r.changed.connect(_on_row_changed.bind(i))
-		_left.add_child(r)
-		_rows.append(r)
-	_rows[Row.LAPS].wrap = false
-	_rows[Row.OPPONENTS].wrap = false
+	_laps = OptionRow.new("Laps", nums.call(1, 8))
+	_laps.index = Game.laps - 1
+	_laps.disabled_text = "Endless"
+	_opp = OptionRow.new("Rivals", nums.call(0, 7))
+	_opp.index = Game.opponents
+	_opp.disabled_text = "None"
+	_opp.changed.connect(func(i: int): _opp_value = i)
+	_traffic = OptionRow.new("Traffic", PackedStringArray(["Off", "On"]))
+	_traffic.index = int(Game.traffic)
+	_traffic.disabled_text = "Off"
+	_time_row = OptionRow.new("Time", PackedStringArray(["Day", "Night"]))
+	_time_row.index = int(Game.night)
+	_time_row.changed.connect(func(_i): _show_backdrop(true); _update_track_row(0))
+	_weather = OptionRow.new("Weather", PackedStringArray(["Clear", "Rain"]))
+	_weather.index = int(Game.weather)
+	_weather.changed.connect(func(_i): _tint_backdrop())
+	_nav = [_track_row, _car_row, _laps, _opp, _traffic, _time_row, _weather]
+	for i in _nav.size():
+		var c: Control = _nav[i]
+		c.hovered.connect(func(): if not c.get("disabled"): _set_focus(i))
+		if c is OptionRow:
+			c.changed.connect(func(_v): _overlay.queue_redraw())
+		_left.add_child(c)
 
 
 func _build_start() -> void:
@@ -295,7 +347,7 @@ func _build_start() -> void:
 
 
 func _build_chips() -> void:
-	for def in [["TAB", "SETTINGS", _toggle_settings], ["ESC", "QUIT", _request_quit]]:
+	for def in [["TAB", "SETTINGS", _open_settings], ["ESC", "QUIT", _request_quit]]:
 		var c := Control.new()
 		c.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		c.set_meta("key", def[0])
@@ -311,46 +363,21 @@ func _build_chips() -> void:
 		_chips.append(c)
 
 
-func _build_settings() -> void:
-	_settings = Control.new()
-	_settings.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_settings.visible = false
-	_settings.mouse_filter = Control.MOUSE_FILTER_STOP
-	_settings.draw.connect(func(): _settings.draw_rect(Rect2(Vector2.ZERO, _settings.size), Color(0.01, 0.012, 0.02, 0.8)))
-	_settings.gui_input.connect(func(e: InputEvent):
-		if e is InputEventMouseButton and e.pressed and not _settings_panel.get_rect().has_point(e.position):
-			_toggle_settings())
-	add_child(_settings)
-	_settings_panel = Control.new()
-	_settings_panel.draw.connect(_draw_settings_panel)
-	_settings.add_child(_settings_panel)
-	var defs := [
-		["Graphics", PackedStringArray(Game.QUALITY_NAMES), Game.quality],
-		["Speed units", PackedStringArray(["km/h", "mph"]), 0 if Game.units_kmh else 1],
-		["Car damage", PackedStringArray(["Off", "On"]), int(Game.damage)],
-	]
-	for i in defs.size():
-		var r := SelectorRow.new(defs[i][0], defs[i][1])
-		r.index = defs[i][2]
-		r.hovered.connect(func(): _set_settings_focus(i))
-		r.changed.connect(func(_v): _apply_settings())
-		_settings_panel.add_child(r)
-		_settings_rows.append(r)
-	_settings_rows[0].wrap = false
-	_status = UiKit.label("", "body", 14, UiKit.INK_DIM)
-	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_settings_panel.add_child(_status)
-	if Game.has_game_data():
-		_status.text = "%s\n%d tracks · %d cars · %d police · %d traffic models" % [
-			Game.data_root, Game.tracks.filter(func(id: String) -> bool: return not Game.is_hs_track(id) and id != Game.PROCEDURAL_TRACK).size(),
-			Game.cars.filter(func(c: Dictionary) -> bool: return not c.id.begins_with(Game.HS_PREFIX)).size(), Game.cop_cars.size(), Game.traffic_cars.size()]
-	else:
-		_status.text = "No NFS3 data found, so you get the procedural circuit and stand-in cars. Point the NFS3_DATA environment variable at a folder containing gamedata/ (see README)."
-	if Game.hs_root != "":
-		_status.text += "\nHigh Stakes: %s\n%d tracks · %d cars · %d police · %d traffic models" % [Game.hs_root,
-			Game.tracks.filter(func(id: String) -> bool: return Game.is_hs_track(id)).size(),
-			Game.cars.filter(func(c: Dictionary) -> bool: return c.id.begins_with(Game.HS_PREFIX)).size(),
-			Game.hs_cop_cars.size(), Game.hs_traffic_cars.size()]
+func _build_browsers() -> void:
+	_tracks = TrackBrowser.new()
+	_tracks.postcard = func(id: String, night: bool) -> Texture2D:
+		var tex := _postcards.get_postcard(id, night)
+		return tex if tex else _track_photo(id)
+	_tracks.outline = _outline
+	_tracks.focus_changed.connect(func(i: int): _track_shown = i; _show_track(true))
+	_tracks.confirmed.connect(func(i: int): _close_browser(); _set_track(i, 0))
+	_tracks.cancelled.connect(func(): _close_browser(); _track_shown = _track_i; _show_track(true))
+	add_child(_tracks)
+	_cars = CarBrowser.new()
+	_cars.focus_changed.connect(_preview_car_later)
+	_cars.confirmed.connect(func(i: int): _close_browser(); _set_car(i, 0))
+	_cars.cancelled.connect(func(): _close_browser(); _preview_car_later(_car_i))
+	add_child(_cars)
 
 
 func _layout() -> void:
@@ -359,13 +386,17 @@ func _layout() -> void:
 	for tr in [_photo_back, _photo_front]:
 		tr.size = size * 1.08
 		tr.position = -size * 0.04
-	_left.position = Vector2(M - 22, 112)
-	_left.size = Vector2(minf(440.0, W * 0.4), SelectorRow.H * _rows.size())
-	for i in _rows.size():
-		_rows[i].position = Vector2(0, i * SelectorRow.H)
-		_rows[i].size = Vector2(_left.size.x, SelectorRow.H)
-	_track_map.size = Vector2(150, 104)
-	_track_map.position = Vector2(W - M - _track_map.size.x + 8, 112)
+	_tabs.position = Vector2(M + 228, 22)
+	_tabs.size = Vector2(_tabs.custom_minimum_size.x, 44)
+	_left.position = Vector2(M - 22, TOP + 30)
+	_left.size = Vector2(minf(470.0, W * 0.38), H - TOP - 30 - 90)
+	var y := 0.0
+	for c: Control in _nav:
+		if c == _laps:
+			y += 10
+		c.position = Vector2(0, y)
+		c.size = Vector2(_left.size.x, c.custom_minimum_size.y)
+		y += c.custom_minimum_size.y
 	_stats.size = Vector2(minf(460.0, W * 0.38), 62)
 	_stats.position = Vector2(W - M - _stats.size.x, H - 190)
 	_start_btn.size = Vector2(330, 60)
@@ -379,22 +410,35 @@ func _layout() -> void:
 		x -= cw
 		c.position = Vector2(x, 44 - 16)
 		x -= 10
-	_settings_panel.size = Vector2(minf(640.0, W - 2 * M), minf(440.0 + _settings_rows.size() * SelectorRow.H, H - 40))
-	_settings_panel.position = (size - _settings_panel.size) * 0.5
-	for i in _settings_rows.size():
-		_settings_rows[i].position = Vector2(20, 92 + i * SelectorRow.H)
-		_settings_rows[i].size = Vector2(_settings_panel.size.x - 40, SelectorRow.H)
-	_status.position = Vector2(42, 92 + _settings_rows.size() * SelectorRow.H + 44)
-	_status.size = Vector2(_settings_panel.size.x - 84, 60)
-	# Put the car in the space right of the setup column, a little above centre.
-	if _cam:
-		var aspect := W / maxf(H, 1.0)
-		var half_w := CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * aspect
-		var target_x := (_left.position.x + _left.size.x + W - M) * 0.5 / W
-		_cam.h_offset = -(target_x - 0.5) * 2.0 * half_w
-		# ...and lift it clear of the car caption at the bottom right.
-		_cam.v_offset = -CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * 0.2
+	_cars.position = Vector2(M - 22, TOP)
+	_cars.size = Vector2(minf(580.0, W * 0.46), H - TOP - 24)
+	_tracks.position = Vector2(M - 22, TOP)
+	_tracks.size = Vector2(minf(W * 0.64, 1100.0), H - TOP - 24)
+	if _tracks.visible:
+		# The map large, beside the grid.
+		var x0 := _tracks.position.x + _tracks.size.x + 40
+		var mw := W - M - x0
+		_track_map.size = Vector2(mw, minf(mw * 0.72, H * 0.36))
+		_track_map.position = Vector2(x0, TOP + 118)
+	else:
+		_track_map.size = Vector2(150, 104)
+		_track_map.position = Vector2(W - M - _track_map.size.x + 8, TOP + 24)
+	_place_car()
 	_overlay.queue_redraw()
+
+
+## Put the car in the space right of whatever is down the left, a little above centre.
+func _place_car() -> void:
+	if not _cam:
+		return
+	var W := size.x
+	var aspect := W / maxf(size.y, 1.0)
+	var half_w := CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * aspect
+	var left := _cars.position.x + _cars.size.x if _cars.visible else _left.position.x + _left.size.x
+	var target_x := (left + W - M) * 0.5 / W
+	_cam.h_offset = -(target_x - 0.5) * 2.0 * half_w
+	# ...and lift it clear of the car caption at the bottom right.
+	_cam.v_offset = -CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * 0.2
 
 
 # ------------------------------------------------------------------ drawing
@@ -405,7 +449,7 @@ func _draw_shade(c: Control) -> void:
 	var clear := Color(UiKit.BG, 0.0)
 	var dark := Color(UiKit.BG, 0.92)
 	# Left column scrim, top and bottom bands, so text reads over any photo.
-	_grad_rect(c, Rect2(0, 0, 620, H), dark, clear, true)
+	_grad_rect(c, Rect2(0, 0, 640, H), dark, clear, true)
 	_grad_rect(c, Rect2(0, 0, W, 150), Color(UiKit.BG, 0.75), clear, false)
 	_grad_rect(c, Rect2(0, H - 300, W, 300), clear, Color(UiKit.BG, 0.95), false)
 
@@ -414,6 +458,10 @@ static func _grad_rect(ci: CanvasItem, r: Rect2, from: Color, to: Color, horizon
 	var pts := PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
 	var cols := PackedColorArray([from, to, to, from]) if horizontal else PackedColorArray([from, from, to, to])
 	ci.draw_polygon(pts, cols)
+
+
+func _browsing() -> bool:
+	return _tracks.visible or _cars.visible
 
 
 func _draw_overlay() -> void:
@@ -427,43 +475,91 @@ func _draw_overlay() -> void:
 	o.draw_string(UiKit.font("cond_med", 6), Vector2(M + lw + 10, 57), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, UiKit.INK)
 	UiKit.draw_slant(o, Rect2(M, 68, 132, 3), UiKit.ACCENT, 0.9)
 	# Hot Pursuit: light bar sweeping across the top edge.
-	if _rows[Row.MODE].index == Game.Mode.HOT_PURSUIT:
+	if _tabs.index == Game.Mode.HOT_PURSUIT:
 		var phase := fmod(_time * 2.2, 2.0)
 		var col := UiKit.COP_RED if phase < 1.0 else UiKit.COP_BLUE
 		var a := 0.6 * absf(sin(_time * 14.0))
 		_grad_rect(o, Rect2(0, 0, W * 0.5, 4), Color(col, a if phase < 1.0 else 0.0), Color(col, 0.0), true)
 		_grad_rect(o, Rect2(W * 0.5, 0, W * 0.5, 4), Color(col, 0.0), Color(col, a if phase >= 1.0 else 0.0), true)
-	# Mode blurb under the setup list.
-	var ny := _left.position.y + _left.size.y + 26
-	o.draw_string(UiKit.font("body"), Vector2(M, ny), MODE_NOTES[_rows[Row.MODE].index], HORIZONTAL_ALIGNMENT_LEFT,
-		_left.size.x - 20, 15, UiKit.INK_DIM)
-	# Track card: header rule, then the map at the right with name and distances beside it.
+	if _tracks.visible:
+		_draw_track_detail(o)
+		return
+	if not _cars.visible:
+		# What the mode is, over the setup.
+		o.draw_string(UiKit.font("body"), Vector2(M, TOP + 16), MODE_NOTES[_tabs.index], HORIZONTAL_ALIGNMENT_LEFT,
+			_left.size.x - 20, 15, UiKit.INK_DIM)
+		var hints := [["↑↓", "SELECT"], ["←→", "CHANGE"], ["T", "TRACKS"], ["C", "CARS"], ["DRAG", "ROTATE CAR"]]
+		UiKit.draw_hints(o, Vector2(M, H - 40 - 30), hints)
+	_draw_track_card(o)
+	_draw_car_caption(o)
+
+
+## Top right: track name, lengths and the map.
+func _draw_track_card(o: Control) -> void:
+	var W := o.size.x
 	var card_w := 400.0
 	var cx := W - M - card_w
 	var cy := _track_map.position.y - 24
-	var tid := Game.tracks[_rows[Row.TRACK].index]
+	var tid := Game.tracks[_track_shown]
 	var hf0 := UiKit.font("cond", 3)
-	var head := "TRACK %02d / %02d" % [_rows[Row.TRACK].index + 1, Game.tracks.size()]
+	var head := "TRACK %02d / %02d" % [_track_shown + 1, Game.tracks.size()]
 	o.draw_string(hf0, Vector2(cx, cy), head, HORIZONTAL_ALIGNMENT_RIGHT, card_w, 13, UiKit.ACCENT)
 	var head_w := hf0.get_string_size(head, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
 	o.draw_line(Vector2(cx + 60, cy - 5), Vector2(W - M - head_w - 14, cy - 5), UiKit.INK_FAINT, 1.0)
 	var text_w := _track_map.position.x - 18 - cx
 	var ty := _track_map.position.y + 38
-	o.draw_string(UiKit.font("display"), Vector2(cx, ty), Game.track_name(tid).to_upper(), HORIZONTAL_ALIGNMENT_RIGHT,
-		text_w, 30, UiKit.INK)
+	var df := UiKit.font("display")
+	var name := Game.track_name(tid).to_upper()
+	var fs := 30
+	while fs > 18 and df.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > text_w:
+		fs -= 2
+	o.draw_string(df, Vector2(cx, ty), name, HORIZONTAL_ALIGNMENT_RIGHT, text_w, fs, UiKit.INK)
 	var km := _track_map.length_m / 1000.0
-	var laps := _rows[Row.LAPS].index + 1
 	var bf := UiKit.font("cond", 2)
 	if _track_map.length_m > 0:
 		o.draw_string(bf, Vector2(cx, ty + 24), "%s  PER LAP" % _dist(km), HORIZONTAL_ALIGNMENT_RIGHT, text_w, 13, UiKit.INK_DIM)
-		if not _rows[Row.LAPS].disabled:
-			o.draw_string(bf, Vector2(cx, ty + 44), "%s  RACE" % _dist(km * laps), HORIZONTAL_ALIGNMENT_RIGHT, text_w, 13, UiKit.INK_DIM)
-	# Car caption, right-aligned above the stats.
-	var ci := _rows[Row.CAR].index
+		if not _laps.disabled:
+			o.draw_string(bf, Vector2(cx, ty + 44), "%s  RACE" % _dist(km * (_laps.index + 1)), HORIZONTAL_ALIGNMENT_RIGHT,
+				text_w, 13, UiKit.INK_DIM)
+
+
+## Beside the track browser: the focused track large, with its map.
+func _draw_track_detail(o: Control) -> void:
+	var x0 := _track_map.position.x
+	var w := _track_map.size.x
+	var id := Game.tracks[_track_shown]
+	var hf := UiKit.font("cond", 3)
+	o.draw_string(hf, Vector2(x0, TOP + 22), "TRACK %02d / %02d  ·  %s" % [_track_shown + 1, Game.tracks.size(),
+		_tracks.section(id)], HORIZONTAL_ALIGNMENT_LEFT, w, 13, UiKit.ACCENT)
+	var df := UiKit.font("display")
+	var name := Game.track_name(id).to_upper()
+	var fs := 48
+	while fs > 24 and df.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > w:
+		fs -= 2
+	o.draw_string(df, Vector2(x0, TOP + 68), name, HORIZONTAL_ALIGNMENT_LEFT, w, fs, UiKit.INK)
+	var y := _track_map.position.y + _track_map.size.y + 34
+	var km := _track_map.length_m / 1000.0
+	var snow := _tracks.precip(id) == Nfs3Horizon.Precip.SNOW
+	var facts := [["LAP", _dist(km) if km > 0 else "—"], ["WEATHER", "CLEAR OR SNOW" if snow else "CLEAR OR RAIN"]]
+	if not _laps.disabled and km > 0:
+		var n := _laps.index + 1
+		facts.insert(1, ["RACE · %d LAP%s" % [n, "" if n == 1 else "S"], _dist(km * n)])
+	var bf := UiKit.font("cond", 2)
+	for f in facts:
+		o.draw_string(bf, Vector2(x0, y), f[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.INK_DIM)
+		o.draw_string(UiKit.font("display"), Vector2(x0, y + 26), f[1], HORIZONTAL_ALIGNMENT_LEFT, w, 22, UiKit.INK)
+		y += 52
+
+
+## Bottom right: the car's number, spec line and name over its rating bars.
+func _draw_car_caption(o: Control) -> void:
+	var W := o.size.x
+	var H := o.size.y
+	var ci := _car_shown
 	var car_name: String = Game.cars[ci].name.to_upper()
 	var df := UiKit.font("display")
 	var fs := 58
-	var max_w := W * 0.5
+	var max_w := W - M - (_cars.position.x + _cars.size.x + 40) if _cars.visible else W * 0.5
 	while fs > 30 and df.get_string_size(car_name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > max_w:
 		fs -= 2
 	var sx := _stats.position.x
@@ -474,9 +570,6 @@ func _draw_overlay() -> void:
 	o.draw_string(hf, Vector2(sx, H - 268), _stats.spec, HORIZONTAL_ALIGNMENT_RIGHT, sw, 13, UiKit.INK_DIM)
 	o.draw_string(hf, Vector2(sx, H - 268), car_no, HORIZONTAL_ALIGNMENT_RIGHT, sw - spec_w - 24, 13, UiKit.ACCENT)
 	o.draw_string(df, Vector2(W - M - max_w, H - 214), car_name, HORIZONTAL_ALIGNMENT_RIGHT, max_w, fs, UiKit.INK)
-	# Key hints.
-	var hints := [["↑↓", "SELECT"], ["←→", "CHANGE"], ["ENTER", "RACE"], ["DRAG", "ROTATE CAR"]]
-	UiKit.draw_hints(o, Vector2(M, H - 40 - 30), hints)
 
 
 func _draw_start() -> void:
@@ -497,7 +590,7 @@ func _draw_start() -> void:
 		for poly in clipped:
 			b.draw_colored_polygon(poly, Color(1, 1, 1, 0.25))
 	var f := UiKit.font("display")
-	var txt := "START RACE"
+	var txt := "START RACE" if _tabs.index != Game.Mode.SPECTATE else "WATCH RACE"
 	var fs := 30
 	var tw := f.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var kx := face.position.x + (face.size.x - tw - 70) * 0.5
@@ -517,129 +610,149 @@ func _draw_chip(c: Control) -> void:
 		col if hover or armed else UiKit.INK_DIM)
 
 
-func _draw_settings_panel() -> void:
-	var p := _settings_panel
-	var r := Rect2(Vector2.ZERO, p.size)
-	p.draw_rect(r, Color(0.06, 0.065, 0.085, 0.97))
-	p.draw_rect(Rect2(0, 0, r.size.x, 3), UiKit.ACCENT)
-	p.draw_string(UiKit.font("display"), Vector2(42, 62), "SETTINGS", HORIZONTAL_ALIGNMENT_LEFT, -1, 40, UiKit.INK)
-	UiKit.draw_key(p, Vector2(r.size.x - 110, 44), "ESC", 13)
-	p.draw_string(UiKit.font("cond", 2), Vector2(r.size.x - 72, 49), "BACK", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, UiKit.INK_DIM)
-	var y := 92 + _settings_rows.size() * SelectorRow.H + 28
-	_section(p, "GAME DATA", Vector2(42, y), r.size.x - 84)
-	y += 110
-	_section(p, "CONTROLS", Vector2(42, y), r.size.x - 84)
-	y += 30
-	var colw := (r.size.x - 84) * 0.5
-	for i in CONTROLS.size():
-		var pos := Vector2(42 + (i % 2) * colw, y + (i / 2) * 30)
-		var kw := 0.0
-		for k in CONTROLS[i][0]:
-			kw += UiKit.draw_key(p, pos + Vector2(kw, 0), k, 12) + 4.0
-		p.draw_string(UiKit.font("body"), pos + Vector2(kw + 6, 5), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, UiKit.INK_DIM)
-
-
 func _dist(km: float) -> String:
 	return "%.1f KM" % km if Game.units_kmh else "%.1f MI" % (km / 1.609)
 
 
-static func _section(ci: CanvasItem, title: String, pos: Vector2, w: float) -> void:
-	var f := UiKit.font("cond", 3)
-	ci.draw_string(f, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.ACCENT)
-	var tw := f.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-	ci.draw_line(pos + Vector2(tw + 12, -5), pos + Vector2(w, -5), UiKit.INK_FAINT, 1.0)
-
-
-# ------------------------------------------------------------------ behaviour
+# ------------------------------------------------------------------ setup
 
 func _intro() -> void:
 	var tw := create_tween().set_parallel().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tw.tween_property(_fade, "color:a", 0.0, 0.5).from(1.0)
-	for i in _rows.size():
-		var r := _rows[i]
+	for i in _nav.size():
+		var r: Control = _nav[i]
 		r.modulate.a = 0.0
 		tw.tween_property(r, "modulate:a", 1.0, 0.35).set_delay(0.12 + i * 0.04)
-	for c in [_overlay, _start_btn] + _chips:
+	for c in [_overlay, _start_btn, _tabs] + _chips:
 		c.modulate.a = 0.0
 		tw.tween_property(c, "modulate:a", 1.0, 0.45).set_delay(0.2)
 
 
 func _set_focus(i: int) -> void:
 	_focus = i
-	for k in _rows.size():
-		_rows[k].focused = k == i
-
-
-func _set_settings_focus(i: int) -> void:
-	_settings_focus = i
-	for k in _settings_rows.size():
-		_settings_rows[k].focused = k == i
+	for k in _nav.size():
+		_nav[k].focused = k == i
 
 
 func _move_focus(dir: int) -> void:
 	var i := _focus
-	for n in _rows.size():
-		i = posmod(i + dir, _rows.size())
-		if not _rows[i].disabled:
+	for n in _nav.size():
+		i = posmod(i + dir, _nav.size())
+		if not _nav[i].get("disabled"):
 			break
 	_set_focus(i)
 
 
-func _on_row_changed(_v: int, row: int) -> void:
-	match row:
-		Row.MODE:
-			_on_mode_changed()
-		Row.TRACK:
-			_on_track_changed(true)
-		Row.CAR:
-			_on_car_changed(_rows[Row.CAR].last_dir)
-		Row.OPPONENTS:
-			_opp_value = _rows[Row.OPPONENTS].index
-		Row.TIME:
-			_show_backdrop(true)
-		Row.WEATHER:
-			_tint_backdrop()
-	_overlay.queue_redraw()
-
-
 func _on_mode_changed() -> void:
-	var m := _rows[Row.MODE].index
-	var opp := _rows[Row.OPPONENTS]
-	var items := PackedStringArray()
+	var m := _tabs.index
 	var cap := 7 if m == Game.Mode.SINGLE_RACE or m == Game.Mode.SPECTATE else 1
-	for n in cap + 1:
-		items.append("Solo" if n == 0 else "%d rival%s" % [n, "" if n == 1 else "s"])
-	opp.set_items(items, mini(_opp_value, cap))
-	opp.disabled = m == Game.Mode.TIME_TRIAL or m == Game.Mode.FREE_ROAM
-	opp.disabled_text = "None"
-	_rows[Row.LAPS].disabled = m == Game.Mode.FREE_ROAM
-	_rows[Row.LAPS].disabled_text = "Endless"
-	_rows[Row.TRAFFIC].disabled = m == Game.Mode.TIME_TRIAL
-	_rows[Row.TRAFFIC].disabled_text = "Off"
-	for r in _rows:
+	_opp.max_index = cap
+	_opp.set_items(_opp.items, mini(_opp_value, cap))
+	_opp.disabled = m == Game.Mode.TIME_TRIAL or m == Game.Mode.FREE_ROAM
+	_laps.disabled = m == Game.Mode.FREE_ROAM
+	_traffic.disabled = m == Game.Mode.TIME_TRIAL
+	for r in _nav:
 		r.queue_redraw()
+	if _nav[_focus].get("disabled"):
+		_move_focus(1)
+	_start_btn.queue_redraw()
 	_overlay.queue_redraw()
 
 
-func _on_track_changed(animate: bool) -> void:
-	var id := Game.tracks[_rows[Row.TRACK].index]
+func _outline(id: String) -> PackedVector3Array:
 	if not _outlines.has(id):
 		_outlines[id] = ProceduralTrack.outline() if id == Game.PROCEDURAL_TRACK \
 			else Nfs3Track.peek_outline(Game.track_dir(id))
-	_track_map.set_outline(_outlines[id])
+	return _outlines[id]
+
+
+func _set_track(i: int, dir: int) -> void:
+	_track_i = i
+	_track_shown = i
+	_show_track(true)
+	_update_track_row(dir)
+
+
+## Map and backdrop for the shown track.
+func _show_track(animate: bool) -> void:
+	_track_map.set_outline(_outline(Game.tracks[_track_shown]))
 	_show_backdrop(animate)
+	_overlay.queue_redraw()
+
+
+func _update_track_row(dir: int) -> void:
+	var id := Game.tracks[_track_i]
+	var km := 0.0
+	var pts := _outline(id)
+	for k in pts.size():
+		km += pts[k].distance_to(pts[(k + 1) % pts.size()]) / 1000.0
+	var sub := _tracks.section(id)
+	if km > 0:
+		sub += "  ·  " + _dist(km)
+	_track_row.set_value(Game.track_name(id), sub, dir)
+	var tex := _postcards.get_postcard(id, _time_row.index == 1)
+	_track_row.thumb = tex if tex else _track_photo(id)
 	# The weather is the track's own: rain on most, snow on some.
-	var snow := Game.track_dir(id) != "" \
-		and Nfs3Horizon.peek_precip(Game.track_dir(id)) == Nfs3Horizon.Precip.SNOW
-	_rows[Row.WEATHER].set_items(PackedStringArray(["Clear", "Snow" if snow else "Rain"]), _rows[Row.WEATHER].index)
-	_tint_backdrop()
+	var snow := _tracks.precip(id) == Nfs3Horizon.Precip.SNOW
+	_weather.set_items(PackedStringArray(["Clear", "Snow" if snow else "Rain"]), _weather.index)
 
 
-## The track's rendered postcard for the time of day; the blurred front-end slide until
-## that has been rendered.
+func _set_car(i: int, dir: int) -> void:
+	_car_i = i
+	_update_car_row(dir)
+	_show_car_now(i)
+
+
+func _update_car_row(dir: int) -> void:
+	var g := Game.car_class(_car_i)
+	var police := Game.is_pursuit_car(_car_i)
+	var sub: String = "POLICE" if police else ["CLASS A", "CLASS B", "CLASS C", "BONUS"][g]
+	sub += "  ·  " + ("HIGH STAKES" if Game.is_hs_car(_car_i) else "NFS III")
+	_car_row.set_value(Game.cars[_car_i].name, sub, dir)
+	_car_row.badge = "P" if police else "ABCX"[g]
+	_car_row.badge_color = UiKit.COP_BLUE if police else UiKit.ACCENT
+
+
+## A browsed car: its caption and ratings at once, the model once focus rests on it.
+func _preview_car_later(i: int) -> void:
+	_car_shown = i
+	_stats.set_car(Game.car_spec(i), Game.units_kmh)
+	_car_pending = i
+	_car_pending_t = CAR_PREVIEW_DELAY
+	_overlay.queue_redraw()
+
+
+func _show_car_now(i: int) -> void:
+	_car_shown = i
+	_car_pending = -1
+	var data: Object = Game.load_car(Game.cars[i].path, i)
+	_stats.set_car(data, Game.units_kmh)
+	_show_car(data)
+	_overlay.queue_redraw()
+
+
+func _show_car(data: Object) -> void:
+	if _preview_car:
+		_preview_car.queue_free()
+		_preview_car = null
+	# The race car itself, parked (handbrake on, no brake lights) and dropped from a little
+	# height: it lands on its springs, bounces and settles at its real static sag.
+	var car := Car.new()
+	car.setup(data)
+	car.handbrake = true
+	car.set_headlights(false)
+	_floor.get_parent().add_child(car)
+	car.reset_to(Transform3D(Basis(), Vector3(0, PODIUM_TOP, 0)), DROP_HEIGHT)
+	_preview_car = car
+	(_shadow.mesh as PlaneMesh).size = Vector2(data.half_size.x * 2.6, data.half_size.z * 2.3)
+	_shadow.visible = true
+
+
+## The shown track's rendered postcard for the time of day; the blurred front-end slide
+## until that has been rendered.
 func _show_backdrop(animate: bool) -> void:
-	var id := Game.tracks[_rows[Row.TRACK].index]
-	var tex := _postcards.get_postcard(id, _rows[Row.TIME].index == 1)
+	var id := Game.tracks[_track_shown]
+	var tex := _postcards.get_postcard(id, _time_row.index == 1)
 	if tex == null:
 		tex = _track_photo(id)
 	if tex == _photo_front.texture:
@@ -650,23 +763,28 @@ func _show_backdrop(animate: bool) -> void:
 	_photo_front.texture = tex
 	_photo_front.modulate.a = 0.0
 	if tex:
-		create_tween().tween_property(_photo_front, "modulate:a", 1.0, 0.5 if animate else 0.9)
-	create_tween().tween_property(_photo_back, "modulate:a", 0.0, 0.6)
+		create_tween().tween_property(_photo_front, "modulate:a", 1.0, 0.35 if animate else 0.9)
+	create_tween().tween_property(_photo_back, "modulate:a", 0.0, 0.45)
 	_tint_backdrop()
 
 
 func _on_postcard_rendered(id: String) -> void:
-	if id == Game.tracks[_rows[Row.TRACK].index]:
+	if id == Game.tracks[_track_shown]:
 		_show_backdrop(true)
+	if id == Game.tracks[_track_i]:
+		_update_track_row(0)
+	_tracks.refresh()
 
 
 func _tint_backdrop() -> void:
-	var night := _rows[Row.TIME].index == 1
+	var night := _time_row.index == 1
 	var tint := Color(0.22, 0.27, 0.45) if night else Color(0.42, 0.42, 0.45)
 	if _photo_front.texture and not _photos.values().has(_photo_front.texture):
 		# A render already has the time of day in it: just dim it behind the showroom.
 		tint = Color(0.72, 0.72, 0.75)
-	if _rows[Row.WEATHER].index == 1:
+	if _tracks.visible:
+		tint = Color(0.9, 0.9, 0.92)
+	if _weather.index == 1:
 		tint = tint.darkened(0.25).lerp(Color(0.3, 0.33, 0.36), 0.3)
 	for tr in [_photo_back, _photo_front]:
 		create_tween().tween_property(tr, "self_modulate", tint, 0.4)
@@ -692,75 +810,62 @@ func _track_photo(id: String) -> Texture2D:
 	return tex
 
 
-func _on_car_changed(_dir: int) -> void:
-	var ci := _rows[Row.CAR].index
-	var data: Object = Game.load_car(Game.cars[ci].path, ci)
-	_stats.set_car(data, _settings_rows[1].index == 0)
-	_show_car(data)
-
-
-func _show_car(data: Object) -> void:
-	if _preview_car:
-		_preview_car.queue_free()
-		_preview_car = null
-	# The race car itself, parked (handbrake on, no brake lights) and dropped from a little
-	# height: it lands on its springs, bounces and settles at its real static sag.
-	var car := Car.new()
-	car.setup(data)
-	car.handbrake = true
-	car.set_headlights(false)
-	_floor.get_parent().add_child(car)
-	car.reset_to(Transform3D(Basis(), Vector3(0, PODIUM_TOP, 0)), DROP_HEIGHT)
-	_preview_car = car
-	(_shadow.mesh as PlaneMesh).size = Vector2(data.half_size.x * 2.6, data.half_size.z * 2.3)
-	_shadow.visible = true
-
-
-static var _shadow_sh: Shader
-
-static func _shadow_shader() -> Shader:
-	if _shadow_sh == null:
-		_shadow_sh = Shader.new()
-		_shadow_sh.code = """
-shader_type spatial;
-render_mode unshaded, blend_mix, depth_draw_never, shadows_disabled;
-void fragment() {
-	vec2 d = UV * 2.0 - 1.0;
-	float r = length(d);
-	ALBEDO = vec3(0.0);
-	ALPHA = pow(1.0 - smoothstep(0.2, 1.0, r), 1.6) * 0.85;
-}
-"""
-	return _shadow_sh
-
-
-func _apply_settings() -> void:
-	Game.quality = _settings_rows[0].index as Game.Quality
-	Game.units_kmh = _settings_rows[1].index == 0
-	Game.damage = _settings_rows[2].index == 1
-	var ci := _rows[Row.CAR].index
-	_stats.set_car(Game.load_car(Game.cars[ci].path, ci), Game.units_kmh)
+func _on_settings_changed() -> void:
+	_stats.set_car(Game.car_spec(_car_shown), Game.units_kmh)
+	_update_track_row(0)
 	_overlay.queue_redraw()
 
 
-func _toggle_settings() -> void:
-	if _starting:
+# ------------------------------------------------------------------ overlays
+
+func _open_tracks() -> void:
+	if _starting or _browsing():
 		return
-	_settings.visible = not _settings.visible
-	if _settings.visible:
-		_set_settings_focus(0)
-		_settings.modulate.a = 0.0
-		_settings_panel.position.y = (size.y - _settings_panel.size.y) * 0.5 + 24
-		var tw := create_tween().set_parallel().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(_settings, "modulate:a", 1.0, 0.2)
-		tw.tween_property(_settings_panel, "position:y", (size.y - _settings_panel.size.y) * 0.5, 0.3)
-	else:
-		Game.save_settings()
+	_tracks.current = _track_i
+	_tracks.night = _time_row.index == 1
+	_open_browser(_tracks, _track_i)
+	# The backdrop is the preview here: let it through, and put the car away.
+	create_tween().tween_property(_showroom, "modulate:a", 0.0, 0.2)
+	_tint_backdrop()
 
 
+func _open_cars() -> void:
+	if _starting or _browsing():
+		return
+	_cars.current = _car_i
+	_open_browser(_cars, _car_i)
+
+
+func _open_browser(b: BrowserBase, item: int) -> void:
+	_left.visible = false
+	_start_btn.visible = false
+	_stats.visible = b == _cars
+	b.open(item)
+	_layout()
+
+
+func _close_browser() -> void:
+	_tracks.close()
+	_cars.close()
+	_left.visible = true
+	_start_btn.visible = true
+	_stats.visible = true
+	if _showroom.modulate.a < 1.0:
+		create_tween().tween_property(_showroom, "modulate:a", 1.0, 0.25)
+	_layout()
+	_tint_backdrop()
+
+
+func _open_settings() -> void:
+	if _starting or _browsing():
+		return
+	_settings.open()
+
+
+## For tools/autotest.gd ("--autotest menu --settings").
 func open_settings() -> void:
 	if not _settings.visible:
-		_toggle_settings()
+		_open_settings()
 
 
 func _quit_armed() -> bool:
@@ -777,35 +882,79 @@ func _request_quit() -> void:
 		c.queue_redraw()
 
 
+func _step_focused(dir: int) -> void:
+	var c = _nav[_focus]
+	if c is PickerRow:
+		c.stepped.emit(dir)
+	else:
+		c.step(dir)
+
+
+func _browse_focused() -> bool:
+	if _nav[_focus] == _track_row:
+		_open_tracks()
+	elif _nav[_focus] == _car_row:
+		_open_cars()
+	else:
+		return false
+	return true
+
+
 func _unhandled_input(e: InputEvent) -> void:
-	if _starting:
+	if _starting or _browsing() or _settings.visible:
 		return
-	var rows := _settings_rows if _settings.visible else _rows
-	var focus := _settings_focus if _settings.visible else _focus
+	if e is InputEventKey:
+		if not e.pressed:
+			return
+		match e.physical_keycode:
+			KEY_UP, KEY_W:
+				_move_focus(-1)
+			KEY_DOWN, KEY_S:
+				_move_focus(1)
+			KEY_LEFT, KEY_A:
+				_step_focused(-1)
+			KEY_RIGHT, KEY_D:
+				_step_focused(1)
+			KEY_Q:
+				if not e.echo: _tabs.step(-1)
+			KEY_E:
+				if not e.echo: _tabs.step(1)
+			KEY_T:
+				_open_tracks()
+			KEY_C:
+				_open_cars()
+			KEY_SPACE:
+				if not _browse_focused():
+					return
+			KEY_ENTER, KEY_KP_ENTER:
+				if e.alt_pressed or e.echo:
+					return
+				_start()
+			KEY_TAB:
+				if not e.echo: _open_settings()
+			KEY_ESCAPE:
+				if not e.echo: _request_quit()
+			_:
+				return
+		get_viewport().set_input_as_handled()
+		return
 	if e.is_action_pressed("ui_down", true):
-		if _settings.visible:
-			_set_settings_focus(posmod(focus + 1, rows.size()))
-		else:
-			_move_focus(1)
+		_move_focus(1)
 	elif e.is_action_pressed("ui_up", true):
-		if _settings.visible:
-			_set_settings_focus(posmod(focus - 1, rows.size()))
-		else:
-			_move_focus(-1)
+		_move_focus(-1)
 	elif e.is_action_pressed("ui_left", true):
-		rows[focus].step(-1)
+		_step_focused(-1)
 	elif e.is_action_pressed("ui_right", true):
-		rows[focus].step(1)
-	elif e.is_action_pressed("ui_cancel"):
-		if _settings.visible:
-			_toggle_settings()
-		else:
-			_request_quit()
-	elif (e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_TAB) \
-			or (e is InputEventJoypadButton and e.pressed and e.button_index == JOY_BUTTON_Y):
-		_toggle_settings()
-	elif e.is_action_pressed("ui_accept") and not _settings.visible:
-		_start()
+		_step_focused(1)
+	elif e is InputEventJoypadButton and e.pressed:
+		match e.button_index:
+			JOY_BUTTON_A: _start()
+			JOY_BUTTON_B: _request_quit()
+			JOY_BUTTON_X: _browse_focused()
+			JOY_BUTTON_Y: _open_settings()
+			JOY_BUTTON_LEFT_SHOULDER: _tabs.step(-1)
+			JOY_BUTTON_RIGHT_SHOULDER: _tabs.step(1)
+			_: return
 	else:
 		return
 	get_viewport().set_input_as_handled()
@@ -829,6 +978,10 @@ func _process(dt: float) -> void:
 	if not _dragging:
 		_rig.rotate_y(-dt * _spin_vel)
 		_spin_vel = UiKit.damp(_spin_vel, 0.5, 1.5, dt)
+	if _car_pending >= 0:
+		_car_pending_t -= dt
+		if _car_pending_t <= 0.0:
+			_show_car_now(_car_pending)
 	if _preview_car:
 		if _starting:
 			# Drive off screen: slide the (frozen) car out along the camera's x.
@@ -842,7 +995,7 @@ func _process(dt: float) -> void:
 	var hover: bool = _start_btn.get_meta("hover", false)
 	_start_hot = UiKit.damp(_start_hot, 1.0 if hover else 0.0, 12.0, dt)
 	_start_btn.queue_redraw()
-	if _rows[Row.MODE].index == Game.Mode.HOT_PURSUIT:
+	if _tabs.index == Game.Mode.HOT_PURSUIT:
 		_overlay.queue_redraw()
 	if _quit_armed_until > 0 and not _quit_armed():
 		_quit_armed_until = 0
@@ -855,17 +1008,14 @@ func _start() -> void:
 	if _starting:
 		return
 	_starting = true
-	Game.mode = _rows[Row.MODE].index as Game.Mode
-	Game.track_id = Game.tracks[_rows[Row.TRACK].index]
-	Game.car_index = _rows[Row.CAR].index
-	Game.laps = _rows[Row.LAPS].index + 1
+	Game.mode = _tabs.index as Game.Mode
+	Game.track_id = Game.tracks[_track_i]
+	Game.car_index = _car_i
+	Game.laps = _laps.index + 1
 	Game.opponents = _opp_value
-	Game.traffic = _rows[Row.TRAFFIC].index == 1
-	Game.night = _rows[Row.TIME].index == 1
-	Game.weather = _rows[Row.WEATHER].index == 1
-	Game.quality = _settings_rows[0].index as Game.Quality
-	Game.units_kmh = _settings_rows[1].index == 0
-	Game.damage = _settings_rows[2].index == 1
+	Game.traffic = _traffic.index == 1
+	Game.night = _time_row.index == 1
+	Game.weather = _weather.index == 1
 	Game.save_settings()
 	_start_hot = 1.0
 	if _preview_car:

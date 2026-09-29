@@ -61,16 +61,20 @@ static func load_dir(dir: String) -> Nfs3Track:
 		t.error = "missing texture archive"
 		return t
 	# Texture ids count the archive's entries leaving out the "<mirrored>" copies of lettered
-	# textures (signs), which only the mirrored tracks use.
+	# textures (signs), which only the mirrored tracks use. Glows, fire and light rays are
+	# tagged "<additive>" (on one of Hometown's, "additive").
+	var additive := PackedByteArray()
 	for i in fsh.images.size():
 		if fsh.tags[i] != "<mirrored>":
 			t.images.append(fsh.images[i])
+			additive.append(int("additive" in fsh.tags[i]))
 	for ti in t.textures:
 		if not ti.is_lane and ti.qfs_index < t.images.size():
 			var img := t.images[ti.qfs_index]
 			ti.width = img.get_width()
 			ti.height = img.get_height()
 			ti.cutout = img.detect_alpha() != Image.ALPHA_NONE
+			ti.additive = additive[ti.qfs_index] != 0
 	# Data/Tracks/<Name> -> Data/GameArt/sfx.fsh
 	t._add_lane_images(Fsh.load_file(DataPath.find_ci(dir.get_base_dir().get_base_dir(), "gameart/sfx.fsh")))
 	return t

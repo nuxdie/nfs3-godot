@@ -58,7 +58,7 @@ folder that contains `tracks` and `gameart` wins:
 | File | Used for |
 |---|---|
 | `Tracks/<name>/tr.frd` | Geometry, baked lighting, scenery, animated objects and physics props, the virtual road (it has no `.col`) |
-| `Tracks/<name>/tr0.qfs` | Textures; the ids skip the `<mirrored>` copies of lettered ones (for mirrored tracks) |
+| `Tracks/<name>/tr0.qfs` | Textures; the ids skip the `<mirrored>` copies of lettered ones (for mirrored tracks), and those tagged `<additive>` (fire, glows, light rays) are drawn additively |
 | `Tracks/<name>/tr.ini`, `trn.ini`, `trw.ini`, `trnw.ini` | The same sky, fog, weather and ambient settings as NFS3's `.hrz`, as named keys |
 | `Tracks/<name>/sky.qfs` | Horizon panorama (`HDC0-7` day, `HNC` night, `HDW`/`HNW` weather), clouds, sun and moon |
 | `GameArt/sfx.fsh` | Lane marking sprites |
@@ -108,6 +108,24 @@ helicopter.
 | Reset car to road | R | Back |
 | Toggle rear-view mirror | M | |
 | Pause | Esc / P | Start |
+| Fullscreen | F11 / Alt+Enter | |
+
+### Menu
+
+Everything is clickable; the keyboard and pad do the same:
+
+| Action | Keyboard | Gamepad |
+|---|---|---|
+| Mode | Q / E, or click a tab | LB / RB |
+| Move / change a setting | ↑↓ / ←→ (or the mouse wheel over it) | D-pad |
+| Browse all tracks / cars | T / C, or click the track or car | X on it |
+| Start the race | Enter | A |
+| Settings (graphics, display, v-sync, volume, units, damage) | Tab | Y |
+| Quit | Esc twice | B twice |
+
+In the track and car browsers, type to search; Tab (LB / RB) steps the class or game
+filter; ←→ changes the car sort (class, name, or any of the four ratings). Pointing
+or moving previews an item; Enter or a click picks it; Esc puts back the previous one.
 
 ## Graphics quality
 
@@ -160,9 +178,10 @@ scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_str
                    dynamic_resolution.gd (3D resolution that gives way when the GPU misses frames),
                    reflections.gd (wet road sheen, lamp streaks and High-quality mirror; the
                    reflection probe on the player's car)
-scripts/ui/        main_menu.gd (showroom front end), track_postcards.gd (renders each track by day and
+scripts/ui/        main_menu.gd (showroom front end), track_browser.gd / car_browser.gd (on browser_base.gd:
+                   search, filters, scrolling grid or list), settings_panel.gd, track_postcards.gd (renders each track by day and
                    night in the background for the menu backdrop, cached in user://postcards), hud.gd (tach, map, mirror, pause, results),
-                   ui_kit.gd (palette, fonts, slanted shapes, key hints), selector_row.gd,
+                   ui_kit.gd (palette, fonts, slanted shapes, key hints), tab_strip.gd, option_row.gd, picker_row.gd,
                    action_list.gd (pause/results menus), track_map.gd, car_stats.gd
 fonts/             Barlow / Barlow Condensed (SIL Open Font License, see fonts/OFL.txt)
 scripts/audio/     car_audio.gd (synthesised engine, tyre squeal, siren)
@@ -191,7 +210,9 @@ tools/gdprof.py    per-function GDScript times and per-pass GPU times of a run, 
 tools/track_shots.gd photograph a track's road at points round the lap (fractions 0..1), with
                    draw-call and triangle counts: godot --path . -- --trackshots <track> [0.25 ...]
                    (--night / --weather; --up= --back= --ahead= --side= --lookside= aim the eye;
-                   --tag=NAME; --hazards lists solid scenery inside the procedural track's walls)
+                   --tag=NAME; --hazards lists solid scenery inside the procedural track's walls;
+                   --clearmap=FROM-TO prints where the AI's obstacle scan finds room for a car on
+                   those virtual road nodes)
 tools/postcards.gd re-render the menu's track pictures and copy them to shots/:
                    godot --path . -- --postcards [track ...]
 tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, front and rear, saved to shots/:

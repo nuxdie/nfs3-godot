@@ -175,6 +175,26 @@ static func _road_under(space: PhysicsDirectSpaceState3D, p: Vector3, up: Vector
 	return not hit.is_empty() and hit.collider.name == "Road"
 
 
+## Whether a car driving straight from `pos` (near node `from`) to `off` metres right of the
+## line at node `to` (stepping by `dir`) keeps clear of the scenery scan_obstacles() found:
+## on a bend the straight line cuts across the inside, where a row of pillars can stand.
+func chord_clear(pos: Vector3, from: int, to: int, off: float, dir: int) -> bool:
+	if obstructed.is_empty():
+		return true
+	var target := points[to] + rights[to] * off
+	var span := fposmod((cumulative[to] - cumulative[from]) * dir, length)
+	var i := idx(from + dir)
+	while i != to:
+		if obstructed[i] and clear_bits[i] != 0:
+			var f := fposmod((cumulative[i] - cumulative[from]) * dir, length) / maxf(span, 0.1)
+			# The car's width either side of where the line crosses this node.
+			var k := roundi(lateral(pos.lerp(target, f), i)) + SPAN
+			if k < 1 or k > 2 * SPAN - 1 or (clear_bits[i] >> (k - 1)) & 7 != 7:
+				return false
+		i = idx(i + dir)
+	return true
+
+
 ## The lateral offset nearest `want` (and the car's own `current` one) where a car gets
 ## through clear of scenery on every node from `from` to `to` (stepping by `dir`), within
 ## `lo`..`hi`. `want` itself when nothing stands in the way, or nothing is clear.

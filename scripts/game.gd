@@ -48,11 +48,16 @@ var weather := false      # the track's rain or snow
 var damage := true        # crashes dent the cars and cost power (not in the original)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
+var fullscreen := false
+var vsync := true
+var volume := 8           # master volume in tenths, 0..10
 var render_scale := 0.0   # where DynamicResolution left the 3D resolution: the next race starts there
 var render_scale_quality := -1   # ...if it's on the same quality preset
 var last_results: Array = []
 
 var _car_cache := {}
+var _spec_cache := {}
+var _saved_car_id := ""   # the car picked last time, found again by id after the list is scanned
 
 
 func _ready() -> void:
@@ -60,6 +65,7 @@ func _ready() -> void:
 	quality = default_quality()
 	_load_settings()
 	scan_data()
+	apply_display()
 	# Developer hook: `godot --path . -- --autotest [track] [mode]` plays a scripted run.
 	if "--autotest" in OS.get_cmdline_user_args():
 		var t: Node = load("res://tools/autotest.gd").new()
@@ -148,6 +154,9 @@ func scan_data() -> void:
 			cars.append({"id": "proc%d" % i, "name": ProceduralCar.PRESETS[i].name, "path": ""})
 	if track_id not in tracks:
 		track_id = tracks[0]
+	for i in cars.size():
+		if cars[i].id == _saved_car_id:
+			car_index = i
 	car_index = clampi(car_index, 0, cars.size() - 1)
 
 
@@ -289,6 +298,33 @@ func load_car(path: String, preset := 0) -> Object:
 	return _car_cache[key]
 
 
+## Just the car's name and carp.txt (no mesh or skin), for menus that list every car:
+## cheap enough to read all of them at once.
+func car_spec(i: int) -> Object:
+	var c: Dictionary = cars[i]
+	if _car_cache.has(c.path if c.path != "" else "preset%d" % i):
+		return load_car(c.path, i)
+	if not _spec_cache.has(i):
+		_spec_cache[i] = ProceduralCar.make(i % ProceduralCar.PRESETS.size()) if c.path == "" \
+			else Nfs3Car.peek_spec(c.path)
+	return _spec_cache[i]
+
+
+## 0..2 for classes A..C, 3 for anything else (the Knockout and stand-ins).
+func car_class(i: int) -> int:
+	var spec := car_spec(i)
+	var v: float = spec.carp_value(1, 3.0)
+	return clampi(int(v), 0, 3)
+
+
+func is_hs_car(i: int) -> bool:
+	return str(cars[i].id).begins_with(HS_PREFIX)
+
+
+func is_pursuit_car(i: int) -> bool:
+	return str(cars[i].name).begins_with("Pursuit")
+
+
 func player_car_data() -> Object:
 	var c: Dictionary = cars[car_index]
 	return load_car(c.path, car_index)
@@ -302,6 +338,7 @@ func save_settings() -> void:
 	cf.set_value("game", "mode", mode)
 	cf.set_value("game", "track", track_id)
 	cf.set_value("game", "car", car_index)
+	cf.set_value("game", "car_id", cars[car_index].id if car_index < cars.size() else "")
 	cf.set_value("game", "laps", laps)
 	cf.set_value("game", "opponents", opponents)
 	cf.set_value("game", "traffic", traffic)
@@ -311,6 +348,9 @@ func save_settings() -> void:
 	cf.set_value("game", "damage", damage)
 	cf.set_value("game", "quality", quality)
 	cf.set_value("game", "camera", camera_mode)
+	cf.set_value("game", "fullscreen", fullscreen)
+	cf.set_value("game", "vsync", vsync)
+	cf.set_value("game", "volume", volume)
 	cf.save(SETTINGS_PATH)
 
 
@@ -323,6 +363,7 @@ func _load_settings() -> void:
 	mode = clampi(_int(cf, "mode", mode), 0, MODE_NAMES.size() - 1) as Mode
 	track_id = str(cf.get_value("game", "track", track_id)).to_lower()
 	car_index = maxi(_int(cf, "car", 0), 0)
+	_saved_car_id = str(cf.get_value("game", "car_id", ""))
 	laps = clampi(_int(cf, "laps", laps), 1, 8)
 	opponents = clampi(_int(cf, "opponents", opponents), 0, 7)
 	traffic = _bool(cf, "traffic", traffic)
@@ -332,6 +373,9 @@ func _load_settings() -> void:
 	damage = _bool(cf, "damage", damage)
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 	camera_mode = clampi(_int(cf, "camera", camera_mode), 0, ChaseCamera.MODES.size() - 1)
+	fullscreen = _bool(cf, "fullscreen", fullscreen)
+	vsync = _bool(cf, "vsync", vsync)
+	volume = clampi(_int(cf, "volume", volume), 0, 10)
 
 
 func _int(cf: ConfigFile, key: String, fallback: int) -> int:
@@ -345,6 +389,27 @@ func _bool(cf: ConfigFile, key: String, fallback: bool) -> bool:
 
 
 # ------------------------------------------------------------------ graphics
+
+## Window mode, v-sync and master volume, from the settings.
+func apply_display() -> void:
+	AudioServer.set_bus_volume_linear(0, volume / 10.0)
+	if DisplayServer.get_name() == "headless":
+		return
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if vsync else DisplayServer.VSYNC_DISABLED)
+	var want := DisplayServer.WINDOW_MODE_FULLSCREEN if fullscreen else DisplayServer.WINDOW_MODE_WINDOWED
+	var have := DisplayServer.window_get_mode()
+	if (have == DisplayServer.WINDOW_MODE_FULLSCREEN or have == DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN) != fullscreen:
+		DisplayServer.window_set_mode(want)
+
+
+## F11 / Alt+Enter toggle fullscreen anywhere.
+func _unhandled_key_input(e: InputEvent) -> void:
+	var k := e as InputEventKey
+	if k and k.pressed and not k.echo and (k.physical_keycode == KEY_F11 or (k.physical_keycode == KEY_ENTER and k.alt_pressed)):
+		fullscreen = not fullscreen
+		apply_display()
+		save_settings()
+		get_viewport().set_input_as_handled()
 
 ## Integrated GPUs and dual-core CPUs start on Low: sun shadows and MSAA alone
 ## cost ~35 ms a frame on e.g. a Haswell HD GT1.
