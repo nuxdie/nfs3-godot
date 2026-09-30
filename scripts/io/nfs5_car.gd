@@ -17,7 +17,7 @@ extends Nfs3Car
 const PART_LEVEL := 1
 ## Base info "level index" byte of the parts drawn: bodywork, decals, the interior seen
 ## through the windows (its own glass left out), wipers, spoilers, steering wheel, wheels,
-## the driver and passenger (at rest: their arms' steering frames are other indices). Not
+## the driver and passenger (in their rest frame: see _read_model). Not
 ## the engine bay and boot (0x1D), the insides of the lids (0x1E), the aerial (0x1C) or
 ## 0x12: the treads and "SpoilerW", a copy of the lowered spoiler that would fight it.
 const SHOWN_LEVELS := [0x1A, 0x18, 0x19, 0x1B, 0x10, 0x49, 0x22, 0x81, 0x89]
@@ -33,6 +33,8 @@ const PEOPLE_LEVELS := [0x81, 0x89]
 ## style doesn't say (most don't: the seat would be empty); the styles that do pair driver 1
 ## with arms 1 and gloves, driver 3 with bare hands.
 const DRIVER_SLOT := 9
+## The arms' and hands' first frames: the steering sweep, from full lock one way to the other.
+const STEER_FRAMES := 10
 const LIMBS_SLOT := 43
 const SUITED_DRIVERS := [1, 6]
 ## The Carreras' rear spoiler (geometry slot 42): the style picks it lowered (an odd
@@ -614,7 +616,14 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		var wheel := bi[4] if bi[4] < 4 else -1
 		if wheel >= 0 and bi[7] >= WHEEL_SHADOW_GEOM:
 			continue
-		var vt := crp.sub(art, "vt", PART_LEVEL)
+		# The people's bodies, arms and hands are animated: frames of vertices (and normals)
+		# at the level's index + frame << 4, a steering sweep (the right arm's gear change
+		# after it); base info byte 8 counts them, byte 9 is the one at rest, hands level on
+		# the rim. Frame 0 is at full lock.
+		var frame := PART_LEVEL
+		if lvl in PEOPLE_LEVELS and bi[8] > 1 and crp.sub(art, "vt", PART_LEVEL | bi[9] << 4) != null:
+			frame = PART_LEVEL | bi[9] << 4
+		var vt := crp.sub(art, "vt", frame)
 		if vt == null:
 			continue
 		var xf := _transform(crp, crp.sub(art, "tr", PART_LEVEL))
@@ -628,13 +637,29 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			dented = verts
 		var uvs := crp.uvs(crp.sub(art, "uv", PART_LEVEL))
 		# The model's own normals ("nm", one per vertex): smooth where the panels curve.
-		var normals := crp.vec3s(crp.sub(art, "nm", PART_LEVEL))
+		var normals := crp.vec3s(crp.sub(art, "nm", frame))
 		if normals.size() != verts.size():
 			normals = PackedVector3Array()
 		var z_bias := (bi[6] ^ 0x80) - 0x80
 		var bias := -z_bias * (DEPTH_BIAS_STEP if z_bias < 0 else DEPTH_BIAS_STEP_BACK)
-		var steers := 1.0 if lvl == STEER_LEVEL else 0.75 if slot == HANDS_SLOT else 0.0
 		var into: _Mesh = people if lvl in PEOPLE_LEVELS else body
+		# An arm or hand's steering sweep (people.sweep): its side, and its frames with
+		# their normals. The body, legs and passenger stay as they are.
+		var side := -1
+		var sweep: Array[PackedVector3Array] = []
+		var sweep_n: Array[PackedVector3Array] = []
+		if into == people and bi[8] >= STEER_FRAMES and (art.name.begins_with("Left") or art.name.begins_with("Right")):
+			for f in STEER_FRAMES:
+				sweep.append(crp.vec3s(crp.sub(art, "vt", PART_LEVEL | f << 4)))
+				sweep_n.append(crp.vec3s(crp.sub(art, "nm", PART_LEVEL | f << 4)))
+				if sweep[f].size() != verts.size():
+					sweep.clear()
+					break
+			if not sweep.is_empty():
+				side = 0 if art.name.begins_with("Left") else 1
+				people.side_rest[side] = bi[9]
+		# (Hands with a sweep follow the wheel by it, not by turning with it.)
+		var steers := 1.0 if lvl == STEER_LEVEL else 0.75 if slot == HANDS_SLOT and side < 0 else 0.0
 		if slot == SPOILER_SLOT and want.get(slot, 0) % 2 == 1:
 			into = spoiler_up if raised else spoiler_down
 		if popup_rise != 0.0 and art.name == "HeadLight":
@@ -676,6 +701,15 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 					dst.uv.append(rect.position + uv.clamp(Vector2.ZERO, Vector2.ONE) * rect.size)
 					dst.bias.append(bias)
 					dst.steer.append(steers)
+					if dst == people:
+						var at := vi[t3 + c]
+						for f in STEER_FRAMES:
+							var fv := sweep[f][at] if side >= 0 and at < sweep[f].size() else v
+							var fn := sweep_n[f][at] if side >= 0 and at < sweep_n[f].size() else Vector3.ZERO
+							people.frames[f].append(_to_car(xf * Vector3(-fv.x, fv.y, fv.z)))
+							people.frame_nrm[f].append(_to_car(xf.basis * Vector3(-fn.x, fn.y, fn.z)).normalized())
+						people.side.append(side)
+						people.hand.append(1 if slot == HANDS_SLOT else 0)
 	# Centre the model on its body, as the FCE models are.
 	var box := body.box()
 	var mid := box.get_center()
@@ -684,6 +718,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	half_size = box.size * 0.5
 	var hb := {"name": ":hb", "mesh": body.commit(-mid), "center": Vector3.ZERO, "damaged": body.damaged(-mid)}
 	var column := body.steering_column()
+	var steer_angles := people.sweep(column)
 	if not column.is_empty():
 		column.pivot -= mid
 		hb.steering = column
@@ -706,10 +741,14 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			"popup_closed": true, "damaged": down.damaged(-mid)})
 		popup_lights.append({"name": "popup", "mesh": popup.commit(-mid), "center": up_at})
 	if not people.pos.is_empty():
-		# They don't dent: no "damaged". Their hands turn on the wheel's column.
+		# They don't dent: no "damaged". Their arms and hands follow the wheel by blend
+		# shapes, one per angle in "steer_shapes" (car.gdshader's steer_angle); without a
+		# sweep the hands turn with it on the wheel's column.
 		var dp := {"name": "driver", "mesh": people.commit(-mid), "center": Vector3.ZERO, "driver": true}
 		if hb.has("steering"):
 			dp.steering = hb.steering
+		if not steer_angles.is_empty():
+			dp.steer_shapes = steer_angles
 		body_parts.append(dp)
 	if not glass.pos.is_empty():
 		body_parts.append({"name": "glass", "mesh": glass.commit(-mid), "center": Vector3.ZERO, "glass": true,
@@ -828,6 +867,21 @@ class _Mesh:
 	var nrm := PackedVector3Array()      # the model's normal, or zero for the face's
 	var steer := PackedFloat32Array()    # UV2.x: 1 the steering wheel, 0.75 the hands on it (both turn), 0
 	var dent := PackedVector3Array()     # each vertex in the damaged copy
+	# The people's steering sweep: each vertex in each of the arms' and hands' frames (where
+	# it is at rest on the parts that don't move), the side (0 left, 1 right, -1 none) and
+	# whether it's a hand; each side's rest frame. sweep() makes blend shapes of them.
+	var frames: Array[PackedVector3Array] = []
+	var frame_nrm: Array[PackedVector3Array] = []
+	var side := PackedInt32Array()
+	var hand := PackedByteArray()
+	var side_rest := {}
+	var shapes: Array[PackedVector3Array] = []
+	var shape_nrm: Array[PackedVector3Array] = []
+
+	func _init() -> void:
+		for f in STEER_FRAMES:
+			frames.append(PackedVector3Array())
+			frame_nrm.append(PackedVector3Array())
 	var panels := PackedInt32Array()     # the panel (bit) each vertex is on
 
 	func box() -> AABB:
@@ -886,14 +940,101 @@ class _Mesh:
 	## The shading normals: the model's, turned to the side its triangle faces (the few
 	## that point the other way), or the face's where it has none.
 	func _normals() -> PackedVector3Array:
+		return _shading(pos, nrm)
+
+	static func _shading(p: PackedVector3Array, nm: PackedVector3Array) -> PackedVector3Array:
 		var out := PackedVector3Array()
-		out.resize(pos.size())
-		for i in range(0, pos.size() - 2, 3):
-			var fn := _face(pos, i)
+		out.resize(p.size())
+		for i in range(0, p.size() - 2, 3):
+			var fn := _face(p, i)
 			for k in 3:
-				var n := nrm[i + k]
+				var n := nm[i + k]
 				out[i + k] = fn if n == Vector3.ZERO else (n if n.dot(fn) >= 0.0 else -n)
 		return out
+
+	## The steering sweep as blend shapes (`shapes`), returning the wheel angle each is at
+	## (ascending; + about the column's axis by the right-hand rule, as car.gdshader turns
+	## the wheel), or [] without a sweep. Each side's frames are at the angle its hands are
+	## turned from their rest frame about the column; the two sides' angles differ, so both
+	## are resampled at every angle either has (within the range both reach).
+	func sweep(column: Dictionary) -> PackedFloat32Array:
+		var out := PackedFloat32Array()
+		if column.is_empty() or side_rest.is_empty():
+			return out
+		var axis: Vector3 = column.axis
+		var angles := {}   # side -> PackedFloat32Array per frame
+		for s: int in side_rest:
+			var ref := _hand_dir(s, int(side_rest[s]), column)
+			if ref == Vector3.ZERO:
+				continue
+			var a := PackedFloat32Array()
+			for f in STEER_FRAMES:
+				var d := _hand_dir(s, f, column)
+				a.append(atan2(axis.dot(ref.cross(d)), ref.dot(d)))
+			angles[s] = a
+		if angles.is_empty():
+			return out
+		var lo := -INF
+		var hi := INF
+		for s: int in angles:
+			var a: PackedFloat32Array = angles[s]
+			lo = maxf(lo, Array(a).min())
+			hi = minf(hi, Array(a).max())
+		var grid := {}
+		for s: int in angles:
+			for g in angles[s]:
+				if g >= lo - 1e-4 and g <= hi + 1e-4:
+					grid[snappedf(g, 1e-4)] = true
+		var keys: Array = grid.keys()
+		keys.sort()
+		if keys.size() < 2:
+			return out
+		for g: float in keys:
+			var p := PackedVector3Array()
+			var n := PackedVector3Array()
+			p.resize(pos.size())
+			n.resize(pos.size())
+			for i in pos.size():
+				var s := side[i]
+				if not angles.has(s):
+					p[i] = pos[i]
+					n[i] = nrm[i]
+					continue
+				var fw := _between(angles[s], g)
+				var f0 := int(fw.x)
+				var f1 := int(fw.y)
+				p[i] = frames[f0][i].lerp(frames[f1][i], fw.z)
+				n[i] = frame_nrm[f0][i].lerp(frame_nrm[f1][i], fw.z)
+			shapes.append(p)
+			shape_nrm.append(_shading(p, n))
+			out.append(g)
+		return out
+
+	## Where side `s`'s hands are in frame `f`, from the column's middle, flat across it.
+	func _hand_dir(s: int, f: int, column: Dictionary) -> Vector3:
+		var c := Vector3.ZERO
+		var n := 0
+		for i in pos.size():
+			if side[i] == s and hand[i] == 1:
+				c += frames[f][i]
+				n += 1
+		if n == 0:
+			return Vector3.ZERO
+		var axis: Vector3 = column.axis
+		var pivot: Vector3 = column.pivot
+		var d := c / n - pivot
+		return d - axis * axis.dot(d)
+
+	## The two frames (x, y) whose angles in `a` bracket `g`, and how far (z) from x to y.
+	static func _between(a: PackedFloat32Array, g: float) -> Vector3:
+		var best := Vector3(0, 0, 0)
+		var gap := INF
+		for f in a.size():
+			for h in a.size():
+				if a[f] <= g and g <= a[h] and a[h] - a[f] < gap:
+					gap = a[h] - a[f]
+					best = Vector3(f, h, 0.0 if gap < 1e-6 else (g - a[f]) / gap)
+		return best
 
 	## CarDamage's view of the damaged copy: {pos, normal, panels}; the normal is the
 	## smooth one turned as far as its triangle turns in the dent.
@@ -919,4 +1060,24 @@ class _Mesh:
 			st.set_uv2(Vector2(steer[i], bias[i]))
 			st.set_normal(normals[i])
 			st.add_vertex(pos[i] + offset)
-		return st.commit()
+		if shapes.is_empty():
+			return st.commit()
+		# The steering sweep, one blend shape per angle (normalized: a pose between two is
+		# their weights summing to 1).
+		var arrays := st.commit_to_arrays()
+		var mesh := ArrayMesh.new()
+		mesh.blend_shape_mode = Mesh.BLEND_SHAPE_MODE_NORMALIZED
+		var blends := []
+		for k in shapes.size():
+			mesh.add_blend_shape("steer%d" % k)
+			var b := []
+			b.resize(Mesh.ARRAY_MAX)
+			var p := PackedVector3Array()
+			p.resize(shapes[k].size())
+			for i in p.size():
+				p[i] = shapes[k][i] + offset
+			b[Mesh.ARRAY_VERTEX] = p
+			b[Mesh.ARRAY_NORMAL] = shape_nrm[k]
+			blends.append(b)
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, blends)
+		return mesh

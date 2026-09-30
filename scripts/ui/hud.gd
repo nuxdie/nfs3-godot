@@ -502,17 +502,6 @@ func _on_draw_static() -> void:
 	if _pause.visible or _results:
 		return
 	var size := _static.size
-	# Soft dark pools behind each cluster, so its type reads over bright sky and road without
-	# a box round it.
-	if Game.hud_on and Game.mode != Game.Mode.FREE_ROAM:
-		if Game.hud_shows("standings"):
-			var top := M + (ClassicGauges.dial_height(size.y) - 8.0 if _classic and _classic.visible \
-				and _classic.placement == ClassicGauges.Placement.TOP else 0.0)
-			UiKit.shade(_static, Rect2(-150, top - 110, 600, race.racers.size() * 26 + 260), 0.5)
-	if Game.hud_shows("map") or Game.hud_shows("lap"):
-		UiKit.shade(_static, Rect2(-150, size.y - M - 330, 500, 480), 0.5)
-	if _classic == null and Game.hud_shows("speed"):
-		UiKit.shade(_static, Rect2(size.x - 420, size.y - 340, 540, 460), 0.45)
 	if _mirror.visible:
 		var mr := _mirror.get_rect()
 		_static.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
@@ -818,8 +807,6 @@ func _draw_hints(size: Vector2) -> void:
 		size.y -= ClassicGauges.dial_height(size.y) + 14.0
 	if _cam_toast_t > 0.0:
 		var a := clampf(_cam_toast_t / 0.3, 0.0, 1.0)
-		var cw := UiKit.text_width("cond", _cam_name.to_upper(), 18, 1) + 80
-		UiKit.shade(_draw, Rect2(size.x * 0.5 - cw * 0.5 - 60, size.y - M - 50, cw + 120, 80), 0.6 * a)
 		_str("CAMERA", Vector2(0, size.y - M - 26), "cond", 12, Color(UiKit.ACCENT, a), HORIZONTAL_ALIGNMENT_CENTER, size.x, 2)
 		_str(_cam_name.to_upper(), Vector2(0, size.y - M - 4), "cond", 18, Color(UiKit.INK, a), HORIZONTAL_ALIGNMENT_CENTER, size.x, 1)
 		return
@@ -832,7 +819,6 @@ func _draw_hints(size: Vector2) -> void:
 	for h in hints:
 		w += UiKit.text_width("cond", h[0], 13, 1) + 12 + 7 + UiKit.text_width("cond", h[1], 13, 2) + 22
 	var a := clampf(_hint_t / 0.6, 0.0, 1.0)
-	UiKit.shade(_draw, Rect2(size.x * 0.5 - w * 0.5 - 90, size.y - M - 46, w + 180, 84), 0.6 * a)
 	UiKit.draw_hints(_draw, Vector2(size.x * 0.5 - w * 0.5, size.y - M - 5), hints, 13, a)
 
 

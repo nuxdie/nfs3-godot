@@ -203,7 +203,6 @@ func _draw() -> void:
 	_grad(Rect2(0, 0, W * 0.7, H), Color(UiKit.BG, 0.85), Color(UiKit.BG, 0.0), true)
 	_grad(Rect2(0, H * 0.45, W, H * 0.55), Color(UiKit.BG, 0.0), Color(UiKit.BG, 0.95), false)
 	_grad(Rect2(0, 0, W, 140), Color(UiKit.BG, 0.8), Color(UiKit.BG, 0.0), false)
-	UiKit.shade(self, Rect2(_map.position - Vector2(120, 90), _map.size + Vector2(240, 300)), 0.55)
 	# The logo, as the menu's bar has it.
 	var lf := UiKit.font("display")
 	draw_string(lf, Vector2(M, 44), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, UiKit.ACCENT)

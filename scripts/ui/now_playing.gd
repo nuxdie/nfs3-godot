@@ -1,8 +1,8 @@
 class_name NowPlaying
 extends CanvasLayer
 ## A song's title and artist, faded in for a few seconds when it starts, the same over menus,
-## loading and races: a note, the title and the artist in one line at the top right, on a
-## soft shade so it reads over anything. Whoever owns the top right moves it clear:
+## loading and races: a note, the title and the artist in one line at the top right, softly
+## outlined so it reads over anything. Whoever owns the top right moves it clear:
 ## `right` (px in from the right edge) and `top` (its baseline).
 
 const HOLD_S := 4.5
@@ -75,12 +75,15 @@ func _on_draw() -> void:
 	var end := _draw.size.x - right + (1.0 - k) * 12.0
 	var x := end - tw - aw
 	var y := top
-	UiKit.shade(_draw, Rect2(x - 70, y - 34, tw + aw + 120, 56), 0.6 * k)
 	# A quaver.
 	var n := Vector2(x - 16, y - 1)
 	_draw.draw_circle(n, 3.5, Color(UiKit.ACCENT, k), true, -1.0, true)
 	_draw.draw_line(n + Vector2(3, 0), n + Vector2(3, -13), Color(UiKit.ACCENT, k), 1.5)
 	_draw.draw_line(n + Vector2(3, -13), n + Vector2(8, -9), Color(UiKit.ACCENT, k), 1.5)
+	# A soft outline (as the HUD's type has) keeps it legible over anything.
+	var ol := Color(0, 0, 0, 0.4 * k)
+	_draw.draw_string_outline(tf, Vector2(x, y), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, 4, ol)
+	_draw.draw_string_outline(af, Vector2(x + tw, y), artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, 4, ol)
 	_draw.draw_string(tf, Vector2(x, y), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(UiKit.INK, k))
 	_draw.draw_string(af, Vector2(x + tw, y), artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 14,
 		Color(UiKit.INK_DIM, UiKit.INK_DIM.a * k))

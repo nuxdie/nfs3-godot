@@ -193,6 +193,7 @@ var _dash_mats: Array[Material] = []   # the needles' materials: [by day, lit]
 var _dash_lit_on := false
 var _paint := Color.WHITE
 var _steer_mats: Array[ShaderMaterial] = []   # the materials turning the steering wheel and the driver's hands
+var _steer_shapes: Array = []   # [MeshInstance3D, angles]: Porsche Unleashed's arms and hands, posed by blend shapes
 var _steer_shown := 0.0
 var _reverse_lights: Array[Node3D] = []
 var _reverse_xf: Transform3D     # where the reversing lamps' light cone starts, local
@@ -318,6 +319,9 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			part_mat.set_shader_parameter("steer_pivot", p.steering.pivot)
 			part_mat.set_shader_parameter("steer_axis", p.steering.axis)
 			_steer_mats.append(part_mat)
+		if p.has("steer_shapes"):
+			_steer_shapes.append([mi, p.steer_shapes])
+			_pose_steer_shapes(mi, p.steer_shapes, 0.0)
 		# Where each vertex goes in the model's own damaged copy, for CarDamage.
 		if p.has("damaged"):
 			mi.set_meta("damaged", p.damaged)
@@ -722,6 +726,18 @@ func _set_spoiler(up: bool) -> void:
 		mi.visible = up and not inside
 	for mi in _spoiler_down:
 		mi.visible = not up and not inside
+
+
+## Poses blend-shaped arms and hands for the wheel turned `angle` (their shapes' angles
+## ascending): the two shapes either side of it, weighted to sum to 1.
+static func _pose_steer_shapes(mi: MeshInstance3D, angles: PackedFloat32Array, angle: float) -> void:
+	var a := clampf(angle, angles[0], angles[angles.size() - 1])
+	var k := 0
+	while k < angles.size() - 2 and a > angles[k + 1]:
+		k += 1
+	var t := inverse_lerp(angles[k], angles[k + 1], a)
+	for i in angles.size():
+		mi.set_blend_shape_value(i, 1.0 - t if i == k else t if i == k + 1 else 0.0)
 
 
 ## Repaints the car where it stands (the menu's paint choice): every part in the skin's
@@ -1537,10 +1553,12 @@ func _process(dt: float) -> void:
 		if v > SPOILER_UP and not _spoiler_raised or v < SPOILER_DOWN and _spoiler_raised:
 			_set_spoiler(not _spoiler_raised)
 	# The driver turns his wheel as far as the in-car view's.
-	if not _steer_mats.is_empty() and wheel_turn() != _steer_shown:
+	if not (_steer_mats.is_empty() and _steer_shapes.is_empty()) and wheel_turn() != _steer_shown:
 		_steer_shown = wheel_turn()
 		for m in _steer_mats:
 			m.set_shader_parameter("steer_angle", _steer_shown)
+		for s in _steer_shapes:
+			_pose_steer_shapes(s[0], s[1], _steer_shown)
 	# Far off (or parked asleep) the wheels and body keep the pose they had.
 	if far or freeze or resting:
 		return
