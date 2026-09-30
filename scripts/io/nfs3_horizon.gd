@@ -49,6 +49,12 @@ var precip_end := 0
 var precip_fade := 0
 var precip_cycle := PackedInt32Array([0, 0, 0, 0])
 
+## High Stakes only: the glows drawn at the track's light sources (see TrackGlows), from
+## the .ini's [track glows]: 32 of {color (with alpha), blink (-1: steady; else off while
+## bit `blink` of the game tick plus `phase` is set), phase, size, on and off (ticks lit and
+## dark in turn; 0 when it doesn't cycle)}.
+var glows: Array[Dictionary] = []
+
 var panorama: Image              # PANORAMA_TILES tiles side by side, or null
 var clouds: Image
 var sun: Image                   # the sun by day, the moon (or an aurora) at night
@@ -243,6 +249,30 @@ static func from_ini(text: String) -> Nfs3Horizon:
 	h.precip_fade = maxi(int(num.call(w, "fade")), 0)
 	h.precip_cycle = PackedInt32Array([int(num.call(w, "stayTimeOn")), int(num.call(w, "fadeTimeOff")),
 		int(num.call(w, "stayTimeOff")), int(num.call(w, "fadeTimeOn"))])
+	# glowN=[alpha,r,g,b], blinks, shift, phase, size, (on s, off s), T<race-start light>
+	var g: Dictionary = sec.get("track glows", {})
+	var nums := RegEx.create_from_string("-?\\d+(\\.\\d+)?")
+	for i in 32:
+		var v: Array[float] = []
+		for m in nums.search_all(g.get("glow%d" % i, "")):
+			v.append(float(m.get_string()))
+		if v.size() < 8:
+			h.glows.append({})
+			continue
+		while v.size() < 10:   # many leave out the cycle (and T): 0
+			v.append(0.0)
+		h.glows.append({
+			"color": Color8(clampi(int(v[1]), 0, 255), clampi(int(v[2]), 0, 255), clampi(int(v[3]), 0, 255),
+				clampi(int(v[0]), 0, 255)),
+			"blink": int(v[5]) if v[4] != 0.0 else -1,
+			"phase": int(v[6]),
+			"size": v[7],
+			# The seconds are counted in the game's 64 ticks a second.
+			"on": int(v[8]) * 64 if v[8] > 0.0 and v[9] > 0.0 else 0,
+			"off": int(v[9]) * 64 if v[8] > 0.0 and v[9] > 0.0 else 0,
+		})
+	if h.glows.all(func(x: Dictionary) -> bool: return x.is_empty()):
+		h.glows.clear()
 	if l.has("AmbientRed"):
 		h.ambient = Color(num.call(l, "AmbientRed") / 100.0, num.call(l, "AmbientGreen") / 100.0,
 			num.call(l, "AmbientBlue") / 100.0)

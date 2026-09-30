@@ -100,6 +100,13 @@ static func make(preset: int, tint := Color(0, 0, 0, 0)) -> ProceduralCar:
 	return c
 
 
+## A lamp as NFS3's light dummies name it (see Nfs3Car.decode_light()).
+static func _light(dname: String, pos: Vector3) -> Dictionary:
+	var l := Nfs3Car.decode_light(dname)
+	l.pos = pos
+	return l
+
+
 static func _torque_curve(peak: float) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	for i in 41:
@@ -306,7 +313,7 @@ static func _build(p: Dictionary) -> Dictionary:
 			st.set_smooth_group(group)
 			group += 1
 			var lamp := _decal(st, p, L - 0.34, L - 0.03, 5.1, 6.9, side, HEAD_RECT)
-			lights.append({"kind": "H", "pos": lamp})
+			lights.append(_light("HFLN", lamp))
 		_box(st, Vector3(0, lerpf(f_lo, f_hi, 0.32), L + 0.004), Vector3(f_hw * 0.72, (f_hi - f_lo) * 0.16, 0.012),
 			Sw.TRIM, GRILLE_RECT, 1.0)
 	else:
@@ -315,7 +322,7 @@ static func _build(p: Dictionary) -> Dictionary:
 		for side in [1.0, -1.0]:
 			var pos := Vector3(side * f_hw * 0.66, y, L + 0.004)
 			_box(st, pos, Vector3(f_hw * 0.22, hy, 0.012), Sw.CHROME, HEAD_RECT, 1.0, side < 0.0)
-			lights.append({"kind": "H", "pos": pos})
+			lights.append(_light("HFLN", pos))
 		_box(st, Vector3(0, y, L + 0.004), Vector3(f_hw * 0.36, hy, 0.012), Sw.CHROME, GRILLE_RECT, 1.0)
 		_box(st, Vector3(0, lerpf(f_lo, f_hi, 0.22), L + 0.02), Vector3(f_hw + 0.02, (f_hi - f_lo) * 0.12, 0.035), Sw.TRIM)
 	# Tail: lamps, plate, bumper and twin exhausts.
@@ -323,7 +330,7 @@ static func _build(p: Dictionary) -> Dictionary:
 	for side in [1.0, -1.0]:
 		var pos := Vector3(side * r_hw * 0.64, ty, -L - 0.004)
 		_box(st, pos, Vector3(r_hw * 0.3, (r_hi - r_lo) * 0.1, 0.012), Sw.RED, TAIL_RECT, -1.0, side > 0.0)
-		lights.append({"kind": "T", "pos": pos})
+		lights.append(_light("TRLN", pos))
 		var ex := Vector3(side * r_hw * 0.5, r_lo + 0.02, -L - 0.02)
 		_box(st, ex, Vector3(0.045, 0.035, 0.07), Sw.CHROME)
 		_box(st, ex - Vector3(0, 0, 0.066), Vector3(0.03, 0.022, 0.006), Sw.TRIM)
@@ -356,8 +363,8 @@ static func _build(p: Dictionary) -> Dictionary:
 		_box(st, Vector3(0, y, zl), Vector3(0.1, 0.05, 0.11), Sw.TRIM)
 		_box(st, Vector3(0.3, y, zl), Vector3(0.2, 0.05, 0.1), Sw.RED)
 		_box(st, Vector3(-0.3, y, zl), Vector3(0.2, 0.05, 0.1), Sw.BLUE)
-		lights.append({"kind": "S", "pos": Vector3(0.4, y, zl)})
-		lights.append({"kind": "S", "pos": Vector3(-0.4, y, zl)})
+		lights.append(_light("SMLN", Vector3(0.4, y, zl)))
+		lights.append(_light("SMRN", Vector3(-0.4, y, zl)))
 
 	st.generate_normals()
 	var body := st.commit()

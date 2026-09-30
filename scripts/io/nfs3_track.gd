@@ -26,6 +26,7 @@ class Block:
 	var objects: Array = []     # Array[Array[Poly]] block-local scenery
 	var xobjs: Array = []       # Array[Dictionary] {ref, verts, shading, polys, anim, unmirrored}
 	var lights: PackedVector3Array = []
+	var light_types := PackedInt32Array()   # per light: its glow in the track's glow table
 
 class TexInfo:
 	var width: int
@@ -34,6 +35,7 @@ class TexInfo:
 	var is_lane: bool       # painted road marking (a sfx.fsh sprite, see _add_lane_images)
 	var additive: bool      # glows, fire, light shafts: drawn additively over the scene
 	var cutout: bool        # alpha-tested (foliage, fences, railings)
+	var translucent: bool   # see-through glass, surf: alpha-blended (set by Nfs3TrackBuilder)
 	var qfs_index: int
 
 class VRoad:
@@ -43,6 +45,12 @@ class VRoad:
 	var right: Vector3
 	var left_wall: float
 	var right_wall: float
+	## Traffic lanes either side of the centre line, and their widths (m). High Stakes
+	## records them; for NFS3 they're estimated from the paved-lane mask (see _lanes_from_profile).
+	var lanes_left := 0
+	var lanes_right := 0
+	var lane_w_left := 0.0
+	var lane_w_right := 0.0
 
 var name := ""
 var blocks: Array[Block] = []
@@ -51,6 +59,22 @@ var vroad: Array[VRoad] = []
 var col_objects: Array = []   # Array[Dictionary] {ref, verts, shading, polys}: static ones only
 var images: Array[Image] = []
 var error := ""
+var night_version := false   # High Stakes' night version of the track (lamps baked into its lighting)
+## The game's clock for animated objects and textures (High Stakes runs at 64).
+var ticks_per_second := 60.0
+## The virtual road's walls are where the game stops the car (High Stakes, whose physics
+## bounds it by each slice's drivable extents), rather than the edge of the drivable polys.
+var vroad_walls := false
+## Effect textures are light shaped by their alpha, drawn soft (High Stakes; see
+## track_soft_fx.gdshader) rather than as NFS3's glows on black.
+var soft_effects := false
+## High Stakes' track glow sprites (GameArt/sfx.fsh glw0 and glw3, see TrackGlows); empty
+## for NFS3.
+var glow_sprites: Array[Image] = []
+## The original AI's tables per virtual road node, each way round (f forward, r reverse):
+## target speeds (m/s), and in High Stakes its racing line (m right of the centre line).
+var ai_speeds := [PackedFloat32Array(), PackedFloat32Array()]
+var racing_line := [PackedFloat32Array(), PackedFloat32Array()]
 
 
 static func mirror(v: Vector3) -> Vector3:
@@ -135,9 +159,11 @@ func _has_anim_xobj(o: Dictionary) -> bool:
 # --------------------------------------------------------------------- loading
 
 ## Loads an NFS3 track folder, or a High Stakes one (see Nfs4Track) into the same data.
-static func load_dir(dir: String) -> Nfs3Track:
+static func load_dir(dir: String, night := false) -> Nfs3Track:
 	if Nfs4Track.is_track_dir(dir):
-		return Nfs4Track.load_dir(dir)
+		var hs := Nfs4Track.load_dir(dir, night)
+		hs._read_ai_tables(dir, ["spdfa.bin", "spdra.bin"], Nfs4Track.SCALE)
+		return hs
 	var t := Nfs3Track.new()
 	t.name = dir.get_file().to_lower()
 	var short := t.name.replace("k0", "")  # trk000 -> tr00
@@ -161,7 +187,103 @@ static func load_dir(dir: String) -> Nfs3Track:
 	# Lane markings aren't in the track's archive: their textures index the shared lin0-lin9
 	# sprites of gamedata/render/pc/sfx.fsh (the game's tracks folder is gamedata/tracks).
 	t._add_lane_images(Fsh.load_file(DataPath.find_ci(dir.get_base_dir().get_base_dir(), "render/pc/sfx.fsh")))
+	t._read_ai_tables(dir, ["speedsf.bin", "speedsr.bin"], 1.0)
 	return t
+
+
+## The track's mirror image (both games' "mirrored" option): every position flipped in X,
+## and each quad's corners swapped to keep it facing out, which also keeps lettering
+## (signs, banners) reading the right way round, as High Stakes' "<mirrored>" texture
+## copies do. The virtual road's right becomes the other side, its walls swap, and the
+## racing line changes sides.
+func mirror_world() -> void:
+	var done := {}   # the Polys already turned (collision objects share them)
+	for b in blocks:
+		b.center = _flip(b.center)
+		b.verts = _flip_all(b.verts)
+		b.lights = _flip_all(b.lights)
+		for p in b.road + b.lanes:
+			_turn(p, done)
+		for o in b.objects:
+			for p in o:
+				_turn(p, done)
+		for x in b.xobjs:
+			_mirror_object(x)
+	for x in col_objects:
+		_mirror_object(x)
+	for vr in vroad:
+		vr.pos = _flip(vr.pos)
+		vr.normal = _flip(vr.normal)
+		vr.forward = _flip(vr.forward)
+		vr.right = -_flip(vr.right)
+		var w := vr.left_wall
+		vr.left_wall = vr.right_wall
+		vr.right_wall = w
+		var l := vr.lanes_left
+		vr.lanes_left = vr.lanes_right
+		vr.lanes_right = l
+		w = vr.lane_w_left
+		vr.lane_w_left = vr.lane_w_right
+		vr.lane_w_right = w
+	for k in 2:
+		var line: PackedFloat32Array = racing_line[k]
+		for i in line.size():
+			line[i] = -line[i]
+		racing_line[k] = line
+
+
+static func _flip(v: Vector3) -> Vector3:
+	return Vector3(-v.x, v.y, v.z)
+
+
+static func _flip_all(vs: PackedVector3Array) -> PackedVector3Array:
+	for i in vs.size():
+		vs[i] = Vector3(-vs[i].x, vs[i].y, vs[i].z)
+	return vs
+
+
+static func _turn(p: Poly, done: Dictionary) -> void:
+	if done.has(p):
+		return
+	done[p] = true
+	p.v = PackedInt32Array([p.v[1], p.v[0], p.v[3], p.v[2]])
+
+
+## An extra object: its stored corner order says which way it winds (see the builder's
+## _mirrored), so flipping that turns its quads.
+static func _mirror_object(x: Dictionary) -> void:
+	x.ref = _flip(x.ref)
+	x.verts = _flip_all(x.verts)
+	x.unmirrored = not x.get("unmirrored", false)
+	if x.has("anim"):
+		for k: Dictionary in x.anim:
+			k.pos = _flip(k.pos)
+			var q: Quaternion = k.rot
+			k.rot = Quaternion(q.x, -q.y, -q.z, q.w)
+
+
+## The original AI's tables, forward and reverse (NFS3 speedsf/speedsr.bin, High Stakes
+## spdfa/spdra.bin): a byte per virtual road node, the target speed in mph; half a byte
+## per node of flags; and in High Stakes a float per node, the racing line's offset from
+## the centre line (+ right, its units: `scale` brings it to ours).
+func _read_ai_tables(dir: String, files: Array, scale: float) -> void:
+	var n := vroad.size()
+	for k in 2:
+		var d := FileAccess.get_file_as_bytes(DataPath.find_ci(dir, files[k]))
+		if n == 0 or d.size() < n:
+			continue
+		var speeds := PackedFloat32Array()
+		speeds.resize(n)
+		for i in n:
+			speeds[i] = d[i] * 0.44704
+		ai_speeds[k] = speeds
+		var at := n + (n + 1) / 2
+		if d.size() >= at + n * 4:
+			var line := PackedFloat32Array()
+			line.resize(n)
+			for i in n:
+				line[i] = d.decode_float(at + i * 4) * scale
+			racing_line[k] = line
 
 
 ## Appends the lane sprites the lane textures use to `images` and points them there; with
@@ -263,6 +385,7 @@ func _parse_frd(d: PackedByteArray) -> bool:
 			return false
 		for li in n_light:
 			b.lights.append(fixed(d, p + li * 16))
+			b.light_types.append(d.decode_u16(p + li * 16 + 12))
 		p += n_light * 16
 		poly_counts.append(n_poly)
 		blocks.append(b)
@@ -474,8 +597,26 @@ func _parse_col(d: PackedByteArray) -> bool:
 		vr.right = _i8vec(d, q + 24)
 		vr.left_wall = d.decode_u32(q + 28) / 65536.0
 		vr.right_wall = d.decode_u32(q + 32) / 65536.0
+		_lanes_from_profile(vr, d.decode_u16(q + 12))
 		vroad.append(vr)
 	return true
+
+
+## NFS3's virtual road has no traffic lanes, only the mask of paved "AI lanes" across the
+## road (bit 7 the first right of the centre line, bit 8 the first left; as High Stakes'
+## pavedProfile, see its AIWorld_IsDriveableLane). High Stakes' own copy of Hometown lists
+## about half the paved lanes each side as traffic lanes, each about the paved ones' width.
+static func _lanes_from_profile(vr: VRoad, profile: int) -> void:
+	var right := 0
+	while right < 8 and profile & (1 << (7 - right)):
+		right += 1
+	var left := 0
+	while left < 8 and profile & (1 << (8 + left)):
+		left += 1
+	vr.lanes_right = maxi(right / 2, 1)
+	vr.lanes_left = maxi(left / 2, 1)
+	vr.lane_w_right = clampf(vr.right_wall / maxf(right, 1.0), 3.5, 6.0)
+	vr.lane_w_left = clampf(vr.left_wall / maxf(left, 1.0), 3.5, 6.0)
 
 
 static func _i8vec(d: PackedByteArray, p: int) -> Vector3:

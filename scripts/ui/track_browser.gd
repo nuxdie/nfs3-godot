@@ -7,7 +7,6 @@ extends BrowserBase
 const REMAKES := ["hometown", "redrock", "atlantic", "rockypas", "country", "lostcany", "aquatica", "summit", "empire"]
 const GAP := 14.0
 
-var current := -1             # the track in the race setup
 var night := false
 ## (id: String, night: bool) -> Texture2D or null, and (id) -> PackedVector3Array.
 var postcard: Callable
@@ -32,8 +31,8 @@ func _init() -> void:
 	filters.set_items(chips, 0)
 
 
-func _hints() -> Array:
-	return [["←→", "BROWSE"], ["TAB", "GAME"], ["ENTER", "SELECT"], ["ESC", "BACK"]]
+func hints() -> Array:
+	return [["←→", "BROWSE"], ["TAB", "GAME"]] if filters.items.size() > 1 else [["←→", "BROWSE"]]
 
 
 func section(id: String) -> String:
@@ -153,9 +152,9 @@ func _draw_entry(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered
 		ci.draw_polyline(sp, UiKit.ACCENT if focused else Color(1, 1, 1, 0.85), 1.6, true)
 	if e.item == current:
 		var tf := UiKit.font("cond", 2)
-		var tw := tf.get_string_size("CURRENT", HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 12
+		var tw := tf.get_string_size("SELECTED", HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 12
 		ci.draw_rect(Rect2(img.position + Vector2(8, 8), Vector2(tw, 18)), UiKit.ACCENT)
-		ci.draw_string(tf, img.position + Vector2(14, 21), "CURRENT", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, UiKit.BG)
+		ci.draw_string(tf, img.position + Vector2(14, 21), "SELECTED", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, UiKit.BG)
 	if focused:
 		ci.draw_rect(img.grow(1), UiKit.ACCENT, false, 3.0)
 	elif hovered:

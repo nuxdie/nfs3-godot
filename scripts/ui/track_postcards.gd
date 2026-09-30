@@ -36,6 +36,14 @@ func get_postcard(id: String, night: bool) -> Texture2D:
 	return null
 
 
+## The picture for `id` if it has been rendered, without queueing it (the loading screen).
+static func cached(id: String, night: bool) -> Texture2D:
+	var img := Image.load_from_file(_file(id, night)) if FileAccess.file_exists(_file(id, night)) else null
+	if img == null and night and FileAccess.file_exists(_file(id, false)):
+		img = Image.load_from_file(_file(id, false))
+	return ImageTexture.create_from_image(img) if img else null
+
+
 ## Queues `id` for rendering unless it's done or queued already; `first` puts it at the front.
 func request(id: String, first := false) -> void:
 	if DisplayServer.get_name() == "headless" or FileAccess.file_exists(_file(id, false)):

@@ -2,7 +2,8 @@ extends Node3D
 ## One race session: builds the track, spawns cars, runs the countdown, tracks
 ## laps/positions, and runs the Hot Pursuit rules (cops, tickets, roadblocks).
 
-enum State { LOADING, COUNTDOWN, RACING, FINISHED }
+## INTRO: the track's own fly-by round the grid (its trNN00.can), before the countdown.
+enum State { LOADING, COUNTDOWN, RACING, FINISHED, INTRO }
 
 const COP_SPEED_TRIGGER := 33.0   # m/s (~120 km/h) - speeding near a cop starts a pursuit
 const COP_SIGHT := 60.0
@@ -12,6 +13,7 @@ const ESCAPE_DISTANCE := 380.0
 const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
 const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
+const RADIO_DB := -3.0   # the police radio, a little under the voices on the spot
 const DROWN_DEPTH := 0.3          # m under a stream or lake surface that counts as in the water
 const DROWN_TIME := 1.5           # s in the water before the car is put back on the road
 const RB_HALF := 2.4              # m, half a cruiser's length (they park across the road)
@@ -34,8 +36,14 @@ var parked_cars: Array[Car] = []
 var _parking: Array = []
 var roadblock: Array[Car] = []
 var spikes: Array[SpikeStrip] = []
+var _rb_props: Array[Node3D] = []   # High Stakes' cones, medians and flares round the roadblock
 var race_time := 0.0
 var countdown := 3.5
+const INTRO_TIME := 6.0     # s the start fly-by takes
+var _intro: CanFile
+var _intro_t := 0.0
+var _intro_xf: Transform3D
+var _intro_from := 0.0      # where along it to start (0..1): past keys inside the scenery
 var tickets := 0
 var fines := 0
 var pursuit_time := 0.0   # length of the current chase after the player
@@ -44,6 +52,8 @@ var _block_t := 0.0        # until the next roadblock may go up
 var _backup_t := 0.0       # until the next backup unit may join
 var _gap := Vector3.INF    # the way through the current roadblock
 var _rb := {}              # roadblock geometry: node, side (+1 gap to the right), w, shift range, shift
+var _heli: Helicopter      # High Stakes' helicopter, over the player from heat 2
+var _heli_data := {}       # ...its model, loaded the first time it's called in
 var _finish_order: Array = []
 var _results_dirty := false   # a car finished behind the results screen; refresh the table
 var _cut_t := -1.0            # spectating: counts down to leaving a car that's finished
@@ -53,21 +63,56 @@ var _skid_marks: SkidMarks
 var _track_mat: ShaderMaterial   # NFS3 track only: takes the night tint and headlight cones
 var _reflections: Reflections
 
+var _rival_pool := []      # the rivals' cars, picked before loading (Game.rival_pool)
+
 @onready var hud: Hud = $HUD
+## The voices: lap calls, the finish, the cops' loudhailer and radio (NFS3's speech banks).
+var speech := Speech.new()
 @onready var cam: ChaseCamera = $Camera
 
 
 func _ready() -> void:
 	hud.race = self
-	hud.show_loading("Loading " + Game.track_name(Game.track_id) + "...")
-	# Let the loading text render before the heavy lifting. The player can pause and restart
-	# or quit meanwhile, so stop if this scene has already been swapped out.
+	add_child(speech)
+	hud.show_loading()
+	# Let the loading screen render before the heavy lifting; stop if this scene has been
+	# swapped out meanwhile.
 	var tree := get_tree()
 	for k in 2:
 		await tree.process_frame
 		if not is_inside_tree():
 			return
-	_build_world()
+	# The track itself is read and built on a worker thread (as the menu's postcards are),
+	# so the loading screen keeps moving; the rest has to be done here.
+	hud.loading_stage("Reading the track", 0.04, 0.55)
+	var built := []
+	var task := WorkerThreadPool.add_task(func() -> void:
+		built.append(TrackWorld.load_track(Game.track_id, Game.night, Game.layout)))
+	while not WorkerThreadPool.is_task_completed(task):
+		await tree.process_frame
+	WorkerThreadPool.wait_for_task_completion(task)
+	if not is_inside_tree():
+		return
+	# Then the cars' files, one a frame so the screen keeps moving (reading them on the worker
+	# thread crashes now and then: something in them isn't safe off the main thread). The
+	# rivals are picked now for it.
+	_rival_pool = Game.rival_pool(_opponent_count())
+	var cars := _cars_to_load()
+	for i in cars.size():
+		hud.loading_stage("Loading the cars", 0.56 + 0.18 * i / cars.size(), 0.56 + 0.18 * (i + 1) / cars.size())
+		await tree.process_frame
+		if not is_inside_tree():
+			return
+		Game.load_car(cars[i][0], cars[i][1])
+	hud.loading_stage("Lighting the scenery", 0.76, 0.82)
+	await tree.process_frame
+	_build_world(built[0])
+	var dir := Game.track_dir(Game.track_id)
+	if dir != "":
+		cam.tv = TvCameras.load_dir(dir, Game.is_hs_track(Game.track_id))
+		cam.tv.lay_out(Game.layout_mirrored(), Game.layout_reversed(), path.size())
+		cam.tv_path = path
+	hud.loading_stage("Putting the cars on the grid", 0.84, 0.97)
 	# Let the physics space pick up the track collision so spawn points can be ray-checked.
 	for k in 2:
 		await tree.physics_frame
@@ -85,13 +130,80 @@ func _ready() -> void:
 	if Game.mode == Game.Mode.FREE_ROAM:
 		_go()
 	else:
+		_start_intro()
+
+
+## The track's start fly-by, if it has one and it's wanted; else straight to the countdown.
+## Its keys circle the player's car looking at it, but which way the files' "ahead" runs
+## isn't settled (NFS3 and High Stakes seem to differ), so each fly-by is tried both ways
+## round and the one that keeps the car in sight best is flown; none if all fly through
+## the scenery.
+func _start_intro() -> void:
+	var dir := Game.track_dir(Game.track_id)
+	var list: Array[CanFile] = []
+	if Game.intro_flyby and dir != "":
+		list = CanFile.intros(dir, Game.is_hs_track(Game.track_id))
+	if Game.layout_mirrored():
+		for c in list:
+			for k in c.keys:
+				k.pos = Vector3(-k.pos.x, k.pos.y, k.pos.z)
+	var best := 0.35   # the most keys that may lose sight of the car
+	_intro = null
+	var space := get_world_3d().direct_space_state
+	var look := player.global_position + Vector3.UP * 0.6
+	# The ground, walls and buildings (and what the chase camera keeps out of).
+	var mask := 1 | Nfs3TrackBuilder.SCENERY_LAYER | Nfs3TrackBuilder.CAMERA_LAYER
+	for c: CanFile in list:
+		for yaw in [0.0, PI]:
+			var xf := player.global_transform.rotated_local(Vector3.UP, yaw)
+			var blocked := 0
+			var first_clear := -1
+			for i in c.keys.size():
+				# Both ways: a ray starting inside a building doesn't hit its walls.
+				var at := xf * (c.keys[i].pos as Vector3)
+				var hit := not space.intersect_ray(PhysicsRayQueryParameters3D.create(at, look, mask)).is_empty() \
+					or not space.intersect_ray(PhysicsRayQueryParameters3D.create(look, at, mask)).is_empty()
+				blocked += int(hit)
+				if not hit and first_clear < 0:
+					first_clear = i
+			var share := float(blocked) / c.keys.size()
+			if share < best:
+				best = share
+				_intro = c
+				_intro_xf = xf
+				_intro_from = float(first_clear) / (c.keys.size() - 1)
+	if _intro == null:
 		state = State.COUNTDOWN
+		return
+	_intro_t = 0.0
+	cam.set_physics_process(false)
+	state = State.INTRO
+	hud.flash(Game.track_name(Game.track_id), INTRO_TIME * 0.6)
+
+
+## Flies the camera along the fly-by, round the player's car on the grid, looking at it.
+## Throttle, handbrake or Enter skips to the countdown.
+func _update_intro(dt: float) -> void:
+	_intro_t += dt
+	var f := _intro_t / INTRO_TIME
+	var skip := Input.is_action_just_pressed("accelerate") or Input.is_action_just_pressed("handbrake") \
+		or Input.is_action_just_pressed("ui_accept")
+	if f >= 1.0 or skip:
+		cam.set_physics_process(true)
+		state = State.COUNTDOWN
+		return
+	# Easing out into the chase view where it ends.
+	cam.global_position = _intro_xf * _intro.position_at(lerpf(_intro_from, 1.0, 1.0 - pow(1.0 - f, 1.6)))
+	var look := player.global_position + Vector3.UP * 0.6
+	if cam.global_position.distance_to(look) > 0.2:
+		cam.look_at(look, Vector3.UP)
 
 
 # ------------------------------------------------------------------ world
 
-func _build_world() -> void:
-	var world := TrackWorld.load_track(Game.track_id)
+## The track (TrackWorld.load_track, built off the main thread) into the scene, with its
+## sky, weather and reflections.
+func _build_world(world: TrackWorld) -> void:
 	if Game.quality == Game.Quality.LOW:
 		_trim_draw_distance(world.root)
 		_merge_land(world.root)
@@ -200,9 +312,9 @@ static func _trim_draw_distance(root: Node) -> void:
 			g.visibility_range_end *= LOW_SCENERY_RANGE
 
 
-func _make_car(data: Object, tint := Color(0, 0, 0, 0)) -> Car:
+func _make_car(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> Car:
 	var c := Car.new()
-	c.setup(data, tint)
+	c.setup(data, tint, upgrade)
 	# At night every car's headlights light the other cars; weak GPUs keep just the player's.
 	c.set_headlight_beam(Game.night and Game.quality != Game.Quality.LOW)
 	if _skid_marks == null:
@@ -242,13 +354,41 @@ func _ground_offset(n: int, offset: float) -> float:
 	return 0.0
 
 
+func _opponent_count() -> int:
+	match Game.mode:
+		Game.Mode.SINGLE_RACE, Game.Mode.SPECTATE, Game.Mode.HOT_PURSUIT:
+			return Game.opponents
+	return 0
+
+
+## [path, preset] of every car _spawn_cars can put on the track, for Game.load_car to read
+## ahead on the loading thread: yours, the rivals', and the police and traffic models.
+func _cars_to_load() -> Array:
+	var out := [[Game.cars[Game.car_index].path, Game.car_index]]
+	var rivals := Game.circuit_rivals() if not Game.circuit_run.is_empty() else []
+	for r in rivals:
+		out.append([Game.cars[r.car].path, r.car])
+	if rivals.is_empty() and not _rival_pool.is_empty():
+		for k in _opponent_count():
+			var ci: int = _rival_pool[k % _rival_pool.size()]
+			out.append([Game.cars[ci].path, ci])
+	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
+		for m in Game.cop_models():
+			out.append([m, 3])
+	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
+		for m in Game.traffic_models():
+			out.append([m, 4])
+	return out
+
+
 func _spawn_cars() -> void:
 	var start := 0
 	var half_w := minf(path.left_width[start], path.right_width[start])
 	var col := clampf(half_w * 0.4, 1.8, 3.5)
 
 	# Player (in spectate mode an AI racer drives it, and `player` is whichever car is watched)
-	player = _make_car(Game.player_car_data())
+	var player_data := Game.player_car_data()
+	player = _make_car(player_data, Game.paint_tint(Game.car_index, player_data), Game.upgrade_of(Game.car_index))
 	player.is_player = true
 	player.set_headlight_beam(true, true)
 	if spectating():
@@ -266,20 +406,22 @@ func _spawn_cars() -> void:
 	hud.player = player
 
 	var grid: Array[Car] = [player]
-	var n_opp := 0
-	match Game.mode:
-		Game.Mode.SINGLE_RACE, Game.Mode.SPECTATE:
-			n_opp = Game.opponents
-		Game.Mode.HOT_PURSUIT:
-			n_opp = mini(Game.opponents, 1)
-	# Opponents come from the regular cars, not the police-liveried "Pursuit" versions.
-	var pool := range(Game.cars.size()).filter(func(ci: int) -> bool:
-		return ci != Game.car_index and not Game.cars[ci].name.begins_with("Pursuit"))
-	pool.shuffle()
+	var n_opp := _opponent_count()
+	var pool := _rival_pool
+	# A tournament's circuit races the same field every race (less those knocked out).
+	var rivals := Game.circuit_rivals() if not Game.circuit_run.is_empty() else []
+	if not rivals.is_empty():
+		n_opp = rivals.size()
+	player.set_meta("circuit_key", "you")
 	for k in n_opp:
 		var data: Object
 		var tint := Color(0, 0, 0, 0)
-		if pool.is_empty():
+		if not rivals.is_empty():
+			var ci: int = rivals[k].car
+			data = Game.load_car(Game.cars[ci].path, ci)
+			if data.colours.size() > 1:
+				tint = data.colours[(rivals[k].key * 3 + 1) % data.colours.size()]
+		elif pool.is_empty():
 			data = Game.player_car_data()
 			tint = Color.from_hsv(randf(), 0.6, 1.0)
 		else:
@@ -287,12 +429,16 @@ func _spawn_cars() -> void:
 			data = Game.load_car(Game.cars[ci].path, ci)
 			if data.colours.size() > 1:
 				tint = data.colours[randi() % data.colours.size()]
-		var ai_car := _make_car(data, tint)
+		var ai_car := _make_car(data, tint, rivals[k].upgrade if not rivals.is_empty() else Game.rival_upgrade())
 		var ai := AIController.new()
 		ai.role = AIController.Role.RACER
 		ai.path = path
 		ai.skill = randf_range(0.9, 1.05)
+		if not rivals.is_empty():
+			ai_car.set_meta("circuit_key", rivals[k].key)
+			ai.skill = Game.circuit_skill() * randf_range(0.97, 1.03)
 		ai_car.add_child(ai)
+		ai_car.add_child(CarAudio.new())
 		grid.append(ai_car)
 	# Player starts at the back, like the original.
 	grid.reverse()
@@ -342,8 +488,9 @@ func _cop_data(i: int) -> Object:
 
 
 ## Cruisers spread round the track: all but one parked on the verge, the last on patrol.
+## A pursuit gets four, and one more for every two rivals past the first.
 func _spawn_cops() -> void:
-	var n_cops := 4 if Game.mode == Game.Mode.HOT_PURSUIT else 2
+	var n_cops := 4 + maxi(_opponent_count() - 1, 0) / 2 if Game.mode == Game.Mode.HOT_PURSUIT else 2
 	for i in n_cops:
 		var node := path.idx(int(path.size() * (i + 0.6) / n_cops))
 		var cop := _make_cop(i)
@@ -370,16 +517,20 @@ func _make_cop(i: int) -> Car:
 	ai.cruise_speed = 22.0
 	cop.add_child(ai)
 	var au := CarAudio.new()
-	au.volume_db = -6.0
+	au.volume_db = -2.0   # with CarAudio.OTHERS_DB, 6 dB under the player
 	cop.add_child(au)
 	return cop
 
 
+## The traffic: the original's own cars (or stand-ins), spread along the road either side
+## of the start in both directions and the lanes each way, from then on kept around the
+## racers (_update_traffic).
 func _spawn_traffic() -> void:
 	var count := 8 if Game.mode != Game.Mode.FREE_ROAM else 12
+	var models := Game.traffic_models()
+	var start: int = player_racer().node
 	for i in count:
 		var data: Object
-		var models := Game.traffic_models()
 		if models.size() > 0:
 			data = Game.load_car(models[randi() % models.size()], 4)
 		else:
@@ -388,38 +539,116 @@ func _spawn_traffic() -> void:
 		var ai := AIController.new()
 		ai.role = AIController.Role.TRAFFIC
 		ai.path = path
-		ai.reverse_dir = i % 2 == 1
-		ai.cruise_speed = randf_range(16.0, 24.0)
-		var node := path.idx(int(path.size() * (i + 0.3) / count))
-		# Keep to a normal lane even where the walls are far apart (open ground, verges).
-		var lane_w := clampf(minf(path.left_width[node], path.right_width[node]) * 0.4, 2.5, 4.5)
-		ai.lane = _ground_offset(node, -lane_w if ai.reverse_dir else lane_w)
+		ai.cruise_speed = 40.0   # the speed limit sets its pace (AIController.traffic_speed)
+		ai.drive_side = TrafficRules.drive_side(Game.track_id)
+		ai.traffic_lane = 1
 		tc.add_child(ai)
-		var xf := path.transform_at(node, ai.lane, 0.0)
-		if ai.reverse_dir:
-			xf = xf.rotated_local(Vector3.UP, PI)
-		tc.reset_to(xf)
+		tc.add_child(CarAudio.new())
 		traffic_cars.append(tc)
+		# Alternately ahead and behind, further out each pair, clear of the grid.
+		var approach := 1 if i % 2 == 0 else -1
+		var metres := lerpf(140.0, TrafficRules.SPAWN_MAX, float(i / 2) / maxf(count / 2 - 1, 1.0))
+		for k in 6:
+			if _place_traffic(tc, player, start, approach, metres + k * 25.0, false, k == 5):
+				break
+
+
+## Puts traffic car `tc` down `metres` along the road ahead of (`approach` +1) or behind
+## (-1) node `from`, heading either way in one of the lanes on its side of the road there,
+## in play for racer `basis`. `moving`: at its cruising speed, and only out of the racers'
+## and the camera's sight. Returns false, moving nothing, if the spot won't do (with `force`,
+## any spot will).
+func _place_traffic(tc: Car, basis: Car, from: int, approach: int, metres: float, moving: bool, force := false) -> bool:
+	var ai := _controller(tc)
+	var n := path.ahead(from, approach, metres)
+	var dir := 1 if randf() < 0.5 else -1
+	var side := ai.drive_side * dir
+	var k := 1 + randi() % path.lane_count(n, side)
+	var off := _ground_offset(n, path.lane_offset(n, side, k))
+	var xf := path.transform_at(n, off, 0.0)
+	if _car_near(tc, xf.origin, 14.0) and not force:
+		return false
+	if moving:
+		var cam := get_viewport().get_camera_3d()
+		if cam and cam.global_position.distance_to(xf.origin) < TrafficRules.SPAWN_MIN * 0.75:
+			return false
+		for r in racers:
+			if r.car.global_position.distance_to(xf.origin) < TrafficRules.SPAWN_MIN * 0.6:
+				return false
+	if dir < 0:
+		xf = xf.rotated_local(Vector3.UP, PI)
+	ai.reverse_dir = dir < 0
+	ai.traffic_lane = k
+	ai.lane = off
+	ai.speed_factor = TrafficRules.SPEED_FACTORS.pick_random()
+	ai.basis = basis
+	ai.put_down(xf, n, minf(ai.traffic_speed(n, dir), 20.0) if moving else 0.0)
+	return true
+
+
+var _traffic_t := 0.0
+
+## Keeps the traffic where the racers are, as the original's AILife does: each car is in
+## play for the racer nearest it, and one that has dropped out of every racer's reach is
+## brought back further up the road from one of them (the player, half the time), in front
+## of a fast one, heading either way.
+func _update_traffic(dt: float) -> void:
+	_traffic_t -= dt
+	if _traffic_t > 0.0 or traffic_cars.is_empty():
+		return
+	_traffic_t = 0.5
+	var cam := get_viewport().get_camera_3d()
+	for tc in traffic_cars:
+		if not is_instance_valid(tc):
+			continue
+		var p := tc.global_position
+		var near: Car = null
+		var d := INF
+		for r in racers:
+			var dr: float = r.car.global_position.distance_to(p)
+			if dr < d:
+				d = dr
+				near = r.car
+		var ai := _controller(tc)
+		ai.basis = near
+		if d < TrafficRules.LIVE or cam and cam.global_position.distance_to(p) < TrafficRules.LIVE:
+			continue
+		var r: Dictionary = player_racer() if randf() < 0.5 else racers.pick_random()
+		var along: float = r.car.linear_velocity.dot(path.forward(r.node))
+		var approach := 1 if randf() < 0.5 else -1
+		if absf(along) > TrafficRules.FAST:
+			approach = 1 if along > 0.0 else -1
+		_place_traffic(tc, r.car, r.node, approach, randf_range(TrafficRules.SPAWN_MIN, TrafficRules.SPAWN_MAX), true)
 
 
 # ------------------------------------------------------------------ loop
 
 func _physics_process(dt: float) -> void:
 	match state:
+		State.INTRO:
+			_update_intro(dt)
 		State.COUNTDOWN:
+			var before := countdown
 			countdown -= dt
+			# "Three", "two", "one" as the numbers come up (and "go" in _go).
+			for n in [3, 2, 1]:
+				if before > n and countdown <= n:
+					_say_count(3 - n)
 			hud.set_countdown(countdown)
 			if countdown <= 0.0:
 				_go()
 		State.RACING:
 			race_time += dt
 			_update_progress()
+			_call_place(dt)
 			_update_pursuit(dt)
+			_update_traffic(dt)
 			_check_resets(dt)
 		State.FINISHED:
 			# The rest of the field races on behind the results screen, on the same clock.
 			race_time += dt
 			_update_progress()
+			_update_traffic(dt)
 			_check_resets(dt)
 	if Input.is_action_just_pressed("reset_car") and state == State.RACING and not spectating():
 		_respawn(player)
@@ -528,6 +757,16 @@ func _go() -> void:
 		_controller(c).enabled = true
 	if Game.mode != Game.Mode.FREE_ROAM:
 		hud.flash("GO!", 1.0, "go")
+		_say_count(3)
+
+
+## NFS3's countdown voice: 0 "three" .. 3 "go".
+func _say_count(i: int) -> void:
+	if Game.mode == Game.Mode.FREE_ROAM:
+		return
+	var s := GameSounds.shared()
+	if s and s.countdown:
+		GameSounds.say(self, s.countdown.stream(i))
 
 
 func _update_progress() -> void:
@@ -567,6 +806,11 @@ func _lap_done(r: Dictionary) -> void:
 		return
 	var lap_time: float = race_time - r.lap_start
 	r.lap_start = race_time
+	if not r.has("cross"):
+		r.cross = {}
+	r.cross[r.lap] = race_time
+	if r.car == player and r.lap >= 2 and lap_time < r.best and Game.mode != Game.Mode.FREE_ROAM and r.lap < Game.laps:
+		speech.say("lapeng", [0, 1, 2])
 	r.best = minf(r.best, lap_time)
 	if r.car == player and Game.mode != Game.Mode.FREE_ROAM:
 		hud.flash("Lap %s" % Hud.fmt_time(lap_time), 2.0)
@@ -589,11 +833,108 @@ func _lap_done(r: Dictionary) -> void:
 			elif state == State.FINISHED:
 				_results_dirty = true
 		elif r.car == player:
+			_say_place(_finish_order.size())
 			_end_race(false)
 		elif state == State.FINISHED:
 			_results_dirty = true
 	elif r.car == player and r.lap == Game.laps - 1:
 		hud.flash("FINAL LAP", 2.0)
+		speech.say("lapeng", [5, 6])
+	elif r.car == player and r.lap + 1 <= 7:
+		speech.say("lapeng", r.lap + 6)   # 7 is "lap 2"
+	if r.car == player and not r.finished:
+		_say_gap(r)
+
+
+var _said_place := 0      # the place last announced (0: none yet)
+var _place_t := 0.0       # s the player has held a new place
+var _place_cool := 0.0    # s until another place may be called
+
+
+## The co-driver calls a new place once it's held 1.5 s: "second place!", "you're in the lead!".
+func _call_place(dt: float) -> void:
+	if racers.size() < 2 or Game.mode == Game.Mode.FREE_ROAM:
+		return
+	_place_cool -= dt
+	var p := position_of(player)
+	if _said_place == 0:
+		_said_place = p   # the grid position goes unsaid
+	if p == _said_place:
+		_place_t = 0.0
+		return
+	_place_t += dt
+	if _place_t < 1.5 or _place_cool > 0.0 or speech.busy():
+		return
+	_said_place = p
+	_place_cool = 6.0
+	if p == 1:
+		speech.say("vocasst", [1, 10, 11])
+	elif p == racers.size():
+		speech.say("vocasst", 8)   # "last place!"
+	else:
+		speech.say("vocasst", p if p < 8 else 9)
+
+
+## At the line, behind: how far the leader is ahead ("you're 3 seconds back", "you're way behind").
+func _say_gap(r: Dictionary) -> void:
+	var lead := INF
+	for o in racers:
+		if o != r and o.has("cross") and o.cross.has(r.lap):
+			lead = minf(lead, o.cross[r.lap])
+	if lead == INF:
+		return   # nobody's crossed ahead: leading
+	var gap := roundi(race_time - lead)
+	if gap < 1:
+		return
+	speech.say("vocasst", 16 + gap if gap <= 12 else [29, 30])   # 17 is "one second back"
+
+
+## "You placed first!" .. "You placed last."
+func _say_place(place: int) -> void:
+	if place == 1:
+		speech.say("lapeng", [16, 17, 18])
+	elif place == racers.size():
+		speech.say("lapeng", 28)
+	elif place <= 3:
+		speech.say("lapeng", [17 + place, 18 + place] if place == 2 else [21, 22])
+	elif place <= 8:
+		speech.say("lapeng", 19 + place)   # 23 is fourth
+
+
+## The dispatcher's voice for this track (NFS3 recorded one for each of its pursuit tracks,
+## with the officers' three voices, a to c; other tracks borrow Hometown's).
+func _dispatch() -> String:
+	return "disp%02d" % _radio_track()
+
+
+## A cop's radio voice: offNN + a..c, the same one for the same car.
+func _officer(cop: Car) -> String:
+	var i := maxi(cops.find(cop), 0)
+	return "off%02d%s" % [_radio_track(), ["a", "b", "c"][i % 3]]
+
+
+func _radio_track() -> int:
+	var n := Game.track_id.trim_prefix("trk").to_int() if Game.track_id.begins_with("trk") else -1
+	return n if n in [0, 1, 2, 3, 8] else 0
+
+
+## A cop joining the chase calls in ("<unit> to County"), the dispatcher answers ("go ahead,
+## unit <unit>": the same eight units, in the same order, in both banks) and he reports
+## `report` (an officer patch or list).
+func _radio_call(cop: Car, report: Variant) -> void:
+	var unit := maxi(cops.find(cop), 0) % 8
+	speech.say(_officer(cop), 16 + unit, RADIO_DB)
+	speech.say(_dispatch(), 36 + unit, RADIO_DB)
+	speech.say(_officer(cop), report, RADIO_DB)
+
+
+## "He's going more than 100 / 120 / 140 / 160" (mph), or "here he comes" below that.
+func _speed_call() -> Variant:
+	var mph := absf(player.speed) * 2.237
+	for k in [3, 2, 1, 0]:
+		if mph > [100, 120, 140, 160][k]:
+			return 60 + k
+	return [36, 37, 39]
 
 
 func _end_race(arrested: bool) -> void:
@@ -624,7 +965,44 @@ func _end_race(arrested: bool) -> void:
 	var extra := ""
 	if Game.mode == Game.Mode.HOT_PURSUIT:
 		extra = "Tickets: %d   Fines: $%d" % [tickets, fines]
+	if not Game.circuit_run.is_empty():
+		_end_circuit_race(title, rows)
+		return
 	hud.show_results(title, rows, extra)
+
+
+## A tournament race over: its points and standings, then on to the next race, or the
+## circuit's result and prize.
+func _end_circuit_race(title: String, rows: Array) -> void:
+	var cars_in_order: Array = racers.map(func(r): return r.car)
+	cars_in_order.sort_custom(func(a: Car, b: Car) -> bool: return position_of(a) < position_of(b))
+	var order := cars_in_order.map(func(c: Car) -> Variant: return c.get_meta("circuit_key", "you"))
+	var run := Game.circuit_run
+	var outcome := Game.circuit_race_done(order)
+	var standings := PackedStringArray()
+	for s: Array in outcome.standings:
+		var who: String = "You" if s[0] is String else Game.cars[run.field[s[0]].car].name
+		standings.append("%s %d" % [who, s[1]])
+	var extra := "Points:  " + "  ·  ".join(standings.slice(0, 4))
+	if outcome.message != "":
+		extra = outcome.message + "   " + extra
+	var actions := []
+	if outcome.done:
+		title = "CIRCUIT %s" % ("WON" if outcome.place == 1 else "OVER: %s" % Hud.ordinal(outcome.place))
+		extra = ("Prize $%d   " % outcome.prize if outcome.prize > 0 else "") + "Money $%d   " % Game.career_money + extra
+		actions = [["Main menu", func() -> void:
+			Game.circuit_run = {}
+			hud.quit()]]
+	else:
+		var c: Dictionary = Game.career_data().circuits[run.circuit]
+		actions = [["Race %d of %d" % [run.race + 1, c.races.size()], func() -> void:
+			Game.next_circuit_race()
+			get_tree().paused = false
+			get_tree().reload_current_scene()],
+			["Quit circuit", func() -> void:
+			Game.circuit_run = {}
+			hud.quit()]]
+	hud.show_results(title, rows, extra, actions)
 
 
 ## The leaderboard in its current order; also kept in Game.last_results.
@@ -643,7 +1021,7 @@ func spectating() -> bool:
 	return Game.mode == Game.Mode.SPECTATE
 
 
-## Spectate mode: moves the camera (and the HUD, engine sound and reflections with it) to the
+## Spectate mode: moves the camera (and the HUD and reflections with it) to the
 ## racer `step` places behind (+1) or ahead (-1) of the one being watched.
 ## Spectating: cuts away from a car that's finished to the best-placed one still racing. The
 ## results only come up once the whole field is home; until then the tower shows who's finished.
@@ -672,10 +1050,7 @@ func _watch(car: Car) -> void:
 	player = car
 	player.is_player = true
 	player.set_headlight_beam(true, true)
-	for ch in old.get_children():
-		if ch is CarAudio:
-			ch.reparent(player, false)
-			ch.car = player
+	# Each racer has its own CarAudio: the watched one's switches to its full engine (is_player).
 	cam.target = player
 	_reflections.retarget(player)
 	hud.player = player
@@ -709,6 +1084,7 @@ func _update_pursuit(dt: float) -> void:
 				_stop_chase(cop)
 				if was_player and _chasers(player).is_empty():
 					hud.flash("Evaded", 1.5)
+					speech.say(_officer(cop), [32, 33, 34, 35], RADIO_DB)
 		else:
 			var speeder := _speeder_near(cop)
 			if speeder:
@@ -720,6 +1096,9 @@ func _update_pursuit(dt: float) -> void:
 		pursuit_time = 0.0
 		heat = 0
 		_dismiss_backup()
+		if is_instance_valid(_heli):
+			_heli.leave()
+		_heli = null
 	else:
 		pursuit_time += dt
 		var h := mini(1 + int(pursuit_time / HEAT_STEP), 3)
@@ -735,6 +1114,8 @@ func _update_pursuit(dt: float) -> void:
 		_block_t -= dt
 		if heat >= 2 and roadblock.is_empty() and _block_t <= 0.0:
 			_spawn_roadblock(heat >= 3)
+		if heat >= 2 and _heli == null:
+			_call_helicopter()
 
 	# Busted: stopped with a cop right on you. Rivals get held up; the player gets a ticket.
 	for r in racers:
@@ -786,6 +1167,8 @@ func _start_chase(cop: Car, target: Car) -> void:
 	ai.chase_slot = _chasers(target).size() % 2
 	if target == player and ai.chase_slot == 0 and _chasers(target).is_empty():
 		hud.flash("PURSUIT!", 1.5, "alert")
+		speech.say("copspch", range(10))
+		_radio_call(cop, _speed_call())
 	ai.target = target
 	ai.chasing = true
 	cop.enable_siren(true)
@@ -806,20 +1189,26 @@ func _stop_chase(cop: Car) -> void:
 
 func _bust() -> void:
 	tickets += 1
+	var arresting: Car = _chasers(player)[0] if not _chasers(player).is_empty() else null
+	_send_officer(_chasers(player), player)
 	for cop in _chasers(player):
 		_stop_chase(cop)
 	player_racer().cool = 10.0
 	if Game.mode == Game.Mode.HOT_PURSUIT and tickets >= MAX_TICKETS:
 		hud.flash("BUSTED - you're under arrest!", 3.0, "alert")
+		speech.say("copspch", [32, 33, 34])
+		speech.say(_officer(arresting), [44, 45, 46, 47], RADIO_DB)
 		_end_race(true)
 		return
 	var fine: int = TICKET_FINES[mini(tickets - 1, TICKET_FINES.size() - 1)]
 	fines += fine
 	hud.flash("BUSTED! Ticket #%d - $%d fine" % [tickets, fine], 3.0, "alert")
+	speech.say("copspch", 19 if Game.mode == Game.Mode.HOT_PURSUIT and tickets == MAX_TICKETS - 1 else [16, 17, 18])
 
 
 ## A rival pulled over: it sits out a few seconds while the cop writes the ticket.
 func _bust_rival(r: Dictionary) -> void:
+	_send_officer(_chasers(r.car), r.car)
 	for cop in _chasers(r.car):
 		_stop_chase(cop)
 	r.cool = RIVAL_HOLD + 8.0
@@ -831,6 +1220,56 @@ func _bust_rival(r: Dictionary) -> void:
 	get_tree().create_timer(RIVAL_HOLD, false, true).timeout.connect(func() -> void:
 		if is_instance_valid(ai):
 			ai.enabled = true)
+
+
+## The nearest of `chasers` that carries an officer (High Stakes' cruisers) sends him to
+## `busted`'s window; the cruiser waits for him to get back in.
+func _send_officer(chasers: Array[Car], busted: Car) -> void:
+	# NFS3's cruisers carry no officer: High Stakes' generic one (GameArt cop0) gets out of those.
+	var generic := Game.hs_prop("cop0")
+	var cop: Car = null
+	for c in chasers:
+		if (c.officer_mesh or generic) and (cop == null or c.global_position.distance_to(busted.global_position)
+				< cop.global_position.distance_to(busted.global_position)):
+			cop = c
+	if cop == null:
+		return
+	var o := Officer.new()
+	add_child(o)
+	o.setup(cop.officer_mesh if cop.officer_mesh else generic, cop, busted)
+	var ai := _controller(cop)
+	if ai:
+		ai.enabled = false
+		o.done.connect(func() -> void:
+			if is_instance_valid(ai):
+				ai.enabled = true)
+
+
+## High Stakes' helicopter joins the chase, flying in from behind.
+func _call_helicopter() -> void:
+	if Game.hs_helicopter == "":
+		return
+	if _heli_data.is_empty():
+		_heli_data = Fce4.load_helicopter(Game.hs_helicopter)
+		if _heli_data.is_empty():
+			Game.hs_helicopter = ""
+			return
+	_heli = Helicopter.new()
+	add_child(_heli)
+	var at := player.global_transform * Vector3(0, 60.0, -180.0)
+	_heli.setup(_heli_data, player, at, Game.night)
+	hud.flash("Air support!", 1.5, "alert")
+	# On the radio: it calls in, the dispatcher answers, it's on its way; then it finds him.
+	var air := randi() % 3   # Air One, Air 3, Rotor 1
+	speech.say("helicop", air, RADIO_DB)
+	speech.say(_dispatch(), 44 + air, RADIO_DB)
+	speech.say("helicop", [34, 35, 36, 37], RADIO_DB)
+	get_tree().create_timer(8.0, false).timeout.connect(func() -> void:
+		if is_instance_valid(_heli) and state == State.RACING:
+			speech.say("helicop", [69, 70, 73, 76], RADIO_DB)
+			var mph := absf(player.speed) * 2.237
+			if mph > 100.0:
+				speech.say("helicop", 96 + mini(int((mph - 100.0) / 20.0), 9), RADIO_DB))
 
 
 ## Called in from further back up the road, already on the player's tail.
@@ -917,6 +1356,8 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 	# its centre), where there's road even when the walls are far apart. They also steer around
 	# the cruisers like any other car.
 	var gap_lane := (0.05 * w + 3.9) * gap_side
+	if Game.is_hs_track(Game.track_id):
+		_rb_props = RoadblockProps.build(self, path, n, gap_side, w, reach_gap, reach_far, Game.night)
 	_add_obstacles(roadblock)
 	for r in racers:
 		r.erase("rb_pick")
@@ -941,6 +1382,11 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 		strip.punctured.connect(_on_punctured)
 		spikes.append(strip)
 	hud.flash("Roadblock ahead!" if not with_spikes else "Roadblock - spikes!", 2.0, "alert")
+	# The officer asks, the dispatcher clears it, the officer reports it done.
+	var off := _officer(cops[0] if not cops.is_empty() else null)
+	speech.say(off, [55, 56] if with_spikes else [51, 52], RADIO_DB)
+	speech.say(_dispatch(), [52, 53] if with_spikes else [58, 59], RADIO_DB)
+	speech.say(off, [57, 58, 59] if with_spikes else [53, 54], RADIO_DB)
 
 
 ## The roadblock pair shuffles across the road to cover the line of the racer bearing down
@@ -1023,8 +1469,12 @@ func _clear_roadblock() -> void:
 			c.queue_free()
 		for sp in spikes:
 			sp.queue_free()
+		for p in _rb_props:
+			if is_instance_valid(p):
+				p.queue_free()
 		roadblock.clear()
 		spikes.clear()
+		_rb_props.clear()
 		_rb = {}
 		_gap = Vector3.INF
 		for cop in cops:
@@ -1122,16 +1572,22 @@ func _respawn(c: Car, past_blockage := false) -> void:
 	# Wedged against something: put it down beyond it, or it drives straight back into it.
 	if past_blockage:
 		n = path.ahead(n, dir, 12.0)
-	# Near the middle of the road: an overtaking line far out can be over a verge or a drop.
-	var lane := clampf(ai.lane, -3.5, 3.5) if ai else 0.0
+	# In the lane it was in (the centre line can have a median, lamp posts or pillars on it),
+	# but not far out: an overtaking line can be over a verge or a drop.
+	var lane := clampf(ai.lane if ai else path.lateral(c.global_position, n), -3.5, 3.5)
+	if absf(lane) < 1.5:
+		lane = 2.5 * dir if lane == 0.0 else signf(lane) * 2.5
 	# Put it down clear of other cars (a parked roadblock, a pile-up) and of solid scenery
-	# standing on the road, trying other lanes and moving up the road if need be.
+	# standing on the road, trying other lanes and moving up the road if need be. The middle
+	# of the road is the last resort.
 	var spot := n
 	var off := _ground_offset(n, lane)
 	var found := false
 	var m := n
 	for k in 12:
-		for l: float in [lane, 0.0, -3.0, 3.0]:
+		var clear := path.free_offset(m, path.ahead(m, dir, 6.0), dir, lane, lane,
+			-minf(path.left_width[m], 3.5), minf(path.right_width[m], 3.5))
+		for l: float in [clear, lane, -lane, 0.0]:
 			var o := _ground_offset(m, l)
 			var pos := path.transform_at(m, o, 0.0)
 			if not _car_near(c, pos.origin, 5.0) and not _blocked(c, pos):
@@ -1153,15 +1609,16 @@ func _respawn(c: Car, past_blockage := false) -> void:
 
 
 ## Whether a car put down at `xf` (a point on the road surface) would be inside something
-## solid: a tree, pillar or building standing on the road. The box starts clear of the road
-## surface itself so it only catches things sticking up out of it.
+## solid: a tree, pillar or building standing on the road, or another car's body (a bus or a
+## truck is far longer than _car_near's radius). The box starts clear of the road surface
+## itself so it only catches things sticking up out of it.
 func _blocked(me: Car, xf: Transform3D) -> bool:
 	var box := BoxShape3D.new()
 	box.size = Vector3(2.6, 1.6, 5.5)
 	var q := PhysicsShapeQueryParameters3D.new()
 	q.shape = box
 	q.transform = xf.translated_local(Vector3.UP * 1.3)
-	q.collision_mask = 1 | Nfs3TrackBuilder.SCENERY_LAYER
+	q.collision_mask = 1 | 2 | Nfs3TrackBuilder.SCENERY_LAYER
 	q.exclude = [me.get_rid()]
 	for hit in get_world_3d().direct_space_state.intersect_shape(q, 4):
 		var body := hit.collider as Node
@@ -1170,8 +1627,14 @@ func _blocked(me: Car, xf: Transform3D) -> bool:
 	return false
 
 
+## Whether another car is at `pos`, or will be within the next second or so (traffic
+## bearing down on the spot would plough straight into the car put down there).
 func _car_near(me: Car, pos: Vector3, radius: float) -> bool:
 	for o in racers.map(func(r): return r.car) + traffic_cars + cops + roadblock:
-		if o != me and is_instance_valid(o) and o.global_position.distance_to(pos) < radius:
+		if o == me or not is_instance_valid(o):
+			continue
+		var p: Vector3 = o.global_position
+		var ahead: Vector3 = p + o.linear_velocity * 1.5
+		if Geometry3D.get_closest_point_to_segment(pos, p, ahead).distance_to(pos) < radius:
 			return true
 	return false

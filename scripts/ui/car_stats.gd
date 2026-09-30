@@ -13,30 +13,33 @@ var _readout := ["", "", "", ""]
 var spec := ""
 
 
-## Normalised 0..1 ratings against the spread of the stock NFS3 cars.
-static func ratings(data: Object) -> Array:
-	var top_kmh: float = data.carp_value(15, 70.0) * 3.6
-	var t100 := zero_to_100(data)
+## Normalised 0..1 ratings against the spread of the stock NFS3 cars, with `upgrade` (High
+## Stakes' upgrade level) applied.
+static func ratings(data: Object, upgrade := 0) -> Array:
+	var up := Car.upgrade_mults(upgrade)
+	var top_kmh: float = data.carp_value(15, 70.0) * 3.6 * up.w
+	var t100 := zero_to_100(data, upgrade)
 	var accel := inverse_lerp(8.0, 3.0, t100)
 	if t100 < 0.0:
 		var tq: PackedFloat32Array = data.carp.get(10, PackedFloat32Array([400.0]))
 		var peak := 0.0
 		for v in tq:
 			peak = maxf(peak, v)
-		accel = inverse_lerp(0.15, 0.75, peak / maxf(data.carp_value(2, 1400.0), 600.0))
-	# Cornering is limited by the weaker axle (front grip bias).
-	var bias: float = data.carp_value(25, 0.5)
+		accel = inverse_lerp(0.15, 0.75, peak * up.x / maxf(data.carp_value(2, 1400.0), 600.0))
+	# Cornering grip as Car.corner_grip() has it: grip [30] x tyre factor [66], less any
+	# understeer [80].
+	var corner: float = data.carp_value(30, 3.2) * data.carp_value(66, 1.0) / clampf(data.carp_value(80, 1.0), 1.0, 1.25)
 	return [
 		inverse_lerp(150.0, 370.0, top_kmh),
 		accel,
-		inverse_lerp(2.4, 4.0, data.carp_value(30, 3.2) * minf(bias, 1.0 - bias) * 2.0),
-		inverse_lerp(7.0, 12.2, data.carp_value(18, 10.0)),
+		inverse_lerp(2.6, 4.0, corner * up.z),
+		inverse_lerp(7.0, 12.2, data.carp_value(18, 10.0) * up.y),
 	]
 
 
 ## Seconds from 0 to 100 km/h by the original game's own acceleration table (m/s^2 at every
 ## 1 m/s, carp.txt fields 67..74), or -1 without one.
-static func zero_to_100(data: Object) -> float:
+static func zero_to_100(data: Object, upgrade := 0) -> float:
 	var acc := PackedFloat32Array()
 	for k in range(67, 75):
 		acc.append_array(data.carp.get(k, PackedFloat32Array()))
@@ -45,16 +48,17 @@ static func zero_to_100(data: Object) -> float:
 	var t := 0.0
 	for v in 28:
 		t += (27.78 - v if v == 27 else 1.0) / maxf(acc[v], 0.3)
-	return t
+	return t / Car.upgrade_mults(upgrade).x
 
 
-func set_car(data: Object, kmh: bool) -> void:
-	var r := ratings(data)
+func set_car(data: Object, kmh: bool, upgrade := 0) -> void:
+	var up := Car.upgrade_mults(upgrade)
+	var r := ratings(data, upgrade)
 	for i in 4:
 		_target[i] = clampf(r[i], 0.04, 1.0)
-	var top: float = data.carp_value(15, 70.0) * 3.6
+	var top: float = data.carp_value(15, 70.0) * 3.6 * up.w
 	_readout[0] = "%d KM/H" % roundi(top) if kmh else "%d MPH" % roundi(top / 1.609)
-	var t100 := zero_to_100(data)
+	var t100 := zero_to_100(data, upgrade)
 	if t100 > 0.0:
 		_readout[1] = ("0-100  %.1f S" if kmh else "0-62  %.1f S") % t100
 	else:

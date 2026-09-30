@@ -30,9 +30,13 @@ const SWAY_MAX := 0.12
 # from the peak (rad) to the full slide, instead of all at once as soon as it breaks away.
 const SLIP_PEAK := 0.12
 const SLIP_FULL := 0.6
-# Where the demand on a tyre starts easing into its limit, as a share of it: the limit is
-# approached on a soft knee, so the tyre starts to slide a touch before it lets go.
-const GRIP_KNEE := 0.85
+# Slip-angle tyres (progressive_grip): the grip a fully sliding tyre gives up, x the slide
+# multiplier [38]; and how much less grip each extra share of load buys (load sensitivity:
+# the more weight moves onto one tyre, the less grip the car has in all).
+const SLIDE_DROP := 0.2
+const LOAD_SENS := 0.2
+# How far past the front tyres' peak slip angle full lock may go at speed.
+const STEER_MARGIN := 1.3
 
 ## The GTA IV-style additions, for A/B testing against the plain NFS3 handling (F6 toggles).
 static var body_sway := true
@@ -50,6 +54,7 @@ var brake := 0.0
 var steer := 0.0          # -1 left .. +1 right
 var handbrake := false
 var hold := false         # parked: full brakes, never engages reverse
+var horn := false
 
 # --- telemetry
 var speed := 0.0          # signed forward speed, m/s
@@ -63,6 +68,7 @@ var is_player := false
 var is_cop := false
 var far := false          # out past DETAIL_RANGE from the camera (updated each frame)
 var resting := false      # held still and asleep in the physics engine (see REST_AFTER)
+var car_data: Object      # what it was built from (Nfs3Car or ProceduralCar): CarAudio finds its engine banks there
 
 # --- tuning (filled from car data; the carp.txt field number is in brackets)
 ## NFS3 counts pedal, steering and gearbox ramps in physics ticks, with the pedals and the
@@ -96,7 +102,8 @@ var gas_down := PackedFloat32Array()     # [21]
 var brake_up := PackedFloat32Array()     # [22] pedal steps added on the n-th tick of braking
 var brake_down := PackedFloat32Array()   # [23]
 var wheelbase := 2.6       # [24] m
-var front_grip := 1.0      # [25] front grip bias, as a factor on the front tyres (rear: 2 - this)
+var weight_front := 0.5    # [25] "front grip bias": the share of the weight (and so of the grip) on the front axle
+var front_grip := 1.0      # factor on the front tyres: less for High Stakes' understeer gradient [80]
 var power_steering := true # [26]
 var steer_rate_fast := 17.0  # [27] minimum steering acceleration: turn-in steps per tick at speed
 var steer_in := 16.0       # [28] turn-in ramp, steps per tick at a standstill
@@ -104,7 +111,8 @@ var steer_out := 32.0      # [29] turn-out ramp
 var downforce_k := 0.00035 # [31] x aero factor [65], g-units of load per (m/s)^2 (half on the tyres)
 var drag_k := 0.42         # N per (m/s)^2, from max velocity [14] and aero factor [65]
 var gas_off := 0.35        # [32] engine braking off the throttle
-var g_transfer := 0.45     # [33] load moved between the wheels per g of acceleration
+var g_transfer := 0.45     # [33] load moved between the wheels per g of acceleration: sets the height of the centre of mass
+var slip_peak := [SLIP_PEAK, SLIP_PEAK]   # front, rear tyres' peak slip angle (rad), from their size [35], [36]
 var tyre_radius := [0.33, 0.33]   # [35], [36] front, rear (m)
 var tyre_width := [0.245, 0.245]  # [35], [36] front, rear (m)
 var tyre_wear_rate := 0.0  # [37]
@@ -150,9 +158,12 @@ var _shift_timer := 0.0
 var _upside_timer := 0.0
 var _body_visual: Node3D
 var _body_meshes: Array[MeshInstance3D] = []
-var _siren_lights: Array[OmniLight3D] = []
-var _siren_glows: Array[MeshInstance3D] = []
-var _siren_pos: Array[Vector3] = []
+var _siren_lights: Array = []    # [OmniLight3D, colour letter]: one per colour on the light bar
+var _siren_glows: Array = []     # [glow, lamp (see Nfs3Car.decode_light())]
+var _siren_lamps: Array[Dictionary] = []
+var _wigwags: Array = []         # [head glow, lamp]: headlamps that flash with the siren
+var _broken := {}                # lamp position -> true: lamps a crash has put out
+var _main_heads: Array[Vector3] = []   # the left and right headlamps the beams come from
 var _siren := false
 var _siren_t := 0.0
 var _braking_lit := false
@@ -163,12 +174,27 @@ var _brake_lights: Array[Node3D] = []
 var _lamps: Array[Node3D] = []   # head and running tail glows, shown while the headlights are on
 var _head_glows: Array[Node3D] = []
 var _popups: Array[Node3D] = []   # pop-up headlamps, raised while the headlights are on
+var _plates: Array[Node3D] = []   # the licence plate (High Stakes cars)
+var _dash_data := {}              # the car file's in-car view (High Stakes), built on first use
+var _dash: Node3D                 # ...its dashboard, seats and doors, shown instead of the body
+var _dash_needles: Array[Dictionary] = []   # {node, axis, turns, rpm}
+var _dash_wheel: Node3D
+var _dash_wheel_axis := Vector3.BACK
+var _dash_lit: Array[Node3D] = []
+var _dash_mats: Array[Material] = []   # the needles' materials: [by day, lit]
+var _dash_lit_on := false
+var _paint := Color.WHITE
+var _steer_mat: ShaderMaterial      # High Stakes: the body's material, turning the driver's wheel
+var _steer_shown := 0.0
 var _reverse_lights: Array[Node3D] = []
 var _reverse_xf: Transform3D     # where the reversing lamps' light cone starts, local
 var _beams: Array[SpotLight3D] = []   # [between the lamps, left lamp, right lamp]
 var _split_beams := false
 var _beam_allowed := false
 var headlights_on := true
+var upgrade_level := 0      # High Stakes' upgrades, 0 stock .. 3 (see UPGRADES)
+## The officer who gets out when this car busts someone (High Stakes' police cars), or null.
+var officer_mesh: Mesh
 var high_beam := false
 
 ## Headlight beams: tilt below level (degrees), reach (m), cone half-angle (degrees), energy.
@@ -178,16 +204,39 @@ const REVERSE_CONE := Vector3(14.0, 0.75, 0.9)   # track shader: reach, cos(oute
 ## Render layer bit of everything drawn on the car, so the reflection probe riding inside it
 ## can leave the car out.
 const VISUAL_LAYER := 2
-## Lamp colour x strength for the wet road's reflections (see lit_lamps()).
-const HEAD_GLINT := Vector3(1.0, 0.92, 0.8) * 2.5
-const TAIL_GLINT := Vector3(1.0, 0.06, 0.03) * 0.8
-const BRAKE_GLINT := Vector3(1.0, 0.06, 0.03) * 2.2
-const REVERSE_GLINT := Vector3(0.9, 0.9, 0.85) * 1.2
-const SIREN_GLINT := [Vector3(1.0, 0.05, 0.05) * 3.5, Vector3(0.1, 0.2, 1.0) * 4.5]
+## The light dummies' colours: white, red, blue, orange, yellow. (Each lamp's glow keeps what
+## the wet road reflects of it as meta "glint": [which way it shines, 1 ahead, -1 behind,
+## 0 all round; colour x strength], see lit_lamps().)
+const LAMP_COLOURS := {"W": Color(1.0, 0.95, 0.8), "R": Color(1.0, 0.08, 0.04), "B": Color(0.1, 0.2, 1.0),
+	"O": Color(1.0, 0.42, 0.05), "Y": Color(1.0, 0.78, 0.25)}
+## Flashing lamps go round this cycle (s): each lit for `time` tenths of it, starting `delay`
+## tenths in, the "E" ones half a cycle after the "O" ones.
+const FLASH_CYCLE := 0.4
 
 
-func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
+## High Stakes' upgrades, bought in turn: 1 suspension, 2 aero, 3 engine. Each multiplies
+## acceleration, braking, handling and top speed (its tuning table, as the PlayStation
+## version ships it in ZTUNING.BIN; the PC one keeps it in the program).
+const UPGRADES := [
+	Vector4(0.98, 1.0, 1.05, 1.0),
+	Vector4(1.09, 1.0, 1.02, 1.0),
+	Vector4(1.10, 1.25, 1.0, 1.09),
+]
+const UPGRADE_NAMES := ["Stock", "Level 1", "Level 2", "Level 3"]
+
+
+## Acceleration, braking, handling and top speed multipliers of upgrade `level` (0..3).
+static func upgrade_mults(level: int) -> Vector4:
+	var m := Vector4.ONE
+	for i in clampi(level, 0, UPGRADES.size()):
+		m *= UPGRADES[i]
+	return m
+
+
+func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
+	upgrade_level = upgrade
 	display_name = data.display_name
+	car_data = data
 	_load_spec(data)
 
 	collision_layer = 2
@@ -225,15 +274,33 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 			paint = data.colours[0] if data.colours.size() > 0 else Color.WHITE
 		sm.set_shader_parameter("paint", paint)
 		mat = sm
+		_paint = paint
 		# The wheels share the skin but take a rubber finish on the tyres.
 		wheel_mat = sm.duplicate()
 		wheel_mat.set_shader_parameter("wheel", true)
+	var glass_mat: Material = null
 	for p in data.body_parts:
 		var mi := MeshInstance3D.new()
 		mi.mesh = p.mesh
 		mi.position = p.center
-		if mat:
+		if p.get("glass", false) and data.texture:
+			# High Stakes' windows: tinted and see-through, the driver behind them.
+			if glass_mat == null:
+				var gm := ShaderMaterial.new()
+				gm.shader = load("res://shaders/car_glass.gdshader")
+				gm.set_shader_parameter("albedo_tex", data.texture)
+				glass_mat = gm
+			mi.material_override = glass_mat
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		elif mat:
 			mi.material_override = mat
+		if p.has("steering") and mat is ShaderMaterial:
+			_steer_mat = mat
+			_steer_mat.set_shader_parameter("steer_pivot", p.steering.pivot)
+			_steer_mat.set_shader_parameter("steer_axis", p.steering.axis)
+		# Where each vertex goes in the model's own damaged copy, for CarDamage.
+		if p.has("damaged"):
+			mi.set_meta("damaged", p.damaged)
 		_body_tilt.add_child(mi)
 		_body_meshes.append(mi)
 	for p in data.popup_lights:
@@ -319,35 +386,84 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	cs.position = Vector3(0, (top + bottom) * 0.5, 0)
 	add_child(cs)
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0, _wheels[0].center.y + 0.1, 0)
+	# The centre of mass sits between the axles by the weight split [25], and as high above
+	# the road as makes the springs move the g transfer factor's [33] share of the load onto
+	# the front tyres under braking (per g, 2 x height / wheelbase of the axle's load).
+	var road_y: float = _wheels[0].center.y + STATIC_SAG - _wheels[0].radius
+	var cog_h := clampf(g_transfer * wheelbase / 4.0, 0.22, 0.42)
+	var zf: float = (_wheels[0].center.z + _wheels[1].center.z) * 0.5
+	var zr: float = (_wheels[2].center.z + _wheels[3].center.z) * 0.5
+	center_of_mass = Vector3(0, road_y + cog_h, lerpf(zr, zf, weight_front))
 	# Inertia of a solid box, a little exaggerated for stability.
 	var sz := box.size
 	inertia = Vector3(sz.y * sz.y + sz.z * sz.z, sz.x * sz.x + sz.z * sz.z, sz.x * sz.x + sz.y * sz.y) * mass / 12.0 * 1.4
 
-	# Lamps sit at the model's light dummies; cars without them get a guess from the body size.
-	var heads := _lamp_positions(data, "H", Vector3(hs.x * 0.7, 0.0, hs.z))
-	var tails := _lamp_positions(data, "T", Vector3(hs.x * 0.7, 0.0, -hs.z))
-	for p in heads:
-		_head_glows.append(_lamp_glow(p + Vector3(0, 0, 0.08), Color(1.0, 0.95, 0.8), 0.32))
+	# Lamps sit at the model's light dummies, their colour, size and flashing as the dummies'
+	# names give them (see Nfs3Car.decode_light()); cars without them get a guess from the
+	# body size.
+	var heads := _lamps_of(data, "H", Vector3(hs.x * 0.7, 0.0, hs.z))
+	var tails := _lamps_of(data, "T", Vector3(hs.x * 0.7, 0.0, -hs.z))
+	for l in heads:
+		var glow := _lamp_glow(l.pos + Vector3(0, 0, 0.08), LAMP_COLOURS[l.colour], 0.32 * _lamp_size(l))
+		glow.set_meta("glint", [1.0, _colour_v(l.colour) * 2.5])
+		glow.set_meta("lamp", l)
+		_head_glows.append(glow)
+		# Pursuit cars' headlamps flash in turn (wig-wag) while the siren is going.
+		if l.flash != "N":
+			_wigwags.append([glow, l])
 	_lamps.append_array(_head_glows)
-	for p in tails:
-		_lamps.append(_lamp_glow(p - Vector3(0, 0, 0.06), Color(0.45, 0.03, 0.02), 0.22))
+	# Running tail lamps, and the parking and marker lamps (P), dimmer, with the headlights.
+	for l in tails + _lamps_of(data, "P"):
+		var glow := _lamp_glow(l.pos + Vector3(0, 0, signf(l.pos.z) * 0.06), LAMP_COLOURS[l.colour] * 0.45,
+			0.22 * _lamp_size(l))
+		glow.set_meta("glint", [signf(l.pos.z), _colour_v(l.colour) * 0.8])
+		glow.set_meta("lamp", l)
+		_lamps.append(glow)
 	# The lamps ride on the bodywork, so they lean with it.
 	for l in _lamps:
 		_body_tilt.add_child(l)
-	_siren_pos = _lamp_positions(data, "S", Vector3(0.4, hs.y * 0.9, 0.0))
-	for p in tails:
-		var glow := _lamp_glow(p - Vector3(0, 0, 0.08), Color(1.0, 0.08, 0.04), 0.3)
+	_siren_lamps = _lamps_of(data, "S", Vector3(0.4, hs.y * 0.9, 0.0))
+	_dash_data = data.get("dash") if "dash" in data else {}
+	officer_mesh = data.get("officer") if "officer" in data else null
+	# High Stakes' rear plate, with a registration of its own.
+	var plate_at: Dictionary = data.get("plate") if "plate" in data else {}
+	if not plate_at.is_empty():
+		var pm := Plates.make(Plates.random_text(plate_at.euro), plate_at.euro)
+		if pm:
+			pm.position = plate_at.pos + Vector3(0, 0, -0.012)
+			pm.layers = VISUAL_LAYER
+			_body_tilt.add_child(pm)
+			_plates.append(pm)
+	# Brake lamps: High Stakes marks its own, the third one up high included. Where it marks
+	# only that one (or none, as NFS3), the tail lamps are the brake lamps too.
+	var brakes := _lamps_of(data, "B")
+	if brakes.all(func(l: Dictionary) -> bool: return absf(l.pos.x) < 0.25):
+		brakes.append_array(tails)
+	for l in brakes:
+		var glow := _lamp_glow(l.pos - Vector3(0, 0, 0.08), LAMP_COLOURS[l.colour], 0.3 * _lamp_size(l))
+		glow.set_meta("glint", [-1.0, _colour_v(l.colour) * 2.2])
+		glow.set_meta("lamp", l)
 		glow.visible = false
 		_body_tilt.add_child(glow)
 		_brake_lights.append(glow)
-	# Reversing lamps: white, just inboard of the taillights (the models have no dummies for them).
-	for p in tails:
-		var glow := _lamp_glow(p - Vector3(signf(p.x) * 0.16, 0.03, 0.07), Color(0.9, 0.9, 0.85), 0.22)
+	# Reversing lamps: High Stakes marks them; on NFS3 cars, just inboard of the taillights.
+	var reverses := _lamps_of(data, "R")
+	if reverses.is_empty():
+		for l in tails:
+			var r := Nfs3Car.decode_light("RWYN350")
+			r.pos = l.pos - Vector3(signf(l.pos.x) * 0.16, 0.03, 0.0)
+			reverses.append(r)
+	for l in reverses:
+		var glow := _lamp_glow(l.pos - Vector3(0, 0, 0.07), LAMP_COLOURS[l.colour], 0.22 * _lamp_size(l))
+		glow.set_meta("glint", [-1.0, _colour_v(l.colour) * 1.2])
+		glow.set_meta("lamp", l)
 		glow.visible = false
 		_body_tilt.add_child(glow)
 		_reverse_lights.append(glow)
-	var rear := Vector3(0.0, tails[0].y, (tails[0].z + tails[-1].z) * 0.5)
+	var rear := Vector3.ZERO
+	for l in reverses:
+		rear += l.pos
+	rear = Vector3(0.0, rear.y, rear.z) / reverses.size()
 	var rl := OmniLight3D.new()
 	rl.light_color = Color(0.9, 0.9, 0.85)
 	rl.omni_range = 4.0
@@ -358,19 +474,26 @@ func setup(data: Object, tint := Color(0, 0, 0, 0)) -> void:
 	_reverse_lights.append(rl)
 	# Facing -Z (backwards) is the light's default; tip it 15° down at the road.
 	_reverse_xf = Transform3D(Basis.from_euler(Vector3(deg_to_rad(-15.0), 0, 0)), rear)
-	for p in [tails[0], tails[-1]]:
+	for l in _outer_pair(brakes):
 		var bl := OmniLight3D.new()
 		bl.light_color = Color(1, 0.05, 0.02)
 		bl.omni_range = 2.0
 		bl.light_energy = 1.2
 		bl.visible = false
-		bl.position = p - Vector3(0, 0, 0.2)
+		bl.position = l.pos - Vector3(0, 0, 0.2)
+		bl.set_meta("lamp", l)   # it goes out with its lamp (see break_lamps())
 		_body_tilt.add_child(bl)
 		_brake_lights.append(bl)
+	# The beams come from the main pair of headlamps: the brightest, outermost (not the fog lamps).
+	var brightest := 0
+	for l in heads:
+		brightest = maxi(brightest, l.intensity)
+	var mains := _outer_pair(heads.filter(func(l: Dictionary) -> bool: return l.intensity == brightest))
+	_main_heads = [mains[0].pos, mains[1].pos]
 	# Real headlight beams, where set_headlight_beam() allows them: one per lamp, or a single
 	# one between the lamps to spare the per-object light budget (8 spots on the Mobile renderer).
 	# The NFS3 track shader draws its own cones, see light_cones().
-	for p: Vector3 in [(heads[0] + heads[-1]) * 0.5, heads[0], heads[-1]]:
+	for p: Vector3 in [(mains[0].pos + mains[1].pos) * 0.5, mains[0].pos, mains[1].pos]:
 		var beam := SpotLight3D.new()
 		beam.position = p + Vector3(0, 0.1, 0.2)
 		beam.light_color = Color(1.0, 0.95, 0.85)
@@ -419,7 +542,12 @@ func _load_spec(data: Object) -> void:
 	brake_up = _table(carp, [22], [64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 1.0])
 	brake_down = _table(carp, [23], [32.0])
 	wheelbase = data.carp_value(24, 0.0)
-	front_grip = clampf(data.carp_value(25, 0.5), 0.3, 0.7) * 2.0
+	# The "front grip bias" [25] is where the weight sits: High Stakes' own cars list their
+	# showroom weight split there (the F50's 0.42 is its 41/59). The tyres grip by the load
+	# on them, so it balances the grip too. High Stakes' understeer gradient [80] (1 neutral;
+	# its buses and trucks run to 1.09) takes that much off the front tyres.
+	weight_front = clampf(data.carp_value(25, 0.5), 0.3, 0.7)
+	front_grip = 1.0 / clampf(data.carp_value(80, 1.0), 0.8, 1.25)
 	power_steering = data.carp_value(26, 1.0) != 0.0
 	steer_rate_fast = data.carp_value(27, 17.0)
 	steer_in = data.carp_value(28, 16.0)
@@ -436,6 +564,10 @@ func _load_spec(data: Object) -> void:
 				# 245/40 R17: width mm, sidewall % of the width, rim inches.
 				tyre_width[axle] = t[0] / 1000.0
 				tyre_radius[axle] = t[2] * 0.0254 * 0.5 + t[0] * t[1] / 100000.0
+				# A tall sidewall flexes: it takes a bigger slip angle to reach its peak grip
+				# (a softer, more forgiving tyre); a wide, low-profile one bites sooner.
+				var aspect := clampf(t[1], 25.0, 80.0) / 40.0
+				slip_peak[axle] = SLIP_PEAK * clampf(sqrt(aspect) * pow(0.245 / clampf(tyre_width[axle], 0.15, 0.4), 0.3), 0.8, 1.35)
 	tyre_wear_rate = data.carp_value(37, 0.0)
 	slide_mult = data.carp_value(38, 1.0)
 	spin_cap = data.carp_value(39, 0.35)
@@ -459,6 +591,14 @@ func _load_spec(data: Object) -> void:
 	damage = clampf(maxf(data.carp_value(57, 0.0), data.carp_value(58, 0.0)), 0.0, 1.0)
 	_k_scale = data.carp_value(64, 1.0) * (1.0 - 0.3 * clampf(data.carp_value(59, 0.0), 0.0, 1.0))
 	_steer_speed = data.carp_value(62, 1.0)
+	var up := upgrade_mults(upgrade_level)
+	if up != Vector4.ONE:
+		torque_curve = _scaled(torque_curve, up.x)
+		ai_accel = _scaled(ai_accel, up.x)
+		brake_decel *= up.y
+		grip = clampf(grip * up.z, 0.4, 1.7)
+		top_speed *= up.w
+		max_velocity *= up.w
 
 
 ## The first of `keys` the file has, else `fallback` (always a copy: the result gets scaled).
@@ -522,9 +662,11 @@ func _calibrate_drag(aero: float) -> void:
 	drag_k = clampf(f / (v * v), 0.15, 4.0) * aero
 
 
-## Share of the lateral grip the car corners on: its weaker axle [25] x grip [30].
+## Share of the lateral grip the car corners on: grip [30], less any understeer [80]. Round a
+## bend a car holds a little less than its tyres' peak: weight transfer and the steered
+## wheels' drag take the rest (measured with tools/car_handling.gd).
 func corner_grip() -> float:
-	return grip * minf(front_grip, 2.0 - front_grip)
+	return grip * minf(front_grip, 1.0) * 0.87
 
 
 ## The original AI's speed factor for a bend of radius r [49..54]: bends are sorted by how
@@ -549,9 +691,11 @@ func set_headlight_beam(allowed: bool, per_lamp := false) -> void:
 func set_headlights(on: bool) -> void:
 	headlights_on = on
 	for i in _beams.size():
-		_beams[i].visible = on and _beam_allowed and (i > 0) == _split_beams
-	for l in _lamps + _popups:
+		_beams[i].visible = on and _beam_allowed and (i > 0) == _split_beams and not _beam_broken(i)
+	for l in _lamps:
 		l.visible = on
+	for l in _popups:
+		l.visible = on and not (_dash and _dash.visible)
 
 
 func set_high_beam(on: bool) -> void:
@@ -576,8 +720,9 @@ func light_cones() -> Array:
 	if headlights_on:
 		var b: Array = HIGH_BEAM if high_beam else LOW_BEAM
 		var shape := Vector3(b[1], cos(deg_to_rad(b[2])), 1.4 if high_beam else 1.0)
-		out.append([xf * _beams[1].transform, shape])
-		out.append([xf * _beams[2].transform, shape])
+		for i in [1, 2]:
+			if not _beam_broken(i):
+				out.append([xf * _beams[i].transform, shape])
 	if gear < 0:
 		out.append([xf * _reverse_xf, REVERSE_CONE])
 	return out
@@ -600,27 +745,61 @@ func lit_lamps() -> Array:
 	var out := []
 	var xf := get_global_transform_interpolated()
 	var fwd := xf.basis.z.normalized()
-	for g in _lamps:
-		if g.visible:
-			out.append([xf * g.position, fwd if g in _head_glows else -fwd,
-				HEAD_GLINT if g in _head_glows else TAIL_GLINT])
-	for g in _brake_lights + _reverse_lights:
-		if g is MeshInstance3D and g.visible:
-			out.append([xf * g.position, -fwd, BRAKE_GLINT if g in _brake_lights else REVERSE_GLINT])
-	for k in _siren_glows.size():
-		if _siren_glows[k].visible:
-			out.append([xf * _siren_glows[k].position, Vector3.ZERO, SIREN_GLINT[k]])
+	var glows: Array = _lamps + _brake_lights + _reverse_lights
+	for sg in _siren_glows:
+		glows.append(sg[0])
+	for g: Node3D in glows:
+		if g.visible and g.has_meta("glint"):
+			var glint: Array = g.get_meta("glint")
+			out.append([xf * g.position, fwd * glint[0], glint[1]])
 	return out
 
 
-static func _lamp_positions(data: Object, kind: String, fallback: Vector3) -> Array[Vector3]:
-	var out: Array[Vector3] = []
+## The car's lamps of one kind (H, T, B, R, P or S), from its light dummies, leaving out
+## broken ones (intensity 0). Without any, a left and right pair at +-fallback.x, unless
+## fallback is left out.
+static func _lamps_of(data: Object, kind: String, fallback := Vector3.INF) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
 	for l: Dictionary in data.lights:
-		if l.kind == kind:
-			out.append(l.pos)
-	if out.is_empty():
-		out = [fallback, Vector3(-fallback.x, fallback.y, fallback.z)]
+		if l.kind == kind and l.intensity > 0:
+			out.append(l)
+	if out.is_empty() and fallback != Vector3.INF:
+		# Named as NFS3 would: left then right (+X is the driver's left).
+		for side in ["L", "R"]:
+			var l := Nfs3Car.decode_light(kind + "M" + side + "N")
+			l.pos = fallback if side == "L" else Vector3(-fallback.x, fallback.y, fallback.z)
+			out.append(l)
 	return out
+
+
+## The leftmost and rightmost of some lamps, in that order.
+static func _outer_pair(lamps: Array) -> Array:
+	var left: Dictionary = lamps[0]
+	var right: Dictionary = lamps[0]
+	for l: Dictionary in lamps:
+		if l.pos.x > left.pos.x:
+			left = l
+		if l.pos.x < right.pos.x:
+			right = l
+	return [left, right]
+
+
+## How big a lamp's glow is for its intensity (5 the usual).
+static func _lamp_size(l: Dictionary) -> float:
+	return clampf(l.intensity / 5.0, 0.4, 1.4)
+
+
+static func _colour_v(letter: String) -> Vector3:
+	var c: Color = LAMP_COLOURS[letter]
+	return Vector3(c.r, c.g, c.b)
+
+
+## Whether a flashing lamp is lit `t` seconds into its flashing.
+static func _flash_lit(l: Dictionary, t: float) -> bool:
+	if l.time == 0:
+		return true
+	var phase := fmod(t / FLASH_CYCLE + l.delay * 0.1 + (0.5 if l.flash == "E" else 0.0), 1.0)
+	return phase < l.time * 0.1
 
 
 ## A small camera-facing additive sprite: reads as a lit lamp in daylight without costing a light.
@@ -655,33 +834,88 @@ static func _lamp_glow(pos: Vector3, colour: Color, size: float) -> MeshInstance
 	return mi
 
 
+func siren_on() -> bool:
+	return _siren
+
+
 func enable_siren(on: bool) -> void:
 	_siren = on
-	if on and _siren_lights.is_empty():
-		# Red on the left-hand siren dummy, blue on the right-hand one (+X is the driver's left).
-		var ends: Array[Vector3] = [_siren_pos[0], _siren_pos[-1]]
-		if ends[0].x < ends[1].x:
-			ends.reverse()
-		for k in 2:
-			var c: Color = [Color(1, 0.05, 0.05), Color(0.1, 0.2, 1)][k]
-			# The light they throw round about only where the quality allows (see lamp_lights).
-			if lamp_lights:
+	if on and _siren_glows.is_empty():
+		# A light bar of many lamps gets smaller glows than a pair.
+		var size := 0.55 if _siren_lamps.size() <= 2 else 0.32
+		var by_colour := {}
+		for l in _siren_lamps:
+			if _broken.has(l.pos):
+				continue
+			var glow := _lamp_glow(l.pos + Vector3.UP * 0.05, LAMP_COLOURS[l.colour], size * _lamp_size(l))
+			glow.set_meta("glint", [0.0, _colour_v(l.colour) * (4.5 if l.colour == "B" else 3.5)])
+			glow.visible = false
+			_body_tilt.add_child(glow)
+			glow.set_meta("lamp", l)
+			_siren_glows.append([glow, l])
+			by_colour[l.colour] = by_colour.get(l.colour, []) + [l.pos]
+		# The light they throw round about, one per colour, only where the quality allows (see
+		# lamp_lights).
+		if lamp_lights:
+			for c: String in by_colour:
+				var at := Vector3.ZERO
+				for p: Vector3 in by_colour[c]:
+					at += p
 				var l := OmniLight3D.new()
-				l.light_color = c
+				l.light_color = LAMP_COLOURS[c]
 				l.omni_range = 14.0
 				l.light_energy = 6.0
 				l.visible = false
-				l.position = ends[k] + Vector3.UP * 0.1
+				l.position = at / by_colour[c].size() + Vector3.UP * 0.1
 				_body_tilt.add_child(l)
-				_siren_lights.append(l)
-			var glow := _lamp_glow(ends[k] + Vector3.UP * 0.05, c, 0.55)
-			_body_tilt.add_child(glow)
-			_siren_glows.append(glow)
+				_siren_lights.append([l, c])
 	if not on:
-		for l in _siren_lights:
-			l.visible = false
-		for g in _siren_glows:
-			g.visible = false
+		for sl in _siren_lights:
+			sl[0].visible = false
+		for sg in _siren_glows:
+			sg[0].visible = false
+		for w in _wigwags:
+			w[0].visible = headlights_on
+
+
+## A crash at car-local `p`: puts out the breakable lamps (see Nfs3Car.decode_light())
+## within `radius` of it, and the beam of a main headlamp among them.
+func break_lamps(p: Vector3, radius: float) -> void:
+	var glows: Array = _lamps + _brake_lights + _reverse_lights
+	for sg in _siren_glows:
+		glows.append(sg[0])
+	var broke := false
+	# The glows decide what the crash reaches; the brake lamps' lights go out with theirs.
+	for g: Node3D in glows:
+		if g is MeshInstance3D and g.has_meta("lamp"):
+			var l: Dictionary = g.get_meta("lamp")
+			if l.breakable and not _broken.has(l.pos) and g.position.distance_to(p) < radius:
+				_broken[l.pos] = true
+				broke = true
+	if not broke:
+		return
+	var out := func(g: Node3D) -> bool: return g.has_meta("lamp") and _broken.has(g.get_meta("lamp").pos)
+	var keep := func(g: Node3D) -> bool: return not out.call(g)
+	for g: Node3D in glows:
+		if out.call(g):
+			g.queue_free()
+	_lamps.assign(_lamps.filter(keep))
+	_head_glows.assign(_head_glows.filter(keep))
+	_brake_lights.assign(_brake_lights.filter(keep))
+	_reverse_lights.assign(_reverse_lights.filter(keep))
+	_wigwags = _wigwags.filter(func(w: Array) -> bool: return keep.call(w[0]))
+	_siren_glows = _siren_glows.filter(func(sg: Array) -> bool: return keep.call(sg[0]))
+	set_headlights(headlights_on)
+
+
+## Whether headlight beam i ([between the lamps, left, right]) has lost its lamp: the
+## middle one only once both have gone.
+func _beam_broken(i: int) -> bool:
+	if _main_heads.is_empty():
+		return false
+	if i == 0:
+		return _broken.has(_main_heads[0]) and _broken.has(_main_heads[1])
+	return _broken.has(_main_heads[i - 1])
 
 
 func forward_dir() -> Vector3:
@@ -830,6 +1064,16 @@ func _physics_process(dt: float) -> void:
 	# speed) and back at the turn-out ramp [29], in 128ths of the lock per tick.
 	var speed_f := clampf(abs_speed / 55.0, 0.0, 1.0)
 	var lock := max_steer * lerpf(low_turn, 0.28 * high_turn, speed_f)
+	if progressive_grip:
+		# At speed, only as much lock as takes the front tyres a little past their peak slip
+		# angle on the tightest line the car's grip (and downforce) holds: any more would only
+		# scrub them wide. In a slide the wheels may turn as far again as the car is sideways,
+		# so it can be caught.
+		var a_max := 9.81 * 1.25 * corner_grip() * surface_grip \
+				* (1.0 + clampf(abs_speed * abs_speed * downforce_k, 0.0, 0.9) * 0.5)
+		var line := atan(wheelbase * a_max / maxf(abs_speed * abs_speed, 1.0))
+		var beta := atan2(absf(vel.dot(global_basis.x)), abs_speed) if abs_speed > 3.0 else 0.0
+		lock = minf((line + slip_peak[0] * STEER_MARGIN) * high_turn + beta, max_steer * low_turn)
 	var steer_to := (steer_pull - steer) * lock
 	var turning_in := absf(steer_to) > absf(steer_angle) and steer_to * steer_angle >= 0.0
 	var steer_steps := lerpf(steer_in, steer_rate_fast, speed_f) if turning_in else steer_out
@@ -846,7 +1090,8 @@ func _physics_process(dt: float) -> void:
 	grounded_wheels = 0
 	var total_slip := 0.0
 	var loose_wheels := 0
-	# Suspension stiffness [64]; a bumpier car [46] rides on softer dampers.
+	# Suspension stiffness [64]; a bumpier car [46] rides on softer dampers. Each axle's springs
+	# carry its share of the weight [25] (see `axle`), so the car sits level.
 	var k := mass * 9.81 / 4.0 / STATIC_SAG * _k_scale
 	var c := 2.0 * sqrt(k * mass / 4.0) * 0.45 * lerpf(1.25, 0.85, clampf(bumpiness, 0.0, 1.0))
 
@@ -888,11 +1133,12 @@ func _physics_process(dt: float) -> void:
 		# speed (and a huge damper kick); the body's own speed into the road is the real one.
 		var comp_vel: float = (w.compression - prev_comp) / dt if prev_contact \
 				else -(linear_velocity + angular_velocity.cross(offset)).dot(up)
+		var share := weight_front if w.front else 1.0 - weight_front
 		var spring: float = k * w.compression + c * comp_vel
 		var over: float = w.compression - SUSPENSION_TRAVEL
 		if over > 0.0:
 			spring += k * BUMP_STOP_STIFFNESS * over + c * BUMP_STOP_DAMPING * maxf(comp_vel, 0.0)
-		spring = maxf(spring, 0.0)
+		spring = maxf(spring * share * 2.0, 0.0)
 		var n: Vector3 = hit.normal
 		var contact: Vector3 = hit.position
 		w.ground = contact
@@ -911,18 +1157,26 @@ func _physics_process(dt: float) -> void:
 		var v_lat := pv.dot(ws)
 
 		var load := maxf(spring, 0.0)
-		# Grip: the car's own [30] split between the axles by the front grip bias [25], less
-		# tyre wear [37]; and the load its acceleration moves onto this tyre [33] (onto the
-		# rear under power, the front under braking, the outside wheels in a bend).
-		var axle_grip := front_grip if w.front else 2.0 - front_grip
-		var transfer := g_transfer / 9.81 * (_acc.y * (-0.5 if w.front else 0.5) + _acc.x * (-0.5 if w.left else 0.5))
-		var mu := 1.25 * grip * axle_grip * (1.0 - _wear) * surface_grip * ground_grip * (0.5 if flat else 1.0)
-		mu *= clampf(1.0 + transfer, 0.3, 1.7)
+		# Grip: the car's own [30], less tyre wear [37], by the load on the tyre.
+		var mu := 1.25 * grip * (front_grip if w.front else 1.0) * (1.0 - _wear) * surface_grip * ground_grip \
+				* (0.5 if flat else 1.0)
 		var lat_grip := 1.0
 		if handbrake and not w.front:
 			mu *= 0.55
-			lat_grip = 0.35
+			# The slip-angle tyre slides by the friction circle instead, the brake taking most of it.
+			if not progressive_grip:
+				lat_grip = 0.35
 		var max_f := mu * load
+		if progressive_grip:
+			# The load the springs put on it: the weight split [25], moved about by braking, power
+			# and cornering [33], and downforce. Each extra share of it buys a little less grip,
+			# so the more load moves onto one tyre, the less the car has in all.
+			max_f *= 1.0 - LOAD_SENS * clampf(load / (mass * 9.81 * share * 0.5) - 1.0, -1.0, 2.0)
+		else:
+			# Classic: the load its acceleration moves onto this tyre [33], on top (onto the rear
+			# under power, the front under braking, the outside wheels in a bend).
+			var transfer := g_transfer / 9.81 * (_acc.y * (-0.5 if w.front else 0.5) + _acc.x * (-0.5 if w.left else 0.5))
+			max_f *= clampf(1.0 + transfer, 0.3, 1.7)
 		# Brakes, split front to rear by the brake bias [19]. Without ABS [17] a wheel asked
 		# for more than its grip locks, and a locked tyre barely steers.
 		var b := 0.0
@@ -933,6 +1187,24 @@ func _physics_process(dt: float) -> void:
 		# Lateral: cancel sideways sliding (capped by grip). Nearly stopped it cancels all of it,
 		# as static friction does, or the car creeps down any camber it is parked on.
 		var f_lat := -v_lat * mass * 0.25 / dt * lerpf(1.0, 0.18, clampf(abs_speed / 2.0, 0.0, 1.0)) * lat_grip
+		var slide := 0.0
+		var over_peak := 0.0   # how far past its peak slip angle the tyre is, as a share of it
+		if progressive_grip:
+			# Slip-angle tyre: the grip builds with the angle between where the tyre points and
+			# where it's going, peaks at its peak slip angle (by its size [35], [36]) and past it
+			# falls away gradually, by the slide multiplier [38]: a slide builds and can be caught.
+			var peak: float = slip_peak[0 if w.front else 1]
+			var x := atan2(absf(v_lat), maxf(absf(v_long), 0.5)) / peak
+			slide = smoothstep(1.0, SLIP_FULL / peak, x)
+			over_peak = x - 1.0
+			var shape := x * (2.0 - x) if x < 1.0 else 1.0 - SLIDE_DROP * slide_mult * slide
+			# Crawling it just holds, as before; and it never pushes back more than stops the
+			# slide in one tick, or it would flick from side to side.
+			var cancel := -v_lat * mass * share * 0.5 / dt
+			f_lat = lerpf(cancel, -signf(v_lat) * max_f * shape, clampf((abs_speed - 1.5) / 3.0, 0.0, 1.0))
+			if absf(f_lat) > absf(cancel):
+				f_lat = cancel
+			f_lat *= lat_grip
 		# Longitudinal: the drive split between the axles by the front drive ratio [16].
 		var driven := front_drive if w.front else 1.0 - front_drive
 		var f_long := drive * 0.5 * driven
@@ -955,21 +1227,32 @@ func _physics_process(dt: float) -> void:
 		var f := Vector2(f_lat, f_long)
 		var ws_slip := 0.0
 		if progressive_grip and max_f > 0.0 and abs_speed > 3.0:
-			# The demand eases into the limit on a soft knee rather than hitting a wall.
+			ws_slip = slide
+			# The friction circle: asked to corner and drive or brake at once for more than its
+			# grip, the tyre breaks away (wheelspin, a locked wheel) and slides, by [38]. Too
+			# much power out of a bend takes the grip the rear needs to hold its line.
 			var demand := f.length() / max_f
-			if demand > GRIP_KNEE:
-				var eased := GRIP_KNEE + (1.0 - GRIP_KNEE) * tanh((demand - GRIP_KNEE) / (1.0 - GRIP_KNEE))
-				ws_slip = clampf((demand - 1.0) / 2.0, 0.0, 1.0)
-				# Past the peak slip angle a sliding tyre gives up grip gradually as the angle
-				# grows, by the slide multiplier [38]: a slide builds and can be caught.
-				var angle := atan2(absf(v_lat), maxf(absf(v_long), 1.0))
-				var fade := smoothstep(SLIP_PEAK, SLIP_FULL, angle)
-				f = f / demand * eased * (1.0 - 0.15 * slide_mult * maxf(fade, ws_slip * ws_slip))
+			# Wheelspin: drive past what the cornering leaves over spins the tyre up, which
+			# takes only three quarters of its worth of side grip: a power slide builds rather than snaps.
+			var spare := sqrt(maxf(max_f * max_f - f.x * f.x, 0.0))
+			if f.y > spare and drive * driven > 0.0:
+				f.y = spare + (f.y - spare) * 0.75
+				demand = f.length() / max_f
+			if demand > 1.0:
+				var excess := minf(demand - 1.0, 1.0)
+				ws_slip = maxf(ws_slip, excess)
+				f = f / demand * (1.0 - SLIDE_DROP * slide_mult * excess)
 		elif f.length() > max_f:
 			ws_slip = clampf((f.length() - max_f) / max_f, 0.0, 1.0)
 			# A sliding tyre grips less than one on the limit, by the slide multiplier [38].
 			f = f.normalized() * max_f * (1.0 - 0.15 * slide_mult * ws_slip)
-		w.slip = maxf(ws_slip, clampf(absf(v_lat) / 8.0, 0.0, 1.0) if abs_speed > 3.0 else 0.0)
+		# How much it's sliding, for the skid sound, marks and smoke. The slip-angle tyre runs
+		# some way sideways in any bend at speed: it squeals at its peak and marks the road
+		# only well past it.
+		var sideways := clampf(absf(v_lat) / 8.0, 0.0, 1.0)
+		if progressive_grip:
+			sideways = clampf((over_peak + 0.25) / 1.3, 0.0, 1.0)
+		w.slip = maxf(ws_slip, sideways if abs_speed > 3.0 else 0.0)
 		total_slip += w.slip
 		apply_force(ws * f.x + wf * f.y, offset)
 		w.spin += v_long / w.radius * dt
@@ -981,8 +1264,11 @@ func _physics_process(dt: float) -> void:
 	# [47] raised above its speed [48]
 	apply_central_force(-fwd * drag_k * speed * absf(speed))
 	if grounded_wheels > 0:
-		var df := downforce_k * (1.2 if spoiler_type != 0 and abs_speed > spoiler_speed else 1.0)
-		apply_central_force(-up * mass * clampf(abs_speed * abs_speed * df, 0.0, 0.9) * 9.81 * 0.5)
+		var df := mass * clampf(abs_speed * abs_speed * downforce_k, 0.0, 0.9) * 9.81 * 0.5
+		apply_central_force(-up * df)
+		# The spoiler presses on the rear axle: more grip at the back, steadier at speed.
+		if spoiler_type != 0 and abs_speed > spoiler_speed:
+			apply_force(-up * df * 0.2, global_basis * Vector3(0, 0, _wheels[2].center.z))
 	# Keep yaw from running away when grip is lost (arcade assist). Only rotation beyond what
 	# the steering asks for is damped, less the car's spin velocity cap [39] share of it;
 	# damping all of it makes the car plough wide in bends. Its strength is the slide
@@ -1040,6 +1326,116 @@ func _physics_process(dt: float) -> void:
 			rl.visible = _reversing_lit and (lamp_lights or not rl is Light3D)
 
 
+func has_cockpit() -> bool:
+	return not _dash_data.is_empty()
+
+
+## The driver's eye, car-local, for the in-car view.
+func cockpit_eye() -> Vector3:
+	return _dash_data.get("eye", Vector3(0.4, 0.45, -0.3))
+
+
+## The in-car view: the dashboard, seats and doors instead of the body and wheels (the
+## camera sits inside them). False when the car file has none.
+func set_cockpit(on: bool) -> bool:
+	if _dash_data.is_empty():
+		return false
+	if on and _dash == null:
+		_build_dash()
+	if _dash:
+		_dash.visible = on
+	for mi in _body_meshes + _popups:
+		mi.visible = not on and (headlights_on or not (mi in _popups))
+	for p in _plates:
+		p.visible = not on
+	for w in _wheels:
+		if w.has("visual"):
+			w.visual.visible = not on
+	return true
+
+
+func _build_dash() -> void:
+	_dash = Node3D.new()
+	_dash.name = "Dash"
+	add_child(_dash)
+	var mat := ShaderMaterial.new()
+	mat.shader = Game.shader("res://shaders/car.gdshader")
+	mat.set_shader_parameter("albedo_tex", _dash_data.texture)
+	mat.set_shader_parameter("paint", _paint)
+	# The dials' night faces: their markings lit, whatever the light.
+	var lit_mat := StandardMaterial3D.new()
+	lit_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lit_mat.albedo_texture = _dash_data.texture
+	lit_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	lit_mat.alpha_scissor_threshold = 0.08
+	lit_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# The needles glow with them: unshaded, whole.
+	var needle_lit := lit_mat.duplicate() as StandardMaterial3D
+	needle_lit.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+	_dash_mats = [mat, needle_lit]
+	var re := RegEx.create_from_string("\\(\\s*([\\d.]+)\\s*to\\s*([\\d.]+)\\s*\\)")
+	for p: Dictionary in _dash_data.parts:
+		var mi := MeshInstance3D.new()
+		mi.mesh = p.mesh
+		mi.material_override = mat
+		mi.layers = VISUAL_LAYER
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var holder := Node3D.new()
+		holder.position = p.center
+		holder.add_child(mi)
+		_dash.add_child(holder)
+		var pname: String = p.name
+		# Parts are named by the views they show in (:F front, :L, :R, :B) and what they are:
+		# ":F_MPH (0.0 to 0.63)" is the speedo needle, sweeping 0.63 of a turn.
+		if pname.contains("_mph") or pname.contains("_rpm"):
+			var m := re.search(pname)
+			# Each needle turns about the car's length through its part's centre, clockwise as
+			# the driver sees it: the needles are modelled with their hub on that line, often a
+			# long way in front of or behind the centre, and tilted from the dial, so turning
+			# about the needle's own normal swings it off its hub and through the dial's face.
+			_dash_needles.append({"node": holder, "axis": Vector3.BACK, "rpm": pname.contains("_rpm"),
+				"turns": (m.get_string(2).to_float() - m.get_string(1).to_float()) if m else 0.7})
+		elif pname.contains("_w ") or pname.ends_with("_w"):
+			_dash_wheel = holder
+			var size: Vector3 = (p.mesh as Mesh).get_aabb().size
+			# Its column: the wheel's thinnest direction.
+			_dash_wheel_axis = Vector3.BACK if size.z <= minf(size.x, size.y) else (Vector3.RIGHT if size.x < size.y else Vector3.UP)
+		elif pname.contains("_ldash"):
+			# Over the day face (which stays, dark, behind its cut-outs): a hair nearer the
+			# driver so the two don't fight, well behind the needles.
+			mi.material_override = lit_mat
+			holder.position.z -= 0.0015
+			holder.visible = false
+			_dash_lit.append(holder)
+
+
+## How far the steering wheel is turned (radians, + clockwise as the driver sees it): it
+## follows the road wheels, so it winds on gradually and turns less at speed, where they do;
+## full lock at a standstill is a little over a third of a turn.
+func wheel_turn() -> float:
+	return -steer_angle / (max_steer * low_turn) * 2.4
+
+
+## Needles and steering wheel of the in-car view.
+func _update_dash() -> void:
+	if _dash_wheel:
+		_dash_wheel.basis = Basis(_dash_wheel_axis, wheel_turn())
+	for n in _dash_needles:
+		# The dials' scales aren't in the files: the speedo reads to a little past the car's top
+		# speed, the rev counter to a quarter past its redline.
+		var f := clampf(rpm / (redline * 1.25), 0.0, 1.0) if n.rpm else clampf(absf(speed) / (top_speed * 1.1), 0.0, 1.0)
+		(n.node as Node3D).basis = Basis(n.axis, f * float(n.turns) * TAU)
+	# The dials light up with the headlights after dark.
+	var lit := headlights_on and Game.night
+	if lit == _dash_lit_on:
+		return
+	_dash_lit_on = lit
+	for l in _dash_lit:
+		l.visible = lit
+	for n in _dash_needles:
+		((n.node as Node3D).get_child(0) as MeshInstance3D).material_override = _dash_mats[int(lit)]
+
+
 ## The body's mesh instances (not wheels or pop-up lamps), for CarDamage to dent.
 func body_meshes() -> Array[MeshInstance3D]:
 	return _body_meshes
@@ -1048,7 +1444,7 @@ func body_meshes() -> Array[MeshInstance3D]:
 ## Lamp glows, lights and beams that sit on the bodywork, for CarDamage to move with a dent.
 func fittings() -> Array[Node3D]:
 	var out: Array[Node3D] = []
-	out.append_array(_lamps + _brake_lights + _reverse_lights + _beams)
+	out.append_array(_lamps + _brake_lights + _reverse_lights + _beams + _plates)
 	return out
 
 
@@ -1067,12 +1463,24 @@ func _process(dt: float) -> void:
 	far = cam != null and cam.global_position.distance_squared_to(global_position) > DETAIL_RANGE * DETAIL_RANGE
 	if _siren:
 		_siren_t += dt
-		var phase := fmod(_siren_t * 3.0, 1.0)
-		# Hidden, not dimmed: a light at zero energy still costs its culling and shading.
-		for k in _siren_lights.size():
-			_siren_lights[k].visible = (phase < 0.5) == (k == 0)
-		_siren_glows[0].visible = phase < 0.5
-		_siren_glows[1].visible = phase >= 0.5
+		# Each lamp in its own time (see _flash_lit()); a colour's light shines while any of its
+		# lamps does. Hidden, not dimmed: a light at zero energy still costs its culling and shading.
+		var lit := {}
+		for sg in _siren_glows:
+			var on: bool = _flash_lit(sg[1], _siren_t)
+			sg[0].visible = on
+			if on:
+				lit[sg[1].colour] = true
+		for sl in _siren_lights:
+			sl[0].visible = lit.has(sl[1])
+		for w in _wigwags:
+			w[0].visible = _flash_lit(w[1], _siren_t)
+	if _dash and _dash.visible:
+		_update_dash()
+	# The driver turns his wheel as far as the in-car view's.
+	if _steer_mat and wheel_turn() != _steer_shown:
+		_steer_shown = wheel_turn()
+		_steer_mat.set_shader_parameter("steer_angle", _steer_shown)
 	# Far off (or parked asleep) the wheels and body keep the pose they had.
 	if far or freeze or resting:
 		return

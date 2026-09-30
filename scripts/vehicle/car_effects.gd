@@ -15,6 +15,8 @@ const SMOKE_CARRY := 0.3    # share of the car's velocity tyre smoke leaves with
 const DUST_CARRY := 0.25
 
 var marks: SkidMarks
+## m/s the body is sliding along a wall or another car (0 when it isn't): CarAudio's scrape.
+var scrape_speed := 0.0
 
 var _car: Car
 var _last: Array = []       # per wheel: where its current mark strip ended, or null
@@ -64,6 +66,7 @@ func _physics_process(dt: float) -> void:
 			for p in _smoke + _dust:
 				p.emitting = false
 			_sparks.emitting = false
+		scrape_speed = 0.0
 		_wet = _car.water_depth > 0.0
 		return
 	_idle = false
@@ -115,6 +118,7 @@ func _physics_process(dt: float) -> void:
 	_crash_t = maxf(_crash_t - dt, 0.0)
 	# A crash sparks at any contact; otherwise only a fast enough slide along one does.
 	var scrape := _scrape_point(0.0 if _crash_t > 0.0 else SPARK_SPEED)
+	scrape_speed = scrape[3] if scrape.size() > 0 else 0.0
 	if scrape.size() > 0:
 		var crash := _crash_t > 0.0
 		# A slide throws a tight jet along the wall; a hit bursts wide, as hard as it landed.
@@ -149,7 +153,7 @@ func _carry(p: CPUParticles3D, up: Vector3, share: float) -> void:
 	p.initial_velocity_max = v.length()
 
 
-## [position, spark direction, spark speed] of the body's fastest-sliding contact faster
+## [position, spark direction, spark speed, sliding speed] of the body's fastest-sliding contact faster
 ## than `min_speed`, or [].
 func _scrape_point(min_speed: float) -> Array:
 	var st := PhysicsServer3D.body_get_direct_state(_car.get_rid())
@@ -171,7 +175,7 @@ func _scrape_point(min_speed: float) -> Array:
 			best = v
 			# Shavings carry on the way the bodywork was going, fanning off the wall and up.
 			var dir := slide * 0.12 + n * 0.8 + Vector3.UP * 0.5
-			out = [pos, dir.normalized(), clampf(v * 0.5, 5.0, 14.0)]
+			out = [pos, dir.normalized(), clampf(v * 0.5, 5.0, 14.0), v]
 	return out
 
 
@@ -358,6 +362,13 @@ static func _sprite_material(additive: bool) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	# After the skid marks (priority 10), or the marks show through the smoke over them.
+	m.render_priority = 20
+	if not additive and Game.quality != Game.Quality.LOW:
+		# Soft particles: puffs thin out where they meet the road and the bodywork instead
+		# of cutting into them along a hard line.
+		m.proximity_fade_enabled = true
+		m.proximity_fade_distance = 0.6
 	if additive:
 		m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		m.disable_fog = true

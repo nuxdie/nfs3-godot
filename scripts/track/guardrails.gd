@@ -1,7 +1,8 @@
 class_name Guardrails
 extends Node3D
-## The guardrails and railings along the road's edge, bent by the cars that hit them. The
-## invisible walls still do the stopping; the rail only shows the blow: pushed out around
+## The guardrails and railings along the road's edge, bent by the cars that hit them. A
+## solid face along each panel's foot (Nfs3TrackBuilder._rail_faces, in the scenery body)
+## does the stopping; the mesh only shows the blow: pushed out around
 ## the point of impact, its top leaning further than its posts and sagging a little, and
 ## scuffed. Nothing is straightened until the race is restarted.
 ##

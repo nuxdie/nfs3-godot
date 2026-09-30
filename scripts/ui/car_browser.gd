@@ -7,8 +7,9 @@ const SORTS := ["CLASS", "NAME", "TOP SPEED", "ACCELERATION", "HANDLING", "BRAKI
 const ROW_H := 44.0
 const CLASS_NAMES := ["CLASS A", "CLASS B", "CLASS C", "BONUS"]
 
-var current := -1             # the car in the race setup, tagged in the list
 var sort := 0
+## (car index) -> bool: only the cars it passes are listed (a one-make cup's). Unset: all.
+var allow: Callable
 var games: TabStrip           # only with both games' cars present
 
 var _ratings := {}            # car index -> [speed, accel, handling, braking] 0..1
@@ -54,8 +55,8 @@ func _layout_head() -> void:
 	_sort_rect = Rect2(size.x - PAD - 200, 152, 200, 28)
 
 
-func _hints() -> Array:
-	return [["↑↓", "BROWSE"], ["←→", "SORT"], ["TAB", "CLASS"], ["ENTER", "SELECT"], ["ESC", "BACK"]]
+func hints() -> Array:
+	return [["↑↓", "BROWSE"], ["←→", "SORT"], ["TAB", "CLASS"]]
 
 
 func _side_step(dir: int) -> void:
@@ -82,6 +83,8 @@ func _build_entries() -> Array[Dictionary]:
 		if group >= 0 and _groups[i] != group:
 			continue
 		if (game == 1 and Game.is_hs_car(i)) or (game == 2 and not Game.is_hs_car(i)):
+			continue
+		if allow.is_valid() and not allow.call(i):
 			continue
 		var g: int = _groups[i]
 		var hay := "%s %s %s" % [Game.cars[i].name, "police pursuit" if g == 4 else CLASS_NAMES[g],
@@ -172,7 +175,7 @@ func _draw_entry(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered
 		UiKit.INK if focused or hovered else Color(UiKit.INK, 0.8))
 	x += minf(nf.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x, max_w) + 10
 	var tf := UiKit.font("cond", 2)
-	for tag in ([["HS", UiKit.INK_DIM]] if Game.is_hs_car(i) else []) + ([["CURRENT", UiKit.ACCENT]] if i == current else []):
+	for tag in ([["HS", UiKit.INK_DIM]] if Game.is_hs_car(i) else []) + ([["SELECTED", UiKit.ACCENT]] if i == current else []):
 		var tw := tf.get_string_size(tag[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 10
 		if x + tw > bx - 100:
 			break

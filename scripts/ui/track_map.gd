@@ -10,7 +10,8 @@ var _reveal := 1.0
 var _lap_t := 0.0
 
 
-func set_outline(points: PackedVector3Array) -> void:
+## `reveal`: trace it in (else it's drawn whole at once).
+func set_outline(points: PackedVector3Array, reveal := true) -> void:
 	_pts.clear()
 	length_m = 0.0
 	if points.size() < 3:
@@ -28,7 +29,7 @@ func set_outline(points: PackedVector3Array) -> void:
 	_aspect = span.x / maxf(span.y, 0.001)
 	for p3 in points:
 		_pts.append((Vector2(p3.x, p3.z) - lo) / s)
-	_reveal = 0.0
+	_reveal = 0.0 if reveal else 1.0
 	_lap_t = 0.0
 	queue_redraw()
 

@@ -16,14 +16,18 @@ var sun: DirectionalLight3D
 var _nodes: Array[Node] = []   # what light() added, so it can be lit again
 
 
-## Loads and builds the track. Doesn't touch the scene tree, so it can run on a worker thread.
-static func load_track(track_id: String) -> TrackWorld:
+## Loads and builds the track (with `night`, its night version where it has one), laid out
+## by `layout` (Game.LAYOUTS: forward, reverse, mirrored, mirrored reverse). Doesn't touch
+## the scene tree, so it can run on a worker thread.
+static func load_track(track_id: String, night := false, layout := 0) -> TrackWorld:
 	var w := TrackWorld.new()
 	w.id = track_id
 	w.root = Node3D.new()
 	w.root.name = "Track"
 	if Game.track_dir(track_id) != "":
-		var t := Nfs3Track.load_dir(Game.track_dir(track_id))
+		var t := Nfs3Track.load_dir(Game.track_dir(track_id), night)
+		if t.error == "" and Game.layout_mirrored(layout):
+			t.mirror_world()
 		if t.error == "" and t.vroad.size() > 10:
 			w.path = Nfs3TrackBuilder.build(t, w.root)
 			w.track_mat = w.root.get_meta("track_material")
@@ -32,6 +36,10 @@ static func load_track(track_id: String) -> TrackWorld:
 			push_warning("Track load failed (%s), using procedural track" % t.error)
 	if w.path == null:
 		w.path = ProceduralTrack.build(w.root)
+	else:
+		w.path.legal_speed = TrafficRules.legal_speeds(track_id, w.path.size())
+	if Game.layout_reversed(layout):
+		w.path.reverse()
 	return w
 
 
@@ -76,6 +84,11 @@ func light(parent: Node, night: bool, weather: bool, vp: Viewport = null) -> voi
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	sun.directional_shadow_max_distance = 120.0
 	_nodes = [we, sun]
+	# High Stakes' lamp and beacon glows, from the same .ini as the sky (night and weather
+	# ones have their own colours).
+	var glows: Node3D = TrackGlows.build(track, horizon.glows) if track and horizon else null
+	if glows:
+		_nodes.append(glows)
 	for n in _nodes:
 		parent.add_child(n)
 	if vp:
@@ -175,7 +188,9 @@ func _apply_horizon(h: Nfs3Horizon, e: Environment, sky: Sky, night: bool, weath
 	# The ambient percentages scale the track's baked light (and the sky's layers above); a
 	# floor keeps night tracks readable (5/10/15 % lands close to the old hand-tuned tint).
 	if track_mat:
-		track_mat.set_shader_parameter("night_tint", tint)
+		# High Stakes' night versions have the night baked in, lamp pools and all: only a touch
+		# more darkness on top, or the pools go out.
+		track_mat.set_shader_parameter("night_tint", Vector3(0.75, 0.75, 0.8) if night and track.night_version else tint)
 	if night:
 		e.ambient_light_color = Color(tint.x, tint.y, tint.z) * 0.7
 	elif weather:

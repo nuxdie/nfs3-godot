@@ -2,7 +2,8 @@ class_name Hud
 extends CanvasLayer
 ## Race HUD in the front end's style (see UiKit): segmented tach with speed and
 ## gear, timing tower, lap counter, minimap, framed rear-view mirror, banner
-## messages and countdown, plus the pause and results screens.
+## messages and countdown, plus the pause and results screens. Each part can be hidden
+## (Game.hud_shows, Settings -> HUD, also from the pause menu); F1 hides the lot.
 
 const RED := UiKit.COP_RED
 const GO := Color(0.35, 1.0, 0.5)
@@ -11,7 +12,13 @@ const M := 36.0
 const EMPTY_PIP := Color(0.05, 0.055, 0.07, 0.4)
 
 var race: Node
-var player: Car
+var player: Car:
+	set(v):
+		player = v
+		if _classic:
+			_classic.car = v
+## High Stakes' own dials in place of the tach (Settings -> HUD), or null.
+var _classic: ClassicGauges
 var pursuit := false
 
 var _root: Control
@@ -33,10 +40,10 @@ var _tach_c := Vector2.INF
 var _mirror: TextureRect
 var _mirror_vp: SubViewport
 var _mirror_cam: Camera3D
-var _loading: Control
-var _loading_text := ""
+var _loading: LoadingScreen
 var _pause: Control
 var _pause_list: ActionList
+var _settings: SettingsPanel
 var _results: Control
 var _results_list: ActionList
 var _results_data := {}
@@ -95,14 +102,31 @@ func _ready() -> void:
 	_text_fg.draw.connect(_on_draw_text.bind(false))
 	_root.add_child(_text_fg)
 	_build_pause()
-	_loading = Control.new()
-	_loading.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_loading.visible = false
-	_loading.draw.connect(func():
-		_loading.draw_rect(Rect2(Vector2.ZERO, _loading.size), Color.BLACK)
-		_loading.draw_string(UiKit.font("display"), Vector2(48, _loading.size.y - 40 - 12), _loading_text,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 34, UiKit.INK))
-	_root.add_child(_loading)
+	_settings = SettingsPanel.new()
+	_settings.in_race = true
+	_settings.changed.connect(_apply_hud)
+	_settings.closed.connect(func(): _pause.visible = true; _pause_list.focus = 2)
+	_root.add_child(_settings)
+	_apply_hud()
+	# It's a second view of the whole scene: on Low it starts off (M turns it on).
+	_mirror.visible = Game.hud_shows("mirror") and Game.quality != Game.Quality.LOW
+
+
+## The HUD's parts as the settings have them now.
+func _apply_hud() -> void:
+	var classic := Game.hud_style > 0 and ClassicGauges.available()
+	if classic and _classic == null:
+		_classic = ClassicGauges.new()
+		_classic.car = player
+		_root.add_child(_classic)
+		_root.move_child(_classic, _pause.get_index())
+	elif not classic and _classic:
+		_classic.queue_free()
+		_classic = null
+	if _classic:
+		_classic.visible = Game.hud_shows("speed")
+		_classic.placement = Game.hud_style - 1
+	_mirror.visible = Game.hud_shows("mirror")
 
 
 func mirror_viewport() -> SubViewport:
@@ -125,8 +149,6 @@ func _setup_mirror() -> void:
 	_mirror.position = Vector2(-200, 16)
 	_mirror.flip_h = true
 	_mirror.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# It's a second view of the whole scene: on Low it starts off (M turns it on).
-	_mirror.visible = Game.quality != Game.Quality.LOW
 	_root.add_child(_mirror)
 
 
@@ -165,23 +187,32 @@ func _build_pause() -> void:
 	deco.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	deco.draw.connect(_draw_pause.bind(deco))
 	_pause.add_child(deco)
-	_pause_list = ActionList.new(PackedStringArray(["Resume", "Restart", "Quit to menu"]))
+	_pause_list = ActionList.new(PackedStringArray(["Resume", "Restart", "Settings", "Quit to menu"]))
 	_pause_list.set_item_size(Vector2(330, 54))
 	_pause_list.position = Vector2(48, 250)
-	_pause_list.activated.connect(func(i: int): [_resume, _restart, _quit][i].call())
+	_pause_list.activated.connect(func(i: int): [_resume, _restart, _open_settings, _quit][i].call())
 	_pause.add_child(_pause_list)
 
 
 # ------------------------------------------------------------------ API
 
-func show_loading(text: String) -> void:
-	_loading_text = text.trim_suffix("...").to_upper()
-	_loading.visible = true
-	_loading.queue_redraw()
+## The loading screen (the one the menu faded to), over everything until hide_loading().
+func show_loading() -> void:
+	if _loading == null:
+		_loading = LoadingScreen.new()
+		_root.add_child(_loading)
+
+
+## A stage of the loading has begun: `label` says what; the bar runs from `from` toward `to`.
+func loading_stage(label: String, from: float, to: float) -> void:
+	if _loading:
+		_loading.stage(label, from, to)
 
 
 func hide_loading() -> void:
-	_loading.visible = false
+	if _loading:
+		_loading.finish()
+		_loading = null
 	_hint_t = 12.0
 
 
@@ -205,7 +236,9 @@ func update_results(rows: Array) -> void:
 
 
 ## `rows`: [{name, time, best, you?, t?}] in finishing order.
-func show_results(title: String, rows: Array, extra: String) -> void:
+## `actions`: [[label, Callable]] in place of "Race again" and "Main menu" (a tournament's
+## next race).
+func show_results(title: String, rows: Array, extra: String, actions: Array = []) -> void:
 	_results_data = {"title": title, "rows": rows, "extra": extra}
 	_results_t = 0.0
 	_results = Control.new()
@@ -217,9 +250,11 @@ func show_results(title: String, rows: Array, extra: String) -> void:
 	deco.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	deco.draw.connect(_draw_results.bind(deco))
 	_results.add_child(deco)
-	_results_list = ActionList.new(PackedStringArray(["Race again", "Main menu"]), true)
+	if actions.is_empty():
+		actions = [["Race again", _restart], ["Main menu", _quit]]
+	_results_list = ActionList.new(PackedStringArray(actions.map(func(a: Array) -> String: return a[0])), true)
 	_results_list.set_item_size(Vector2(240, 54))
-	_results_list.activated.connect(func(i: int): [_restart, _quit][i].call())
+	_results_list.activated.connect(func(i: int): (actions[i][1] as Callable).call())
 	_results.add_child(_results_list)
 	_results_list.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_results_list.position = Vector2(48, _root.size.y - 40 - 54 - 36)
@@ -247,7 +282,14 @@ static func ordinal(n: int) -> String:
 # ------------------------------------------------------------------ input
 
 func _unhandled_input(e: InputEvent) -> void:
-	if e.is_action_pressed("pause") and _results == null:
+	if _settings.visible or _loading:
+		return
+	if e.is_action_pressed("toggle_hud") and _results == null:
+		Game.hud_on = not Game.hud_on
+		Game.save_settings()
+		_apply_hud()
+		get_viewport().set_input_as_handled()
+	elif e.is_action_pressed("pause") and _results == null:
 		if get_tree().paused:
 			_resume()
 		else:
@@ -258,8 +300,14 @@ func _unhandled_input(e: InputEvent) -> void:
 			create_tween().tween_property(_pause, "modulate:a", 1.0, 0.15)
 			_set_mouse_look(false)
 		get_viewport().set_input_as_handled()
-	elif e.is_action_pressed("mirror") and _results == null and not get_tree().paused:
+	elif e.is_action_pressed("mirror") and _results == null and not get_tree().paused and Game.hud_on:
 		_mirror.visible = not _mirror.visible
+
+
+## The settings over the paused race (the pause menu out of the way, so the HUD's changes show).
+func _open_settings() -> void:
+	_pause.visible = false
+	_settings.open(1)
 
 
 func _resume() -> void:
@@ -278,7 +326,13 @@ func _restart() -> void:
 	get_tree().reload_current_scene()
 
 
+func quit() -> void:
+	_quit()
+
+
 func _quit() -> void:
+	# Leaving mid-circuit forfeits it.
+	Game.circuit_run = {}
 	get_tree().paused = false
 	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
@@ -310,7 +364,7 @@ func _process(dt: float) -> void:
 	_record_splits()
 	_draw.queue_redraw()
 	var key := [player, _draw.size, _mirror.visible, _pause.visible or _results != null, race.path if race else null,
-		Game.units_kmh]
+		Game.units_kmh, Game.hud_on, Game.hud_hidden.duplicate(), _classic]
 	if key != _static_key:
 		_static_key = key
 		_static.queue_redraw()
@@ -343,16 +397,21 @@ func _on_draw() -> void:
 	if _pause.visible or _results:
 		return
 	var size := _draw.size
-	_draw_tach(Vector2(size.x - M - 118, size.y - M - 104))
+	if _classic == null and Game.hud_shows("speed"):
+		_draw_tach(Vector2(size.x - M - 118, size.y - M - 104))
 	_draw_info(size)
-	_draw_map(Rect2(M, size.y - M - 190, 190, 190))
-	if pursuit:
+	if Game.hud_shows("map"):
+		_draw_map(Rect2(M, size.y - M - 190, 190, 190))
+	if pursuit and Game.hud_shows("lights"):
 		_draw_pursuit(size)
-	_draw_banner(size)
+	if Game.hud_shows("messages"):
+		_draw_banner(size)
 	if not _tri_idx.is_empty():
 		RenderingServer.canvas_item_add_triangle_array(_draw.get_canvas_item(), _tri_idx, _tri_pts, _tri_cols)
-	_draw_countdown(size)
-	_draw_hints(size)
+	if Game.hud_shows("countdown"):
+		_draw_countdown(size)
+	if Game.hud_shows("hints"):
+		_draw_hints(size)
 
 
 ## The text recorded by _on_draw: its outlines, or the text itself over them.
@@ -422,8 +481,10 @@ func _on_draw_static() -> void:
 	if _mirror.visible:
 		var mr := _mirror.get_rect()
 		_static.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
-	_draw_tach_dial(Vector2(size.x - M - 118, size.y - M - 104))
-	_draw_map_outline(Rect2(M, size.y - M - 190, 190, 190))
+	if _classic == null and Game.hud_shows("speed"):
+		_draw_tach_dial(Vector2(size.x - M - 118, size.y - M - 104))
+	if Game.hud_shows("map"):
+		_draw_map_outline(Rect2(M, size.y - M - 190, 190, 190))
 
 
 ## Unlit segments, the thousands and the units under the speed.
@@ -523,10 +584,16 @@ func _draw_info(size: Vector2) -> void:
 	var r: Dictionary = race.player_racer()
 	if r.is_empty() or Game.mode == Game.Mode.FREE_ROAM:
 		return
-	var y := _draw_tower(Vector2(M, M))
-	if Game.mode == Game.Mode.HOT_PURSUIT:
+	# High Stakes' dials at the top: the field lists under the speedometer.
+	var top := M
+	if _classic and _classic.visible and _classic.placement == ClassicGauges.Placement.TOP:
+		top += ClassicGauges.dial_height(size.y) - 8.0
+	var y := _draw_tower(Vector2(M, top)) if Game.hud_shows("standings") else top - 10.0
+	if Game.mode == Game.Mode.HOT_PURSUIT and Game.hud_shows("police"):
 		_draw_cop_block(y + 26)
-	# Lap counter and progress, over the minimap.
+	if not Game.hud_shows("lap"):
+		return
+	# Lap counter and progress, over the minimap (or where it would be).
 	var map_y := size.y - M - 190
 	var lap := clampi(r.lap + 1, 1, Game.laps)
 	_str("LAP", Vector2(M, map_y - 52), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
@@ -666,6 +733,9 @@ func _draw_countdown(size: Vector2) -> void:
 
 
 func _draw_hints(size: Vector2) -> void:
+	# Over High Stakes' dials when they're at the bottom.
+	if _classic and _classic.visible and _classic.placement == ClassicGauges.Placement.BOTTOM:
+		size.y -= ClassicGauges.dial_height(size.y) + 14.0
 	if _cam_toast_t > 0.0:
 		var a := clampf(_cam_toast_t / 0.3, 0.0, 1.0)
 		var txt := "CAMERA  ·  " + _cam_name.to_upper()
@@ -673,9 +743,9 @@ func _draw_hints(size: Vector2) -> void:
 		return
 	if _hint_t <= 0.0:
 		return
-	var hints := [["C", "CAMERA"], ["R", "RESET"], ["M", "MIRROR"], ["L", "LIGHTS"], ["ESC", "PAUSE"]]
+	var hints := [["C", "CAMERA"], ["R", "RESET"], ["M", "MIRROR"], ["L", "LIGHTS"], ["F1", "HUD"], ["ESC", "PAUSE"]]
 	if Game.mode == Game.Mode.SPECTATE:
-		hints = [["←→", "SWITCH CAR"], ["C", "CAMERA"], ["M", "MIRROR"], ["ESC", "PAUSE"]]
+		hints = [["←→", "SWITCH CAR"], ["C", "CAMERA"], ["M", "MIRROR"], ["F1", "HUD"], ["ESC", "PAUSE"]]
 	var w := 0.0
 	for h in hints:
 		w += UiKit.text_width("cond", h[0], 13, 1) + 12 + 7 + UiKit.text_width("cond", h[1], 13, 2) + 22

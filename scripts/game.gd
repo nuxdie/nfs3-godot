@@ -24,6 +24,12 @@ const HS_TRACK_NAMES := {
 	"rockypas": "Rocky Pass HS", "country": "Country Woods HS", "lostcany": "Lost Canyons HS",
 	"aquatica": "Aquatica HS", "summit": "The Summit HS", "empire": "Empire City HS",
 }
+## High Stakes' own numbering of its tracks (its menu slides, FeArt/slides/tN_00.qfs).
+const HS_SLIDES := {
+	"germany": 0, "uk": 1, "france": 2, "hills": 3, "coastal": 4, "park": 5, "snowy": 6,
+	"gt1": 7, "gt2": 8, "gt3": 9, "hometown": 10, "redrock": 11, "atlantic": 12, "rockypas": 13,
+	"country": 14, "lostcany": 15, "aquatica": 16, "summit": 17, "empire": 18,
+}
 const PROCEDURAL_TRACK := "procedural"
 const SETTINGS_PATH := "user://settings.cfg"
 
@@ -35,12 +41,29 @@ var cop_cars: Array[String] = []
 var traffic_cars: Array[String] = []
 var hs_cop_cars: Array[String] = []      # High Stakes' police and traffic, for its tracks
 var hs_traffic_cars: Array[String] = []
+var hs_helicopter := ""                  # High Stakes' police helicopter's folder (car.viv with hel.fce), or ""
 
 var mode := Mode.SINGLE_RACE
 var track_id := PROCEDURAL_TRACK
 var car_index := 0
 var laps := 2
 var opponents := 3
+var upgrades := {}          # car id -> High Stakes upgrade level 1..3 (Car.UPGRADES); absent is stock
+var paints := {}            # car id -> which of its paint colours (FCE colour list); absent is the first
+var rival_upgrades := 0     # 0 stock, 1 as upgraded as yours, 2 fully upgraded
+var rival_class := 0        # 0 rivals of your car's class (nearest classes if too few), 1 any
+var intro_flyby := true     # the track's fly-by round the grid before the countdown
+var hud_style := 0          # 0 this game's tach; High Stakes' own dials (ClassicGauges): 1 at the top as it had them, 2 bottom centre
+## The race HUD's parts, each of which can be hidden (Settings -> HUD): id -> caption.
+const HUD_WIDGETS := {
+	"speed": "Speed", "standings": "Standings", "police": "Police", "lap": "Lap", "map": "Map",
+	"mirror": "Mirror", "messages": "Messages", "countdown": "Countdown", "lights": "Light bar", "hints": "Key hints",
+}
+var hud_on := true          # the whole HUD (F1 in a race)
+var hud_hidden: Array[String] = []   # HUD_WIDGETS ids turned off
+## The way round the track (both games' reverse and mirror options): an index into LAYOUTS.
+var layout := 0
+const LAYOUTS := ["Forward", "Reverse", "Mirror", "Mir. rev."]
 var traffic := true
 var units_kmh := true
 var night := false
@@ -51,6 +74,13 @@ var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
 var fullscreen := false
 var vsync := true
 var volume := 8           # master volume in tenths, 0..10
+var music_volume := 6     # the music's, 0..10 (0 turns it off)
+var sfx_volume := 10      # engines, crashes, weather and menu clicks, 0..10
+var voice_volume := 10    # the countdown, lap calls and the police, 0..10
+const BUS_MUSIC := &"Music"   # the audio buses the dials set, all sending to Master
+const BUS_SFX := &"SFX"
+const BUS_VOICE := &"Voice"
+var music: MusicPlayer    # plays across scenes: the track's song in a race, else the menu music
 var render_scale := 0.0   # where DynamicResolution left the 3D resolution: the next race starts there
 var render_scale_quality := -1   # ...if it's on the same quality preset
 var last_results: Array = []
@@ -63,9 +93,15 @@ var _saved_car_id := ""   # the car picked last time, found again by id after th
 func _ready() -> void:
 	_setup_input()
 	quality = default_quality()
+	_migrate_user_dir()
 	_load_settings()
 	scan_data()
 	apply_display()
+	music = MusicPlayer.new()
+	add_child(music)
+	add_child(MenuSounds.new())
+	get_tree().scene_changed.connect(_on_scene_changed)
+	_on_scene_changed.call_deferred()
 	# Developer hook: `godot --path . -- --autotest [track] [mode]` plays a scripted run.
 	if "--autotest" in OS.get_cmdline_user_args():
 		var t: Node = load("res://tools/autotest.gd").new()
@@ -82,6 +118,15 @@ func _ready() -> void:
 	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
 	if "--fxshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/fx_shots.gd").new())
+	# `godot --headless --path . -- --careertest` plays the tournaments through on paper.
+	if "--careertest" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/career_test.gd").new())
+	# `godot --headless --path . -- --handling [car ...]` runs skidpad, lane change and braking tests.
+	if "--handling" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/car_handling.gd").new())
+	# `godot --path . -- --hsqa <track>` photographs a High Stakes track with its collision shown.
+	if "--hsqa" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/hs_qa.gd").new())
 
 
 # ------------------------------------------------------------------ data files
@@ -117,6 +162,7 @@ func scan_data() -> void:
 	traffic_cars.clear()
 	hs_cop_cars.clear()
 	hs_traffic_cars.clear()
+	hs_helicopter = ""
 	var roots := PackedStringArray([data_root]) + candidate_roots()
 	data_root = ""
 	for r in roots:
@@ -212,6 +258,11 @@ func _scan_hs_cars(cdir: String) -> void:
 	for c in _sorted_dirs(traffic_dir):
 		if c.to_lower() != "pursuit" and find_ci(traffic_dir.path_join(c), "car.viv") != "":
 			hs_traffic_cars.append(traffic_dir.path_join(c))
+	var choppers := find_ci(traffic_dir, "choppers")
+	for c in _sorted_dirs(choppers):
+		if find_ci(choppers.path_join(c), "car.viv") != "":
+			hs_helicopter = choppers.path_join(c)
+			break
 
 
 ## The police cars for the chosen track: High Stakes' on its tracks, NFS3's on the others
@@ -325,6 +376,145 @@ func is_pursuit_car(i: int) -> bool:
 	return str(cars[i].name).begins_with("Pursuit")
 
 
+var _rank_cache := {}
+
+
+## Car `i`'s High Stakes ranking (Nfs3Car.read_rank: class, serial, ratings, upgradable).
+## An NFS3 car High Stakes has too (the same serial) goes by High Stakes' figures for it;
+## the stand-ins have none ({}).
+func car_rank(i: int) -> Dictionary:
+	if not _rank_cache.has(i):
+		var spec := car_spec(i)
+		var r: Dictionary = spec.rank if "rank" in spec else {}
+		if not r.is_empty() and not is_hs_car(i):
+			for k in cars.size():
+				if is_hs_car(k) and not is_pursuit_car(k) and car_spec(k).rank.get("serial", -1) == r.serial:
+					r = car_spec(k).rank
+					break
+		_rank_cache[i] = r
+	return _rank_cache[i]
+
+
+## Car `i`'s High Stakes class: 0..3 for AAA, AA, A, B; -1 none (the Knockout). The
+## stand-ins go by their carp class a class down (A as AA...).
+func hs_class(i: int) -> int:
+	var r := car_rank(i)
+	if r.has("class"):
+		return r.class
+	var c := car_class(i)
+	return c + 1 if c < 3 else -1
+
+
+## Car `i`'s overall rating (High Stakes' 1..20 bar) at upgrade `level`.
+func car_rating(i: int, level := 0) -> int:
+	var ratings: Array = car_rank(i).get("ratings", [10])
+	return ratings[clampi(level, 0, ratings.size() - 1)]
+
+
+## Car `i`'s serial number (fedata's), what a "Model" restriction names.
+func car_serial(i: int) -> int:
+	return int(car_rank(i).get("serial", car_spec(i).carp_value(0, -1.0)))
+
+
+## The name of the car with serial `serial` (High Stakes' own first), or "".
+func serial_name(serial: int) -> String:
+	var found := ""
+	for i in cars.size():
+		if not is_pursuit_car(i) and car_serial(i) == serial:
+			if is_hs_car(i):
+				return cars[i].name
+			if found == "":
+				found = cars[i].name
+	return found
+
+
+var _hs_props := {}
+
+
+## A High Stakes GameArt model ("cone", "median", "haybale", "flare", "cop0" the officer),
+## cached; null without High Stakes data.
+func hs_prop(name: String, part := "") -> ArrayMesh:
+	if hs_root == "":
+		return null
+	if not _hs_props.has(name):
+		_hs_props[name] = Fce4.load_prop(find_ci(hs_root, "gameart"), name, part)
+	return _hs_props[name]
+
+
+## Whether the race HUD shows widget `id` (HUD_WIDGETS).
+func hud_shows(id: String) -> bool:
+	return hud_on and not id in hud_hidden
+
+
+## Car `i`'s upgrade level (0 stock).
+func upgrade_of(i: int) -> int:
+	return int(upgrades.get(cars[i].id, 0)) if i >= 0 and i < cars.size() else 0
+
+
+func set_upgrade(i: int, level: int) -> void:
+	if level <= 0:
+		upgrades.erase(cars[i].id)
+	else:
+		upgrades[cars[i].id] = level
+
+
+func layout_reversed(l := layout) -> bool:
+	return l == 1 or l == 3
+
+
+## Mirrored only where the track comes from game data (the procedural one has no mirror).
+func layout_mirrored(l := layout) -> bool:
+	return l >= 2
+
+
+## Car `i`'s chosen paint (index into its colours).
+func paint_of(i: int) -> int:
+	return int(paints.get(cars[i].id, 0)) if i >= 0 and i < cars.size() else 0
+
+
+## The tint Car.setup takes for car `i`'s chosen paint (none: the file's first).
+func paint_tint(i: int, data: Object) -> Color:
+	var p := paint_of(i)
+	return data.colours[p] if p > 0 and p < data.colours.size() else Color(0, 0, 0, 0)
+
+
+## A rival's upgrade level by the setting (the player's car is `car_index`).
+func rival_upgrade() -> int:
+	match rival_upgrades:
+		1: return upgrade_of(car_index)
+		2: return Car.UPGRADES.size()
+	return 0
+
+
+## The cars a single race's rivals are picked from (not the player's own, not the police
+## ones), shuffled, the first `n` of them the ones to take. With rival_class "Yours" those
+## of the player's High Stakes class (hs_class) come first, then the nearer classes.
+func rival_pool(n: int) -> Array:
+	var pool: Array = range(cars.size()).filter(func(i: int) -> bool:
+		return i != car_index and not is_pursuit_car(i))
+	pool.shuffle()
+	if rival_class == 1:
+		return pool
+	var class_of := func(i: int) -> int:
+		var c := hs_class(i)
+		return c if c >= 0 else 4
+	var mine: int = class_of.call(car_index)
+	var by_gap := {}
+	for i: int in pool:
+		var gap := absi(class_of.call(i) - mine)
+		if not by_gap.has(gap):
+			by_gap[gap] = []
+		by_gap[gap].append(i)
+	var out := []
+	var gaps := by_gap.keys()
+	gaps.sort()
+	for gap: int in gaps:
+		if gap > 0 and out.size() >= n:
+			break
+		out.append_array(by_gap[gap])
+	return out
+
+
 func player_car_data() -> Object:
 	var c: Dictionary = cars[car_index]
 	return load_car(c.path, car_index)
@@ -341,6 +531,15 @@ func save_settings() -> void:
 	cf.set_value("game", "car_id", cars[car_index].id if car_index < cars.size() else "")
 	cf.set_value("game", "laps", laps)
 	cf.set_value("game", "opponents", opponents)
+	cf.set_value("game", "upgrades", upgrades)
+	cf.set_value("game", "paints", paints)
+	cf.set_value("game", "rival_upgrades", rival_upgrades)
+	cf.set_value("game", "rival_class", rival_class)
+	cf.set_value("game", "intro", intro_flyby)
+	cf.set_value("game", "hud", hud_style)
+	cf.set_value("game", "hud_on", hud_on)
+	cf.set_value("game", "hud_hidden", PackedStringArray(hud_hidden))
+	cf.set_value("game", "layout", layout)
 	cf.set_value("game", "traffic", traffic)
 	cf.set_value("game", "kmh", units_kmh)
 	cf.set_value("game", "night", night)
@@ -351,7 +550,28 @@ func save_settings() -> void:
 	cf.set_value("game", "fullscreen", fullscreen)
 	cf.set_value("game", "vsync", vsync)
 	cf.set_value("game", "volume", volume)
+	cf.set_value("game", "music_volume", music_volume)
+	cf.set_value("game", "sfx_volume", sfx_volume)
+	cf.set_value("game", "voice_volume", voice_volume)
 	cf.save(SETTINGS_PATH)
+
+
+## The game was "NFS3 Revival" until it took in High Stakes, and Godot keeps user:// under
+## the project's name: the first time, the settings, tournament progress and rendered track
+## postcards are copied over from the old name's folder (which is left as it was).
+func _migrate_user_dir() -> void:
+	var here := ProjectSettings.globalize_path("user://").trim_suffix("/")
+	var old := here.get_base_dir().path_join("NFS3 Revival")
+	if old == here or FileAccess.file_exists(here.path_join("settings.cfg")) or not DirAccess.dir_exists_absolute(old):
+		return
+	for f in ["settings.cfg", "career.cfg"]:
+		if FileAccess.file_exists(old.path_join(f)):
+			DirAccess.copy_absolute(old.path_join(f), here.path_join(f))
+	var cards := old.path_join("postcards")
+	if DirAccess.dir_exists_absolute(cards):
+		DirAccess.make_dir_recursive_absolute(here.path_join("postcards"))
+		for f in DirAccess.get_files_at(cards):
+			DirAccess.copy_absolute(cards.path_join(f), here.path_join("postcards").path_join(f))
 
 
 func _load_settings() -> void:
@@ -366,6 +586,28 @@ func _load_settings() -> void:
 	_saved_car_id = str(cf.get_value("game", "car_id", ""))
 	laps = clampi(_int(cf, "laps", laps), 1, 8)
 	opponents = clampi(_int(cf, "opponents", opponents), 0, 7)
+	var ups: Variant = cf.get_value("game", "upgrades", {})
+	if ups is Dictionary:
+		for k in ups:
+			if ups[k] is int:
+				upgrades[str(k)] = clampi(ups[k], 0, Car.UPGRADES.size())
+	rival_upgrades = clampi(_int(cf, "rival_upgrades", rival_upgrades), 0, 2)
+	rival_class = clampi(_int(cf, "rival_class", rival_class), 0, 1)
+	var pts: Variant = cf.get_value("game", "paints", {})
+	if pts is Dictionary:
+		for k in pts:
+			if pts[k] is int:
+				paints[str(k)] = clampi(pts[k], 0, 15)
+	intro_flyby = _bool(cf, "intro", intro_flyby)
+	hud_style = clampi(_int(cf, "hud", hud_style), 0, 2)
+	hud_on = _bool(cf, "hud_on", hud_on)
+	var hidden: Variant = cf.get_value("game", "hud_hidden", PackedStringArray())
+	if hidden is PackedStringArray:
+		hud_hidden.clear()
+		for id in hidden:
+			if HUD_WIDGETS.has(id):
+				hud_hidden.append(id)
+	layout = clampi(_int(cf, "layout", layout), 0, LAYOUTS.size() - 1)
 	traffic = _bool(cf, "traffic", traffic)
 	units_kmh = _bool(cf, "kmh", units_kmh)
 	night = _bool(cf, "night", night)
@@ -376,6 +618,9 @@ func _load_settings() -> void:
 	fullscreen = _bool(cf, "fullscreen", fullscreen)
 	vsync = _bool(cf, "vsync", vsync)
 	volume = clampi(_int(cf, "volume", volume), 0, 10)
+	music_volume = clampi(_int(cf, "music_volume", music_volume), 0, 10)
+	sfx_volume = clampi(_int(cf, "sfx_volume", sfx_volume), 0, 10)
+	voice_volume = clampi(_int(cf, "voice_volume", voice_volume), 0, 10)
 
 
 func _int(cf: ConfigFile, key: String, fallback: int) -> int:
@@ -390,9 +635,19 @@ func _bool(cf: ConfigFile, key: String, fallback: bool) -> bool:
 
 # ------------------------------------------------------------------ graphics
 
-## Window mode, v-sync and master volume, from the settings.
+## A race plays its track's song, everything else the menu music.
+func _on_scene_changed() -> void:
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	music.play_for(track_id if scene.scene_file_path.ends_with("race.tscn") else "")
+
+
+## Window mode, v-sync and the volumes, from the settings.
 func apply_display() -> void:
 	AudioServer.set_bus_volume_linear(0, volume / 10.0)
+	for b: Array in [[BUS_MUSIC, music_volume], [BUS_SFX, sfx_volume], [BUS_VOICE, voice_volume]]:
+		AudioServer.set_bus_volume_linear(_bus(b[0]), b[1] / 10.0)
 	if DisplayServer.get_name() == "headless":
 		return
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if vsync else DisplayServer.VSYNC_DISABLED)
@@ -400,6 +655,17 @@ func apply_display() -> void:
 	var have := DisplayServer.window_get_mode()
 	if (have == DisplayServer.WINDOW_MODE_FULLSCREEN or have == DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN) != fullscreen:
 		DisplayServer.window_set_mode(want)
+
+
+## The bus's index, made (sending to Master) the first time it's asked for.
+func _bus(bus_name: StringName) -> int:
+	var i := AudioServer.get_bus_index(bus_name)
+	if i < 0:
+		i = AudioServer.bus_count
+		AudioServer.add_bus()
+		AudioServer.set_bus_name(i, bus_name)
+		AudioServer.set_bus_send(i, &"Master")
+	return i
 
 
 ## F11 / Alt+Enter toggle fullscreen anywhere.
@@ -483,6 +749,7 @@ func _setup_input() -> void:
 	_bind("high_beam", [KEY_K], [JOY_BUTTON_DPAD_DOWN])
 	_bind("pause", [KEY_ESCAPE, KEY_P], [JOY_BUTTON_START])
 	_bind("handling_feel", [KEY_F6], [])
+	_bind("toggle_hud", [KEY_F1], [])
 	_bind("watch_prev", [KEY_Q, KEY_PAGEUP], [])
 	_bind("watch_next", [KEY_E, KEY_PAGEDOWN, KEY_TAB], [])
 	# Analog steering on the left stick.
@@ -509,3 +776,241 @@ func _bind(action: String, keys: Array, buttons: Array, axis := -1) -> void:
 		ev.axis = axis
 		ev.axis_value = 1.0
 		InputMap.action_add_event(action, ev)
+
+
+# ------------------------------------------------------------------ tournaments
+
+## High Stakes' tournaments (HsCareer): money won, circuits won, the tournaments opened,
+## kept in user://career.cfg. The upgrades and cars stay free: money is the entry fees and
+## the prizes, a score to climb.
+const CAREER_PATH := "user://career.cfg"
+const CAREER_START_MONEY := 25000
+const CIRCUIT_POINTS := [10, 8, 6, 5, 4, 3, 2, 1]
+
+var career_path := CAREER_PATH   # (tests point this elsewhere)
+var career_money := CAREER_START_MONEY
+var career_won := {}        # circuit id -> best final place (1 = won)
+var career_open := {}       # tournament ids opened by winning others
+## The circuit being raced, between its races: {tournament, circuit, race (index), field
+## (rival car indices), points (key -> points; key "you" or the field index), out (field
+## indices knocked out, in order), you_out}. {} outside a tournament.
+var circuit_run := {}
+var _career: HsCareer
+var _career_loaded := false
+
+
+func career_data() -> HsCareer:
+	if not _career_loaded:
+		_career_loaded = true
+		if hs_root != "":
+			_career = HsCareer.load_dir(find_ci(hs_root, "text"))
+		var cf := ConfigFile.new()
+		if cf.load(career_path) == OK:
+			var m: Variant = cf.get_value("career", "money", career_money)
+			career_money = int(m) if m is int or m is float else career_money
+			var w: Variant = cf.get_value("career", "won", {})
+			career_won = w if w is Dictionary else {}
+			var o: Variant = cf.get_value("career", "open", {})
+			career_open = o if o is Dictionary else {}
+	return _career
+
+
+func save_career() -> void:
+	var cf := ConfigFile.new()
+	cf.set_value("career", "money", career_money)
+	cf.set_value("career", "won", career_won)
+	cf.set_value("career", "open", career_open)
+	cf.save(career_path)
+
+
+func tournament_open(t: Dictionary) -> bool:
+	return t.open or career_open.has(t.id)
+
+
+## Whether car `i` may enter circuit `c`, by its restriction as High Stakes checks it: its
+## class, that class and under (AAA the top, so "under" is the higher numbers), a model, a
+## make (by man.dat's names); a loaner circuit takes none of yours. Never a police car.
+func circuit_allows(c: Dictionary, i: int) -> bool:
+	if is_pursuit_car(i):
+		return false
+	var v: int = c.value
+	match c.restriction:
+		HsCareer.CLASS:
+			return hs_class(i) == v
+		HsCareer.CLASS_AND_UNDER:
+			return hs_class(i) >= v
+		HsCareer.MODEL:
+			return car_serial(i) == v
+		HsCareer.MANUFACTURER:
+			if v < 0 or v >= _career.makes.size():
+				return false
+			var make := _career.makes[v]
+			var info: Dictionary = car_spec(i).info if "info" in car_spec(i) else {}
+			return str(info.get("make", "")).begins_with(make) or str(cars[i].name).begins_with(make)
+		HsCareer.LOANER:
+			return false
+	return true
+
+
+## Serials (fedata's) of the bonus cars High Stakes keeps out of its fields (the bonus
+## Camaro and Porsche, La Niña, the MHRT Commodore), and of the three the Tournament of
+## Champions races instead (CLK-GTR, McLaren F1 GTR, the bonus Porsche).
+const BONUS_SERIALS := [41, 42, 39, 24]
+const CHAMPION_SERIALS := [18, 2, 42]
+const CHAMPIONS_CIRCUIT := 32
+
+
+## Circuit `c`'s opponents, [{car, upgrade}], dealt as High Stakes deals them. The cars:
+## every one the circuit allows at each upgrade level it takes (only High Stakes' own when
+## they're installed, not the bonus cars, not the Knockout), ranked by their rating there,
+## weakest first; an open circuit leaves out those rated over one above your car. Each
+## opponent takes the one at a percentile drawn from the circuit's third mam row: mid - 50
+## plus two throws of 0..50, thrown again until it's within min..max. A car race's
+## opponent drives the car it's for; the Tournament of Champions deals its race cars in
+## order. As in the original the same car can come up more than once.
+func deal_field(c: Dictionary) -> Array:
+	var hs_only := range(cars.size()).any(func(k: int) -> bool: return is_hs_car(k))
+	var champions: bool = c.id == CHAMPIONS_CIRCUIT
+	var mine := car_rating(car_index, upgrade_of(car_index))
+	var entries := []
+	for i in cars.size():
+		if is_pursuit_car(i) or (hs_only and not is_hs_car(i)):
+			continue
+		var serial := car_serial(i)
+		if champions:
+			if not serial in CHAMPION_SERIALS:
+				continue
+		elif c.award >= 0:
+			if serial != c.award:
+				continue
+		elif serial in BONUS_SERIALS or hs_class(i) < 0 or not circuit_allows(c, i):
+			continue
+		for level in (Car.UPGRADES.size() + 1 if car_rank(i).get("upgradable", false) else 1):
+			var rating := car_rating(i, level)
+			if c.restriction == HsCareer.OPEN and rating > mine + 1:
+				continue
+			entries.append({"car": i, "upgrade": level, "rating": rating})
+	entries.shuffle()
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.rating < b.rating)
+	var field := []
+	var row := _career.mam_row(c.mam[2])
+	for k in c.opponents:
+		if entries.is_empty():
+			field.append({"car": car_index, "upgrade": upgrade_of(car_index)})
+			continue
+		var at := mini(k, entries.size() - 1)
+		if not champions:
+			var roll := row.y
+			for tries in 100:
+				roll = row.y - 50 + randi() % 51 + randi() % 51
+				if roll >= row.x and roll <= row.z:
+					break
+			roll = clampi(roll, row.x, row.z)
+			at = clampi(roundi((entries.size() - 1) * roll * 0.01), 0, entries.size() - 1)
+		field.append({"car": entries[at].car, "upgrade": entries[at].upgrade})
+	return field
+
+
+## Enters circuit `cid` of tournament `t` with the chosen car: pays the fee, deals the
+## field and sets up its first race. "" on success, else why not.
+func start_circuit(t: Dictionary, cid: int) -> String:
+	var c: Dictionary = _career.circuits.get(cid, {})
+	if c.is_empty():
+		return "Unknown circuit"
+	if not circuit_allows(c, car_index):
+		var only := _career.restriction_text(c)
+		return "%s only" % only if only != "" else "Not with this car"
+	if career_money < c.fee:
+		return "Entry fee $%d: not enough money" % c.fee
+	for r: Dictionary in c.races:
+		if HsCareer.track_id(r.track) == "":
+			return "A track of this circuit isn't installed"
+	career_money -= int(c.fee)
+	var field := deal_field(c)
+	circuit_run = {"tournament": t.id, "circuit": cid, "race": 0, "field": field, "points": {}, "out": [], "you_out": false}
+	save_career()
+	_apply_circuit_race()
+	return ""
+
+
+## On to the circuit's next race (after circuit_race_done): its settings.
+func next_circuit_race() -> void:
+	_apply_circuit_race()
+
+
+## The race settings for the circuit's current race.
+func _apply_circuit_race() -> void:
+	var c: Dictionary = _career.circuits[circuit_run.circuit]
+	var r: Dictionary = c.races[circuit_run.race]
+	mode = Mode.SINGLE_RACE
+	track_id = HsCareer.track_id(r.track)
+	layout = int(r.reverse) + 2 * int(r.mirror)
+	night = r.night
+	weather = r.weather
+	laps = c.laps
+	# The circuit record has no traffic field (what was read as one is the restriction).
+	traffic = false
+	opponents = circuit_run.field.size() - circuit_run.out.size()
+
+
+## The rivals still in: {car (index), upgrade, key (field index)}.
+func circuit_rivals() -> Array:
+	var out := []
+	for k in circuit_run.field.size():
+		if not k in circuit_run.out:
+			out.append({"car": circuit_run.field[k].car, "upgrade": circuit_run.field[k].upgrade, "key": k})
+	return out
+
+
+## The opponents' pace as an AI skill.
+func circuit_skill() -> float:
+	var c: Dictionary = _career.circuits[circuit_run.circuit]
+	return lerpf(0.88, 1.08, clampf((c.pace - 0.4) / 2.5, 0.0, 1.0))
+
+
+## A race of the circuit is over, `order` its finishing order (keys: "you" or field indices).
+## Scores it, knocks out the last in a knockout, and when the circuit is over pays the prize
+## and opens what it opens. Returns {standings: [[key, points]], done, place, prize, message}.
+func circuit_race_done(order: Array) -> Dictionary:
+	var c: Dictionary = _career.circuits[circuit_run.circuit]
+	var pts: Dictionary = circuit_run.points
+	for i in order.size():
+		pts[order[i]] = int(pts.get(order[i], 0)) + (CIRCUIT_POINTS[i] if i < CIRCUIT_POINTS.size() else 0)
+	var message := ""
+	if c.type == HsCareer.TYPE_KNOCKOUT and order.size() > 1:
+		var last = order[order.size() - 1]
+		if last is String:
+			circuit_run.you_out = true
+			message = "Knocked out"
+		else:
+			circuit_run.out.append(last)
+			message = "%s knocked out" % cars[circuit_run.field[last].car].name
+	circuit_run.race += 1
+	var done: bool = circuit_run.race >= c.races.size() or circuit_run.you_out or \
+		(c.type == HsCareer.TYPE_KNOCKOUT and circuit_run.out.size() >= circuit_run.field.size())
+	var keys: Array = ["you"] + range(circuit_run.field.size())
+	keys.sort_custom(func(a, b) -> bool: return int(pts.get(a, 0)) > int(pts.get(b, 0)))
+	var place := keys.find("you") + 1
+	if c.type == HsCareer.TYPE_KNOCKOUT:
+		# Survivors ahead of those knocked out, the later out the better.
+		place = 1 if not circuit_run.you_out else circuit_run.field.size() + 1 - circuit_run.out.size()
+	if c.type == HsCareer.TYPE_CAR_RACE:
+		place = order.find("you") + 1
+	var standings := []
+	for k in keys:
+		standings.append([k, int(pts.get(k, 0))])
+	var prize := 0
+	if done:
+		if place - 1 < c.prizes.size():
+			prize = int(c.prizes[place - 1])
+		career_money += prize
+		career_won[c.id] = mini(int(career_won.get(c.id, 99)), place)
+		# Every circuit of the tournament won: it opens the next ones.
+		for t in _career.tournaments:
+			if t.id == circuit_run.tournament and t.circuits.all(func(id) -> bool: return int(career_won.get(id, 99)) == 1):
+				for u in t.unlocks:
+					career_open[u] = true
+		save_career()
+		if c.type == HsCareer.TYPE_CAR_RACE and place == 1:
+			message = "Car won!"
+	return {"standings": standings, "done": done, "place": place, "prize": prize, "message": message}

@@ -1,15 +1,16 @@
 class_name BrowserBase
 extends Control
 ## The shared frame of the car and track browsers: a panel with a title, type-to-search,
-## filter chips and a scrolling list or grid. Moving through it (arrows, pad, or just
-## pointing) previews an item; Enter or a click picks it and Esc puts back what was there.
+## filter chips and a scrolling list or grid. It is one step of the race setup: moving
+## through it with the arrows (or pad) picks the item there, pointing at one only previews
+## it, and Enter or a click picks it and goes on. Esc (or a right click) goes back.
 ## Subclasses fill in the entries, lay them out and draw them.
 
-signal focus_changed(item: int)
+signal focus_changed(item: int)   # moved to with the keys or pad: picked
+signal previewed(item: int)       # pointed at, or the pointer left and it's back on `current`
 signal confirmed(item: int)
 signal cancelled
 
-const FOOT_H := 46.0
 const PAD := 24.0
 
 var title := ""
@@ -21,7 +22,7 @@ var head_h := 156.0
 ## {item: int (-1 for a section header), text: String, rect: Rect2 in list space}
 var entries: Array[Dictionary] = []
 var focus := -1               # index into entries
-var original := -1            # the item when opened, put back on cancel
+var current := -1             # the item picked, tagged in the list
 var total := 0                # items before filtering, for the count
 
 var _list: Control
@@ -31,8 +32,6 @@ var _content_h := 0.0
 var _hover := -1
 var _time := 0.0
 var _drag_bar := false
-var _back_rect := Rect2()
-var _back_hot := false
 
 
 func _init() -> void:
@@ -46,7 +45,7 @@ func _init() -> void:
 	_list.mouse_filter = Control.MOUSE_FILTER_STOP
 	_list.draw.connect(_draw_list)
 	_list.gui_input.connect(_on_list_input)
-	_list.mouse_exited.connect(func(): _hover = -1; _list.queue_redraw())
+	_list.mouse_exited.connect(_on_list_exited)
 	add_child(_list)
 	resized.connect(_layout)
 
@@ -72,8 +71,9 @@ func _side_step(_dir: int) -> void:
 	pass
 
 
-func _hints() -> Array:
-	return [["↑↓", "BROWSE"], ["ENTER", "SELECT"], ["ESC", "BACK"]]
+## Key hints for the footer (the menu draws them, with its own).
+func hints() -> Array:
+	return [["↑↓", "BROWSE"]]
 
 
 ## Extra header controls, laid out by the subclass under the filters.
@@ -85,7 +85,7 @@ func _layout_head() -> void:
 
 func open(item: int) -> void:
 	query = ""
-	original = item
+	current = item
 	visible = true
 	_layout()
 	_rebuild(item)
@@ -114,7 +114,8 @@ func focused_item() -> int:
 
 func _confirm() -> void:
 	if focused_item() >= 0:
-		confirmed.emit(focused_item())
+		current = focused_item()
+		confirmed.emit(current)
 
 
 func _cancel() -> void:
@@ -135,7 +136,8 @@ func _rebuild(keep := -2) -> void:
 		focus = _next_item(-1, 1)
 	_ensure_visible()
 	if focused_item() != was and focused_item() >= 0:
-		focus_changed.emit(focused_item())
+		current = focused_item()
+		focus_changed.emit(current)
 	queue_redraw()
 	_list.queue_redraw()
 
@@ -144,8 +146,7 @@ func _layout() -> void:
 	filters.position = Vector2(PAD, 116)
 	_layout_head()
 	_list.position = Vector2(0, head_h)
-	_list.size = Vector2(size.x, maxf(size.y - head_h - FOOT_H, 40))
-	_back_rect = Rect2(size.x - PAD - 92, 22, 92, 32)
+	_list.size = Vector2(size.x, maxf(size.y - head_h, 40))
 	_layout_list()
 
 
@@ -186,7 +187,8 @@ func _set_focus(k: int) -> void:
 		return
 	focus = k
 	_ensure_visible()
-	focus_changed.emit(focused_item())
+	current = focused_item()
+	focus_changed.emit(current)
 	_list.queue_redraw()
 
 
@@ -315,16 +317,8 @@ func _matches(haystack: String) -> bool:
 
 
 func _gui_input(e: InputEvent) -> void:
-	if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT and _back_rect.has_point(e.position):
-		_cancel()
-		accept_event()
-	elif e is InputEventMouseMotion:
-		var hot := _back_rect.has_point(e.position)
-		if hot != _back_hot:
-			_back_hot = hot
-			queue_redraw()
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _back_hot or _head_hot() \
-			else Control.CURSOR_ARROW
+	if e is InputEventMouseMotion:
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if _head_hot() else Control.CURSOR_ARROW
 
 
 ## True while the pointer is over a subclass's own header control.
@@ -361,10 +355,10 @@ func _on_list_input(e: InputEvent) -> void:
 		if k != _hover:
 			_hover = k
 			_list.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if k >= 0 else Control.CURSOR_ARROW
-			# Pointing at an item previews it, as the arrow keys do.
+			# Pointing at an item previews it; a click picks it.
 			if k >= 0 and k != focus:
 				focus = k
-				focus_changed.emit(focused_item())
+				previewed.emit(focused_item())
 			_list.queue_redraw()
 	elif e is InputEventMouseButton:
 		match e.button_index:
@@ -388,6 +382,17 @@ func _on_list_input(e: InputEvent) -> void:
 		_list.accept_event()
 
 
+## The pointer has gone: back to the picked item.
+func _on_list_exited() -> void:
+	_hover = -1
+	if focused_item() != current:
+		for k in entries.size():
+			if entries[k].item == current:
+				focus = k
+		previewed.emit(current)
+	_list.queue_redraw()
+
+
 func _process(dt: float) -> void:
 	if not visible:
 		return
@@ -406,7 +411,6 @@ func _process(dt: float) -> void:
 
 func _draw() -> void:
 	var w := size.x
-	var h := size.y
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0.04, 0.045, 0.06, 0.93))
 	draw_rect(Rect2(0, 0, w, 3), UiKit.ACCENT)
 	var tf := UiKit.font("display")
@@ -415,13 +419,6 @@ func _draw() -> void:
 	var shown := entries.filter(func(en: Dictionary) -> bool: return en.item >= 0).size()
 	var count := "%d" % total if shown == total else "%d OF %d" % [shown, total]
 	draw_string(UiKit.font("cond", 2), Vector2(PAD + tw + 12, 49), count, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, UiKit.INK_DIM)
-	# Back button.
-	var hot := _back_hot
-	if hot:
-		UiKit.draw_slant(self, _back_rect, Color(UiKit.ACCENT, 0.12), 0.15)
-	var kw := UiKit.draw_key(self, _back_rect.position + Vector2(8, 16), "ESC", 12, UiKit.ACCENT if hot else UiKit.INK)
-	draw_string(UiKit.font("cond", 2), _back_rect.position + Vector2(16 + kw, 21), "BACK", HORIZONTAL_ALIGNMENT_LEFT, -1, 14,
-		UiKit.ACCENT if hot else UiKit.INK_DIM)
 	# Search box: typing anywhere goes into it.
 	var sr := Rect2(PAD, 66, w - PAD * 2, 38)
 	draw_rect(sr, Color(1, 1, 1, 0.06))
@@ -442,9 +439,6 @@ func _draw() -> void:
 			-1, 13, UiKit.INK_DIM)
 	if fmod(_time, 1.0) < 0.5:
 		draw_rect(Rect2(tx, sr.position.y + 10, 2, 19), UiKit.ACCENT)
-	# Footer.
-	draw_line(Vector2(PAD, h - FOOT_H), Vector2(w - PAD, h - FOOT_H), Color(1, 1, 1, 0.08), 1.0)
-	UiKit.draw_hints(self, Vector2(PAD, h - FOOT_H * 0.5), _hints(), 12)
 
 
 func _draw_list() -> void:

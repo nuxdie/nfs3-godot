@@ -9,6 +9,18 @@ var left_width := PackedFloat32Array()  # distance from centre to left wall
 var right_width := PackedFloat32Array()
 var cumulative := PackedFloat32Array()  # distance along the path at each node
 var radius := PackedFloat32Array()      # bend radius around each node (m), for AI speeds
+## The original game's AI tables, [forward, reverse] (either may be empty): target speed
+## at each node (m/s, for a top car), and High Stakes' racing line (m right of the centre).
+var ai_speeds := [PackedFloat32Array(), PackedFloat32Array()]
+var racing_line := [PackedFloat32Array(), PackedFloat32Array()]
+## Traffic lanes per node (either may be empty, see lane_offset()): a byte per node, the
+## lanes left of the centre line in the high nibble and right of it in the low one, and
+## each side's lane width (m).
+var lanes := PackedByteArray()
+var lane_width_left := PackedFloat32Array()
+var lane_width_right := PackedFloat32Array()
+## The speed limit at each node (m/s), where the original game has one for the track.
+var legal_speed := PackedFloat32Array()
 var length := 0.0
 ## How far past a wall a car off the drivable surface may get before the race resets it
 ## (the procedural track has no walls, so its cars can roam out onto the land).
@@ -23,6 +35,45 @@ const SPAN := 20
 
 func size() -> int:
 	return points.size()
+
+
+## Runs the lap the other way round (the "reverse" option): node 0, the start line, stays
+## put and the rest come in the opposite order, their right to the other side. The AI
+## tables swap too, each way's to the other.
+func reverse() -> void:
+	var n := points.size()
+	var order := func(a: Variant) -> Variant:
+		var out: Variant = a.duplicate()
+		for i in n:
+			out[i] = a[(n - i) % n]
+		return out
+	points = order.call(points)
+	ups = order.call(ups)
+	var r: PackedVector3Array = order.call(rights)
+	for i in n:
+		r[i] = -r[i]
+	rights = r
+	var lw: PackedFloat32Array = order.call(right_width)
+	right_width = order.call(left_width)
+	left_width = lw
+	if lanes.size() == n:
+		var ln: PackedByteArray = order.call(lanes)
+		for i in n:
+			ln[i] = (ln[i] >> 4) | ((ln[i] & 0xF) << 4)
+		lanes = ln
+		var llw: PackedFloat32Array = order.call(lane_width_right)
+		lane_width_right = order.call(lane_width_left)
+		lane_width_left = llw
+	if legal_speed.size() == n:
+		legal_speed = order.call(legal_speed)
+	var speeds := []
+	var lines := []
+	for k in [1, 0]:
+		speeds.append(order.call(ai_speeds[k]) if ai_speeds[k].size() == n else PackedFloat32Array())
+		lines.append(order.call(racing_line[k]) if racing_line[k].size() == n else PackedFloat32Array())
+	ai_speeds = speeds
+	racing_line = lines
+	finalize()
 
 
 func finalize() -> void:
@@ -57,6 +108,28 @@ func ahead(n: int, dir: int, metres: float) -> int:
 		if fposmod((cumulative[m] - cumulative[n]) * dir, length) >= metres:
 			break
 	return m
+
+
+## Traffic lanes at node `n` on `side` of the centre line (+1 right, -1 left).
+func lane_count(n: int, side: int) -> int:
+	if lanes.size() != points.size():
+		return 1
+	var c: int = lanes[n] & 0xF if side > 0 else lanes[n] >> 4
+	return maxi(c, 1)
+
+
+## Lateral offset (m, + right) of the middle of traffic lane `k` (1 the nearest the centre
+## line; past the last lane there, the last) at node `n` on `side` of the centre line (+1
+## right, -1 left). Without lane data, one lane a little way out from the centre.
+func lane_offset(n: int, side: int, k: int) -> float:
+	var wall: float = right_width[n] if side > 0 else left_width[n]
+	var w := 0.0
+	if lanes.size() == points.size():
+		w = lane_width_right[n] if side > 0 else lane_width_left[n]
+	if not (w > 1.5 and w < 12.0):
+		return side * clampf(minf(left_width[n], right_width[n]) * 0.4, 2.5, 4.5)
+	k = clampi(k, 1, lane_count(n, side))
+	return side * minf(w * (k - 0.5), maxf(wall - 2.0, w * 0.5))
 
 
 func forward(i: int) -> Vector3:

@@ -21,12 +21,24 @@ const WATER_LAYER := 16
 ## How far out (m) from the road's edge water opens its wall: enough for a bank down to a
 ## stream, short of letting cars out across open country.
 const WATER_REACH := 30.0
-## Extra objects no wider than this (m) and within this height range are road signs and
-## posts that cars knock over; taller poles and anything bigger stay put.
+## Extra objects of this type (High Stakes' header) are billboards: a quad (lamp post, forest
+## card, bush) standing on the object's origin that the game turns about the upright to face
+## the camera. Drawn as placed, they went paper-thin seen from the side.
+const BILLBOARD_XTYPE := 2
+## How far (m) a block's billboards may reach past its mesh's bounds, which hold only their axes.
+const BILLBOARD_MARGIN := 8.0
+## Extra objects no wider than this (m) at car height (PROP_REACH) and within this height
+## range are road signs and posts that cars knock over; taller poles and anything bigger stay
+## put. A plate on two posts may overhang them, up to PROP_MAX_SPAN across (Landstrasse's
+## direction signs).
 const PROP_MAX_WIDTH := 3.5
+const PROP_MAX_SPAN := 6.0
 const PROP_HEIGHT := Vector2(1.5, 7.0)
 ## Height (m) above a prop's foot that a car body can touch.
 const PROP_REACH := 1.5
+## Mean colour saturation of a sign plate's texture: chevrons and hazard boards run 0.5-0.8,
+## grey concrete and stone 0.1-0.2.
+const SIGN_MIN_SATURATION := 0.4
 ## Cut-out billboards at least this tall (m) get a solid trunk: trees, lamp posts.
 const TRUNK_MIN_HEIGHT := 3.5
 ## A trunk's width (m) is its texture's opaque run at the foot, within these bounds; a
@@ -40,9 +52,17 @@ const POST_HEIGHT := 4.0
 const FENCE_HEIGHT := Vector2(0.5, 4.5)
 const FENCE_MIN_WIDTH := 2.5
 const FENCE_KNOCK_WIDTH := 10.0
+## Share of a green cut-out image's texels that must be clear for it to be foliage: sign
+## plates have under 1%, the densest hedges nearly 4%.
+const FOLIAGE_MIN_CLEAR := 0.02
 ## Knockable panels are separate draw calls (hundreds on a track): drawn nearer than the
 ## blocks, which a thin fence barely shows beyond anyway.
 const FENCE_DRAW_DISTANCE := 300.0
+## An extra object reaching this far (m) from its block's centre is backdrop, drawn always:
+## High Stakes hangs the hills round the whole map off one block (Germany's last), and in
+## that block's mesh they'd share its draw distance, measured from the middle of them all:
+## far enough off, every valley went at once, leaving holes to the sky.
+const BACKDROP_REACH := 300.0
 ## Upright cut-out quads within these heights (m) and at least RAIL_MIN_WIDTH wide, at the
 ## road's edge and with a continuous rail along their top, are guardrails that bend when
 ## hit (see Guardrails).
@@ -52,26 +72,40 @@ const RAIL_MIN_WIDTH := 1.5
 const RAIL_COLUMN := 0.5
 ## Track blocks per guardrail mesh.
 const RAIL_CHUNK_BLOCKS := 4
+## How far (m) a guardrail's collision reaches under its foot and, at least, over it.
+const RAIL_SOLID := Vector2(0.5, 1.2)
 ## Additive textures that are daylight (sun shafts), per track: faded out at night, while
 ## glows and fire keep shining. Hometown's are the shafts in its two covered bridges.
 const SUNLIGHT_TEXTURES := {"trk000": [195]}
 
 static var _shader: Shader = preload("res://shaders/track.gdshader")
 static var _additive_shader: Shader = preload("res://shaders/track_additive.gdshader")
+static var _soft_fx_shader: Shader = preload("res://shaders/track_soft_fx.gdshader")
+static var _glass_shader: Shader = preload("res://shaders/track_glass.gdshader")
+## The mesh passes, one material each: opaque (alpha-tested), additive effects, see-through.
+enum { PASS_OPAQUE, PASS_FX, PASS_GLASS }
+const PASS_SUFFIX := ["", "Fx", "Glass"]
+## A texture this part transparent (fraction of its texels) is see-through, not a cut-out.
+const TRANSLUCENT_MIN := 0.3
 
 
 static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
+	_mark_translucent(t)
 	var textures := _texture_array(t)
-	# [opaque, additive]: effect textures (light shafts, glows, fire) are blended additively.
+	# [opaque, additive, glass]: effect textures (light shafts, glows, fire) are blended
+	# additively, see-through ones (phone box glass) over the scene.
 	var mats: Array[ShaderMaterial] = []
-	for sh in [_shader, _additive_shader]:
+	for sh in [_shader, _soft_fx_shader if t.soft_effects else _additive_shader, _glass_shader]:
 		var m := ShaderMaterial.new()
 		m.shader = sh
 		m.set_shader_parameter("textures", textures)
+		m.set_shader_parameter("textures_clamped", textures)
+		m.set_shader_parameter("ticks_per_second", t.ticks_per_second)
 		mats.append(m)
 	root.set_meta("track_material", mats[0])   # the race sets its night lighting
 	var night_mats: Array = root.get_meta("night_materials", [])
 	night_mats.append(mats[1])                 # ...and fades the sun shafts
+	night_mats.append(mats[2])                 # ...and dims the glass
 	root.set_meta("night_materials", night_mats)
 
 	var geo := Node3D.new()
@@ -103,24 +137,30 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 	var road_quads := _drivable_quads(t)
 	var foliage := {}
 	t.set_meta("foliage", foliage)   # for _is_prop too
+	_promote_signs(t)
+	for b in t.blocks:
+		_mark_compound(b)   # before _fence_panels asks _is_prop
+	var rail_images := _rail_images(t, road_quads, foliage)
 	var fence_faces := PackedVector3Array()
+	var backdrop := []   # extra objects reaching far beyond their block (see BACKDROP_REACH)
 	for bi in t.blocks.size():
 		var b: Nfs3Track.Block = t.blocks[bi]
-		_mark_compound(b)
 		# Fence panels: short ones leave the block mesh to be knocked over, long ones stay
 		# in it and are made solid.
 		var knocked := {}
-		for panel in _fence_panels(t, b, road_quads, foliage, false):
+		for panel in _fence_panels(t, b, road_quads, foliage, false, rail_images):
 			if panel.width <= FENCE_KNOCK_WIDTH:
-				props.add_child(_make_panel(t, panel, mats[0]))
+				props.add_child(_make_panel(t, panel, mats))
 				for m in panel.members:
 					knocked[m[0][0]] = true
 			else:
 				var c: PackedVector3Array = panel.corners
 				fence_faces.append_array([c[0], c[1], c[2], c[0], c[2], c[3]])
-		# Guardrails leave it to be bent.
-		for panel in _fence_panels(t, b, road_quads, foliage, true):
+		# Guardrails leave it to be bent, and stop the car where they stand: the walls are
+		# often metres behind them (High Stakes' virtual road reaches past its rails).
+		for panel in _fence_panels(t, b, road_quads, foliage, true, rail_images):
 			_add_rail(t, panel, rail_mesh)
+			fence_faces.append_array(_rail_faces(panel))
 			for m in panel.members:
 				knocked[m[0][0]] = true
 		if (bi % RAIL_CHUNK_BLOCKS == RAIL_CHUNK_BLOCKS - 1 or bi == t.blocks.size() - 1) \
@@ -138,15 +178,20 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 			if x.has("anim"):
 				continue
 			if _is_prop(t, x):
-				props.add_child(_make_prop(t, x, mats[0]))
+				props.add_child(_make_prop(t, x, mats))
+			elif _is_backdrop(b, x):
+				backdrop.append([x.polys, x.verts, x.shading, x.ref, _mirrored(x)])
 			else:
-				groups.append([x.polys.filter(standing) if knocked.size() > 0 else x.polys, x.verts, x.shading, x.ref, _mirrored(x)])
-		for pass_i in 2:
-			var mesh := _mesh(t, groups, pass_i == 1)
+				groups.append([x.polys.filter(standing) if knocked.size() > 0 else x.polys, x.verts, x.shading, x.ref, _mirrored(x),
+					null, x.get("xtype", 0) == BILLBOARD_XTYPE])
+		for pass_i in mats.size():
+			var mesh := _mesh(t, groups, pass_i)
 			if mesh == null:
 				continue
 			var mi := MeshInstance3D.new()
-			mi.name = "Block%03d%s" % [bi, "Fx" if pass_i == 1 else ""]
+			# Billboards are stored on their axis (see _add_polys): their width is out of the AABB.
+			mi.extra_cull_margin = BILLBOARD_MARGIN
+			mi.name = "Block%03d%s" % [bi, PASS_SUFFIX[pass_i]]
 			mi.mesh = mesh
 			mi.material_override = mats[pass_i]
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -190,8 +235,8 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 		for x in b.xobjs:
 			if not x.has("anim") or x.anim.size() == 0:
 				continue
-			for pass_i in 2:
-				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, _mirrored(x)]], pass_i == 1)
+			for pass_i in mats.size():
+				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, _mirrored(x)]], pass_i)
 				if amesh == null:
 					continue
 				var ami := MeshInstance3D.new()
@@ -201,18 +246,19 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 				ami.set_script(preload("res://scripts/track/keyframe_mover.gd"))
 				ami.set("keys", x.anim)
 				ami.set("delay", x.get("anim_delay", 1))
+				ami.set("tick_rate", t.ticks_per_second)
 				geo.add_child(ami)
 
-	# Global scenery from the .col file.
-	var global_groups := []
+	# Global scenery from the .col file, and the far hills some blocks carry.
+	var global_groups := backdrop
 	for o in t.col_objects:
 		global_groups.append([o.polys, o.verts, o.shading, o.ref, false])
-	for pass_i in 2:
-		var gmesh := _mesh(t, global_groups, pass_i == 1)
+	for pass_i in mats.size():
+		var gmesh := _mesh(t, global_groups, pass_i)
 		if gmesh == null:
 			continue
 		var gmi := MeshInstance3D.new()
-		gmi.name = "GlobalObjects%s" % ("Fx" if pass_i == 1 else "")
+		gmi.name = "GlobalObjects%s" % PASS_SUFFIX[pass_i]
 		gmi.mesh = gmesh
 		gmi.material_override = mats[pass_i]
 		geo.add_child(gmi)
@@ -221,8 +267,11 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 	root.add_child(_scenery_body(t, fence_faces))
 	root.add_child(_camera_blockers(t))
 	root.add_child(_water_body(water[0]))
-	root.add_child(_edge_walls(t, road_quads, water))
-	return _make_path(t)
+	var path := _make_path(t)
+	# High Stakes fences the car in along its slices' drivable extents: a run-off that
+	# narrows back to the road (the Landstrasse meadow) is a funnel, not a wall across it.
+	root.add_child(make_walls(path) if t.vroad_walls else _edge_walls(t, road_quads, water))
+	return path
 
 
 ## Cars collide with every opaque scenery object: buildings, bridge piers and road signs
@@ -409,18 +458,22 @@ static func _foot_columns(t: Nfs3Track, ti: Nfs3Track.TexInfo, ia: int, reach: f
 
 ## The block's fence panels (see FENCE_HEIGHT) that stand on the drivable surface, with
 ## road on both sides: those at its edge are backed by the invisible walls already. With
-## `rail`, those guardrails at its edge instead (see RAIL_HEIGHT). Each is
+## `rail`, those guardrails at its edge instead (see RAIL_HEIGHT), and any of rail height
+## in an image of `rail_images` (from _rail_images) wherever it stands: High Stakes has no
+## surface flags, and its guessed road (Nfs4Track._flag_road) often reaches in behind the
+## rails, which would leave them standing "in the road" as fences to knock over. Each is
 ## {members: [[polys, verts, shading, offset, mirrored]], corners: bottom edge first, width};
 ## a panel drawn as a front and a back quad over the same corners is one panel. `drivable`
 ## is from _drivable_quads; `foliage` caches _is_foliage per image.
 static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
-		foliage: Dictionary, rail: bool) -> Array:
+		foliage: Dictionary, rail: bool, rail_images := {}) -> Array:
 	var heights := RAIL_HEIGHT if rail else FENCE_HEIGHT
 	var sources := []
 	for obj in b.objects:
 		sources.append([obj, b.verts, b.shading, Vector3.ZERO, false])
+	# A prop's quads go over with it (a sign's plate isn't a rail).
 	for x in b.xobjs:
-		if not x.has("anim"):
+		if not x.has("anim") and not _is_prop(t, x):
 			sources.append([x.polys, x.verts, x.shading, x.ref, _mirrored(x)])
 	var by_corners := {}
 	var panels := []
@@ -446,13 +499,15 @@ static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
 			var ia := _bottom_edge(pos)
 			var width := pos[ia].distance_to(pos[(ia + 1) % 4])
 			var n := FOOT_COLUMNS
+			var railing := rail_images.has(ti.qfs_index) and height >= RAIL_HEIGHT.x and height <= RAIL_HEIGHT.y
 			if rail:
-				# Road on one side and a continuous rail along the top.
-				if width < RAIL_MIN_WIDTH or _road_sides(drivable, pos[ia], pos[(ia + 1) % 4]) != 1 \
+				# Road on one side (either, for a known rail) and a continuous rail along the top.
+				var sides := _road_sides(drivable, pos[ia], pos[(ia + 1) % 4])
+				if width < RAIL_MIN_WIDTH or not (sides == 1 or sides == 2 and railing) \
 						or _is_foliage(t, ti.qfs_index, foliage) \
 						or _foot_columns(t, ti, (ia + 2) % 4, 0.3, 0.5).count(true) < n * 3 / 4:
 					continue
-			elif width < FENCE_MIN_WIDTH or _road_sides(drivable, pos[ia], pos[(ia + 1) % 4]) != 2 \
+			elif railing or width < FENCE_MIN_WIDTH or _road_sides(drivable, pos[ia], pos[(ia + 1) % 4]) != 2 \
 					or _is_foliage(t, ti.qfs_index, foliage):
 				continue
 			else:
@@ -492,6 +547,16 @@ static func _fence_panels(t: Nfs3Track, b: Nfs3Track.Block, drivable: Array,
 	return panels
 
 
+## The images (qfs indices) of the guardrails at the road's edge anywhere on the track.
+static func _rail_images(t: Nfs3Track, drivable: Array, foliage: Dictionary) -> Dictionary:
+	var images := {}
+	for b in t.blocks:
+		for panel in _fence_panels(t, b, drivable, foliage, true):
+			var p: Nfs3Track.Poly = panel.members[0][0][0]
+			images[t.textures[p.tex].qfs_index] = true
+	return images
+
+
 ## On how many sides (0-2) of the upright quad standing on `a`-`b` there is drivable surface.
 static func _road_sides(drivable: Array, a: Vector3, b: Vector3) -> int:
 	var side := Vector3(b.z - a.z, 0.0, a.x - b.x).normalized() * 1.5
@@ -505,23 +570,30 @@ static func _road_sides(drivable: Array, a: Vector3, b: Vector3) -> int:
 
 
 ## Whether an image is plant life (a bush, hedge or grass fringe): its opaque texels are
-## green on average.
+## green on average, and at least FOLIAGE_MIN_CLEAR of it is see-through. Green road-sign
+## plates (Dolphin Cove's town signs) are cut out only at their clipped corners.
 static func _is_foliage(t: Nfs3Track, index: int, cache: Dictionary) -> bool:
 	if not cache.has(index):
 		var img: Image = t.images[index]
 		var sum := Color(0, 0, 0, 0)
+		var clear := 0
+		var n := 0
 		for y in range(0, img.get_height(), 2):
 			for x in range(0, img.get_width(), 2):
 				var c := img.get_pixel(x, y)
+				n += 1
 				if c.a > 0.5:
 					sum += c
-		cache[index] = sum.g > sum.r * 1.05 and sum.g > sum.b * 1.05
+				else:
+					clear += 1
+		cache[index] = sum.g > sum.r * 1.05 and sum.g > sum.b * 1.05 \
+				and clear >= n * FOLIAGE_MIN_CLEAR
 	return cache[index]
 
 
 ## A knockable fence panel. Its frame runs along the panel (X) so the trigger box that
 ## catches the cars stays as thin as the panel, whichever way it faces.
-static func _make_panel(t: Nfs3Track, panel: Dictionary, material: Material) -> KnockableProp:
+static func _make_panel(t: Nfs3Track, panel: Dictionary, mats: Array[ShaderMaterial]) -> KnockableProp:
 	var c: PackedVector3Array = panel.corners
 	var along := Vector3(c[1].x - c[0].x, 0.0, c[1].z - c[0].z).normalized()
 	var basis := Basis(along, Vector3.UP, along.cross(Vector3.UP))
@@ -553,7 +625,8 @@ static func _make_panel(t: Nfs3Track, panel: Dictionary, material: Material) -> 
 		groups.append([[q], verts, shading, Vector3.ZERO, m[4]])
 	var prop := KnockableProp.new()
 	prop.transform = Transform3D(basis, foot)
-	prop.setup(_mesh(t, groups, false), material, box, hull, FENCE_DRAW_DISTANCE)
+	var pm := _prop_mesh(t, groups, mats)
+	prop.setup(pm[0], pm[1], box, hull, FENCE_DRAW_DISTANCE)
 	return prop
 
 
@@ -619,16 +692,30 @@ static func _add_rail(t: Nfs3Track, panel: Dictionary, out: Array) -> void:
 				out[1].append(clampf((cp[k].y - lo) / height, 0.0, 1.0) if height > 0.0 else 1.0)
 
 
+## A guardrail panel's collision: its foot edge stood up from RAIL_SOLID.x under it to
+## RAIL_SOLID.y over it (a low rail tall enough that a car can't ride over it).
+static func _rail_faces(panel: Dictionary) -> PackedVector3Array:
+	var c: PackedVector3Array = panel.corners
+	var down := Vector3.DOWN * RAIL_SOLID.x
+	var up := Vector3.UP * maxf(RAIL_SOLID.y, maxf(c[3].y - c[0].y, c[2].y - c[1].y))
+	return PackedVector3Array([c[0] + down, c[1] + down, c[1] + up, c[0] + down, c[1] + up, c[0] + up])
+
+
 ## Sign-sized extra objects with an opaque post or plate and no foliage (foliage cut-outs are
 ## left standing: the car passes through them anyway). A cut-out plate is still a sign: High
-## Stakes' round and triangular ones are see-through at the corners.
+## Stakes' round and triangular ones are see-through at the corners. High Stakes' physics
+## props (a bench is lower than any sign) are props by definition.
 static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
+	if x.get("physics", false):
+		return true
 	if not x.has("prop"):
 		x.prop = false
 		if x.get("compound", false):
 			return false
 		var box := _poly_box(x.polys, x.verts)
-		if box.size != Vector3.ZERO and maxf(box.size.x, box.size.z) <= PROP_MAX_WIDTH \
+		var foot := _poly_box(_low_polys(x.polys, x.verts, box), x.verts)
+		if box.size != Vector3.ZERO and maxf(box.size.x, box.size.z) <= PROP_MAX_SPAN \
+				and maxf(foot.size.x, foot.size.z) <= PROP_MAX_WIDTH \
 				and box.size.y >= PROP_HEIGHT.x and box.size.y <= PROP_HEIGHT.y:
 			var opaque := false
 			# build()'s _is_foliage answers for this track (builds run on worker threads).
@@ -647,6 +734,76 @@ static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 	return x.prop
 
 
+## Moves the lone opaque upright quads of the blocks' scenery to their extra objects, where
+## _is_prop decides whether they are signs to knock over: High Stakes places some signs (the
+## Kindiak Park chevrons) as scenery quads of their own, which stood as solid walls. A quad
+## touching other solid scenery is a face of something bigger and stays (the cut-out rail
+## the chevrons stand behind doesn't count), and so does every quad of a texture that the
+## track uses anywhere else (lone panels of tent, rock face, hedge and wall are its scenery)
+## or that isn't painted (SIGN_MIN_SATURATION: the concrete slab across Rocky Pass' side road).
+static func _promote_signs(t: Nfs3Track) -> void:
+	var uses := {}     # texture -> polys of the blocks' scenery using it
+	var signs := {}    # texture -> [[block, object, extra object]]
+	for b in t.blocks:
+		var boxes := []
+		for obj in b.objects:
+			boxes.append(_poly_box(obj, b.verts).grow(0.05) if _has_solid(t, obj) else null)
+			for p: Nfs3Track.Poly in obj:
+				uses[p.tex] = uses.get(p.tex, 0) + 1
+		for i in b.objects.size():
+			var obj: Array = b.objects[i]
+			var p: Nfs3Track.Poly = obj[0] if obj.size() == 1 else null
+			if p == null or p.tex >= t.textures.size() or not _has_solid(t, obj) \
+					or p.v[0] >= b.verts.size() or p.v[1] >= b.verts.size() \
+					or p.v[2] >= b.verts.size() or p.v[3] >= b.verts.size():
+				continue
+			var pos: Array[Vector3] = []
+			for k in 4:
+				pos.append(b.verts[p.v[k]])
+			var normal := (pos[2] - pos[0]).cross(pos[1] - pos[0]).normalized()
+			var alone := absf(normal.y) <= 0.3
+			for j in boxes.size():
+				if alone and j != i and boxes[j] != null and boxes[i].intersects(boxes[j]):
+					alone = false
+			if not alone:
+				continue
+			var q := Nfs3Track.Poly.new()
+			q.v = PackedInt32Array([0, 1, 2, 3])
+			q.tex = p.tex
+			q.flags = p.flags
+			var shading := PackedColorArray()
+			for k in 4:
+				shading.append(b.shading[p.v[k]] if p.v[k] < b.shading.size() else Color.WHITE)
+			var x := {"ref": Vector3.ZERO, "verts": PackedVector3Array(pos), "shading": shading,
+				"polys": [q], "unmirrored": true}
+			if _is_prop(t, x):
+				if not signs.has(p.tex):
+					signs[p.tex] = []
+				signs[p.tex].append([b, obj, x])
+	for tex in signs:
+		if signs[tex].size() != uses[tex] or not _is_painted(t, t.textures[tex].qfs_index):
+			continue
+		for s in signs[tex]:
+			s[0].objects.erase(s[1])
+			s[0].xobjs.append(s[2])
+
+
+## Whether an image's opaque texels are, on average, strongly coloured (SIGN_MIN_SATURATION).
+static func _is_painted(t: Nfs3Track, qfs_index: int) -> bool:
+	if qfs_index >= t.images.size():
+		return false
+	var img: Image = t.images[qfs_index]
+	var sum := 0.0
+	var n := 0
+	for y in range(0, img.get_height(), 2):
+		for x in range(0, img.get_width(), 2):
+			var c := img.get_pixel(x, y)
+			if c.a > 0.5:
+				sum += c.s
+				n += 1
+	return n > 0 and sum / n >= SIGN_MIN_SATURATION
+
+
 ## Flags the single-quad extra objects that touch another one: faces of a bigger thing
 ## (the Hometown covered bridge's posts are four quads each), not signs to knock over.
 static func _mark_compound(b: Nfs3Track.Block) -> void:
@@ -663,16 +820,11 @@ static func _mark_compound(b: Nfs3Track.Block) -> void:
 				break
 
 
-static func _make_prop(t: Nfs3Track, x: Dictionary, material: Material) -> KnockableProp:
+static func _make_prop(t: Nfs3Track, x: Dictionary, mats: Array[ShaderMaterial]) -> KnockableProp:
 	var box := _poly_box(x.polys, x.verts)
 	var foot := Vector3(box.get_center().x, box.position.y, box.get_center().z)
 	# Only the polys that reach down to car height can be hit: a sign's post, not its plate.
-	var low := []
-	for p in x.polys:
-		for k in 4:
-			if p.v[k] < x.verts.size() and x.verts[p.v[k]].y < box.position.y + PROP_REACH:
-				low.append(p)
-				break
+	var low := _low_polys(x.polys, x.verts, box)
 	var reach := _poly_box(low, x.verts) if low.size() > 0 else box
 	reach = AABB(reach.position - foot, Vector3(reach.size.x, minf(reach.size.y, PROP_REACH), reach.size.z))
 	var hull := PackedVector3Array()
@@ -680,9 +832,42 @@ static func _make_prop(t: Nfs3Track, x: Dictionary, material: Material) -> Knock
 		hull.append(v - foot)
 	var prop := KnockableProp.new()
 	prop.position = x.ref + foot
-	prop.setup(_mesh(t, [[x.polys, x.verts, x.shading, -foot, _mirrored(x)]], false), material,
-			reach, hull, DRAW_DISTANCE)
+	var pm := _prop_mesh(t, [[x.polys, x.verts, x.shading, -foot, _mirrored(x)]], mats)
+	prop.setup(pm[0], pm[1], reach, hull, DRAW_DISTANCE)
 	return prop
+
+
+## The polys of an object (bounded by `box`) that reach down to car height (PROP_REACH).
+static func _low_polys(polys: Array, verts: PackedVector3Array, box: AABB) -> Array:
+	var low := []
+	for p in polys:
+		for k in 4:
+			if p.v[k] < verts.size() and verts[p.v[k]].y < box.position.y + PROP_REACH:
+				low.append(p)
+				break
+	return low
+
+
+## A prop's [mesh, material]: its opaque polys under the track material, or with see-through
+## ones too (the phone boxes' glass) a surface for each and no override.
+static func _prop_mesh(t: Nfs3Track, groups: Array, mats: Array[ShaderMaterial]) -> Array:
+	var mesh := _mesh(t, groups, PASS_OPAQUE)
+	var glass := _mesh(t, groups, PASS_GLASS)
+	if glass == null:
+		return [mesh, mats[PASS_OPAQUE]]
+	if mesh == null:
+		return [glass, mats[PASS_GLASS]]
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, glass.surface_get_arrays(0))
+	mesh.surface_set_material(0, mats[PASS_OPAQUE])
+	mesh.surface_set_material(1, mats[PASS_GLASS])
+	return [mesh, null]
+
+
+static func _is_backdrop(b: Nfs3Track.Block, x: Dictionary) -> bool:
+	var box := _poly_box(x.polys, x.verts)
+	box.position += x.ref
+	var reach := maxf(box.position.distance_to(b.center), box.end.distance_to(b.center))
+	return reach > BACKDROP_REACH or box.size.length() > BACKDROP_REACH
 
 
 static func _poly_box(polys: Array, verts: PackedVector3Array) -> AABB:
@@ -753,26 +938,30 @@ static func _mirrored(x: Dictionary) -> bool:
 	return not x.get("unmirrored", false)
 
 
-## One mesh from [polys, verts, shading, offset, mirrored, (road flags)] groups, keeping only
-## the polys whose texture is (or isn't) additive. Null when nothing matched. Vertex colour
+## One mesh from [polys, verts, shading, offset, mirrored, (road flags), (billboard)] groups, keeping only
+## the polys whose texture is drawn in pass `pass_i` (see _pass_of). Null when nothing matched. Vertex colour
 ## alpha is 1 on drivable road polys (a group with road flags), 0 elsewhere; in the
 ## additive pass it is 1 on sunlight (SUNLIGHT_TEXTURES) instead.
 ## Extra objects (xobjs) store their quads mirrored (corners 0<->1, 2<->3) relative to the
 ## texture corners: read as-is, the half-tree quads of a split tree show their trunk on the
 ## outside and the front/back quads of a sign face the wrong way.
-static func _mesh(t: Nfs3Track, groups: Array, additive: bool) -> ArrayMesh:
+static func _mesh(t: Nfs3Track, groups: Array, pass_i: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var boards := groups.any(func(g: Array) -> bool: return g.size() > 6 and g[6])
+	if boards:
+		st.set_custom_format(0, SurfaceTool.CUSTOM_RG_HALF)
 	var twins := _twin_polys(groups)
 	var n := 0
 	for g in groups:
-		n += _add_polys(st, t, g[0], g[1], g[2], g[3], g[4], additive, twins, g[5] if g.size() > 5 else null)
+		n += _add_polys(st, t, g[0], g[1], g[2], g[3], g[4], pass_i, twins, g[5] if g.size() > 5 else null,
+			g[6] if g.size() > 6 else false, boards)
 	return st.commit() if n > 0 else null
 
 
 static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: PackedVector3Array,
-		shading: PackedColorArray, offset: Vector3, mirrored: bool, additive: bool, twins: Dictionary,
-		road_flags: Variant = null) -> int:
+		shading: PackedColorArray, offset: Vector3, mirrored: bool, pass_i: int, twins: Dictionary,
+		road_flags: Variant = null, board := false, custom := false) -> int:
 	var order: Array = [1, 0, 3, 2] if mirrored else [0, 1, 2, 3]
 	var sunlight: Array = SUNLIGHT_TEXTURES.get(t.name, [])
 	var n := 0
@@ -781,7 +970,7 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 		if p.tex >= t.textures.size():
 			continue
 		var ti: Nfs3Track.TexInfo = t.textures[p.tex]
-		if ti.additive != additive or ti.qfs_index >= t.images.size():
+		if _pass_of(ti) != pass_i or ti.qfs_index >= t.images.size():
 			continue
 		var bad := false
 		for k in 4:
@@ -796,10 +985,22 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 		# consecutive texture layers.
 		var frames := _anim_frames(t, p)
 		var anim: float = 2.0 * frames + 16.0 * p.anim_period if frames > 1 else 0.0
+		# A billboard's vertices go on its upright axis (the object's origin), each with its
+		# offset across the quad, measured the way the texture's u runs so the picture isn't
+		# mirrored whichever side it's seen from; the shader turns it to face the camera.
+		var across := Vector2.ZERO
+		if board:
+			for k in 4:
+				var v := verts[p.v[order[k]]]
+				across += Vector2(v.x, v.z) * (ti.uv[k].x - 0.5)
+			if across.length() < 0.01:
+				var e := verts[p.v[order[1]]] - verts[p.v[order[0]]]
+				across = Vector2(e.x, e.z)
+			across = across.normalized()
 		var road := 0.0
-		if additive:
+		if pass_i == PASS_FX:
 			road = 1.0 if p.tex in sunlight else 0.0
-		elif road_flags != null and (pi >= road_flags.size() or Nfs3Track.drivable(road_flags[pi])):
+		elif pass_i == PASS_OPAQUE and road_flags != null and (pi >= road_flags.size() or Nfs3Track.drivable(road_flags[pi])):
 			road = 1.0
 		for k in Nfs3Track.QUAD:
 			var vi: int = p.v[order[k]]
@@ -809,9 +1010,19 @@ static func _add_polys(st: SurfaceTool, t: Nfs3Track, polys: Array, verts: Packe
 			st.set_uv(ti.uv[k])
 			st.set_uv2(Vector2(ti.qfs_index, one_sided + anim))
 			st.set_normal(normal)
-			st.add_vertex(verts[vi] + offset)
+			if board:
+				st.set_custom(0, Color(Vector2(verts[vi].x, verts[vi].z).dot(across), 1.0, 0.0))
+				st.add_vertex(Vector3(0.0, verts[vi].y, 0.0) + offset)
+			else:
+				if custom:
+					st.set_custom(0, Color(0.0, 0.0, 0.0))
+				st.add_vertex(verts[vi] + offset)
 		n += 2
 	return n
+
+
+static func _pass_of(ti: Nfs3Track.TexInfo) -> int:
+	return PASS_FX if ti.additive else PASS_GLASS if ti.translucent else PASS_OPAQUE
 
 
 ## How many frames of a poly's animated texture can be drawn: the frames must sit in
@@ -860,12 +1071,18 @@ static func _twin_polys(groups: Array) -> Dictionary:
 
 
 static func _texture_array(t: Nfs3Track) -> Texture2DArray:
+	var glass := {}
+	for ti in t.textures:
+		if ti.translucent:
+			glass[ti.qfs_index] = true
 	var layers: Array[Image] = []
-	for img in t.images:
-		var im: Image = img.duplicate()
+	for i in t.images.size():
+		var im: Image = t.images[i].duplicate()
 		if im.get_format() != Image.FORMAT_RGBA8:
 			im.convert(Image.FORMAT_RGBA8)
-		_bleed_alpha(im)
+		# Glass keeps its own tint: bleeding would paint it the colour of its frame.
+		if not glass.has(i):
+			_bleed_alpha(im)
 		im.resize(TEX_SIZE, TEX_SIZE, Image.INTERPOLATE_BILINEAR)
 		im.generate_mipmaps()
 		layers.append(im)
@@ -876,6 +1093,29 @@ static func _texture_array(t: Nfs3Track) -> Texture2DArray:
 	var arr := Texture2DArray.new()
 	arr.create_from_images(layers)
 	return arr
+
+
+## Flags the see-through textures: those with a good part of their texels neither clear nor
+## solid (glass, surf), which the opaque pass's cut-out at half alpha would drop or chop.
+## Cut-outs (foliage, the painted lines' soft edges) have only a rim of such texels.
+static func _mark_translucent(t: Nfs3Track) -> void:
+	var cache := {}
+	for ti in t.textures:
+		ti.translucent = false
+		if ti.additive or ti.is_lane or ti.qfs_index >= t.images.size():
+			continue
+		if not cache.has(ti.qfs_index):
+			var im: Image = t.images[ti.qfs_index]
+			if im.get_format() != Image.FORMAT_RGBA8:
+				im = im.duplicate()
+				im.convert(Image.FORMAT_RGBA8)
+			var d := im.get_data()
+			var part := 0
+			for k in range(3, d.size(), 4):
+				if d[k] >= 26 and d[k] <= 230:
+					part += 1
+			cache[ti.qfs_index] = part >= TRANSLUCENT_MIN * (d.size() / 4)
+		ti.translucent = cache[ti.qfs_index]
 
 
 ## Fill the colour of fully transparent texels from opaque neighbours so that
@@ -911,6 +1151,11 @@ static func _make_path(t: Nfs3Track) -> TrackPath:
 		path.ups.append(vr.normal.normalized() if vr.normal.length() > 0.1 else Vector3.UP)
 		path.left_width.append(vr.left_wall)
 		path.right_width.append(vr.right_wall)
+		path.lanes.append(clampi(vr.lanes_left, 0, 15) << 4 | clampi(vr.lanes_right, 0, 15))
+		path.lane_width_left.append(vr.lane_w_left)
+		path.lane_width_right.append(vr.lane_w_right)
+	path.ai_speeds = t.ai_speeds
+	path.racing_line = t.racing_line
 	path.finalize()
 	return path
 

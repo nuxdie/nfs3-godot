@@ -18,6 +18,9 @@ var disabled_text := "—"
 ## Choices past this one are shown but can't be picked (-1: all can).
 var max_index := -1
 var caption_w := 118.0
+## Colour per choice: the segments show these as chips, and the chosen one's name goes
+## under the caption (for the paints, whose names don't fit side by side).
+var swatches: Array[Color] = []
 
 var _focus_t := 0.0
 var _hover := -1
@@ -68,7 +71,7 @@ func _seg(i: int) -> Rect2:
 	var n := maxi(items.size(), 1)
 	var x0 := caption_w
 	var w := (size.x - x0 - 8.0) / n
-	return Rect2(x0 + i * w, 8, w - 4.0, H - 16)
+	return Rect2(x0 + i * w, 8, w - 4.0, size.y - 16)
 
 
 func _process(dt: float) -> void:
@@ -122,15 +125,19 @@ func _draw() -> void:
 	var t := _focus_t
 	var a := 0.45 if disabled else 1.0
 	if t > 0.01:
-		UiKit.draw_slant(self, Rect2(0, 3, w, H - 6), Color(1, 1, 1, 0.06 * t), 0.12)
-		UiKit.draw_slant(self, Rect2(0, 3, 4, H - 6), Color(UiKit.ACCENT, t), 0.12)
+		UiKit.draw_slant(self, Rect2(0, 3, w, size.y - 6), Color(1, 1, 1, 0.06 * t), 0.12)
+		UiKit.draw_slant(self, Rect2(0, 3, 4, size.y - 6), Color(UiKit.ACCENT, t), 0.12)
 	var cap_col := UiKit.ACCENT if t > 0.5 else UiKit.INK_DIM
-	draw_string(UiKit.font("cond", 3), Vector2(22 + 4 * t, H * 0.5 + 5), caption.to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
+	var named := not swatches.is_empty() and not disabled
+	draw_string(UiKit.font("cond", 3), Vector2(22 + 4 * t, size.y * 0.5 + (-2 if named else 5)), caption.to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
 		caption_w - 24, 13, Color(cap_col, cap_col.a * a))
+	if named:
+		draw_string(UiKit.font("cond", 1), Vector2(22 + 4 * t, size.y * 0.5 + 13), value_text().to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
+			caption_w - 18, 10, UiKit.INK)
 	var f := UiKit.font("cond", 2)
 	var fs := 15
 	if disabled:
-		var r := Rect2(caption_w, 8, w - caption_w - 12, H - 16)
+		var r := Rect2(caption_w, 8, w - caption_w - 12, size.y - 16)
 		UiKit.draw_slant(self, r, Color(1, 1, 1, 0.04), 0.3)
 		draw_string(f, Vector2(r.position.x, r.get_center().y + fs * 0.36), disabled_text.to_upper(),
 			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, UiKit.INK_FAINT)
@@ -142,6 +149,11 @@ func _draw() -> void:
 		var fill := 0.03 if locked else (0.16 if i == _hover else 0.07)
 		UiKit.draw_slant(self, _seg(i), Color(1, 1, 1, fill), 0.3)
 	UiKit.draw_slant(self, _sel, UiKit.ACCENT.lerp(Color(1, 0.85, 0.4), 0.3 if _hover == index else 0.0), 0.3)
+	if not swatches.is_empty():
+		for i in mini(items.size(), swatches.size()):
+			var c := swatches[i]
+			UiKit.draw_slant(self, _seg(i).grow(-4 if i == index else -2), Color(c.r, c.g, c.b, 1.0), 0.3)
+		return
 	for i in items.size():
 		var r := _seg(i)
 		var col := UiKit.BG if i == index else (UiKit.INK_FAINT if i > _last() else \

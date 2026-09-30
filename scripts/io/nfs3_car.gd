@@ -9,23 +9,45 @@ const TRI_SIZE := 56
 ## overall, and colours as four bytes rather than four ints.
 const FCE4_SHIFT := 36
 const FCE4_HEADER_END := 0x2038
-## High Stakes parts drawn with the car: the most detailed body, its mirrors and T-top
-## roof panel. The driver and cockpit (hidden behind the opaque glass here), the lower LODs
-## and the brake discs are left out; the pop-up lamps (OL) and wheels are handled apart.
-const FCE4_BODY_PARTS := [":hb", ":olm", ":orm", ":ot"]
+## High Stakes parts drawn with the car, merged into one mesh: the most detailed body, its
+## mirrors and T-top roof panel, and the cockpit (OC), driver (OD), head (OH) and his hands
+## on the wheel (ODL), seen through the glass. The lower LODs, the brake discs and the
+## pursuit cars' alternative interiors (OND, OLD) are left out; the pop-up lamps (OL) and
+## wheels are handled apart.
+const FCE4_BODY_PARTS := [":hb", ":olm", ":orm", ":ot", ":oc", ":od", ":oh", ":odl"]
+## FCE4 triangle flags: the windows have all of these set (the bits above say which window).
+const FCE4_WINDOW := 0x2E
+## ...and from this bit up, which body panels a triangle belongs to (roof, boot, nose, each
+## side, the bonnet...): what High Stakes bends a panel at a time.
+const FCE4_PANEL_SHIFT := 11
 const SCALE := 1.0
 
 var id := ""
 var display_name := ""
 var texture: Texture2D
-var body_parts: Array[Dictionary] = []   # {name, mesh, center}
+var body_parts: Array[Dictionary] = []   # {name, mesh, center}; High Stakes: + glass, damaged {pos, normal, panels} (see _parse_fce)
 var wheels: Array[Dictionary] = []       # {name, mesh, center} front-left, front-right, rear-left, rear-right
 var popup_lights: Array[Dictionary] = [] # {name, mesh, center}: pop-up headlamps, raised only while the lights are on
 var half_size := Vector3(0.9, 0.6, 2.2)
 var colours: Array[Color] = []
-var lights: Array[Dictionary] = []       # {kind, pos}: kind is the dummy's first letter (H head, T tail, S siren)
+var lights: Array[Dictionary] = []       # {pos} + the dummy's name decoded, see decode_light()
+var plate := {}                          # High Stakes: the rear plate {pos, euro} (its ":LICENSE" dummy), or {}
 var carp := {}                           # id -> PackedFloat32Array
 var high_stakes := false                 # a High Stakes (FCE4) car
+## The showroom text of fedata.eng (see read_info): make, model, price, engine, power, top
+## speed, 0-60..., the history timeline and the paint colours' names.
+var info := {}
+## How High Stakes ranks the car, from fedata.eng (see read_rank): {class, serial, ratings,
+## upgradable}, or {}.
+var rank := {}
+## High Stakes' in-car view: {texture, eye, parts: [{name, mesh, center}]} from dash.fce, or {}.
+var dash := {}
+## The officer who walks up to a busted car (High Stakes' police cars, cop.fce), or null.
+var officer: Mesh
+## The car file's sound banks and engine tables (car.bnk, ocar.bnk... or High Stakes'
+## careng.bnk, careng.ctb/.ltb...), name -> bytes; parsed by sound_bank() when first asked for.
+var sound_files := {}
+var _sound_banks := {}
 var error := ""
 
 
@@ -39,28 +61,95 @@ static func load_dir(dir: String) -> Nfs3Car:
 	var fce := viv.get_file("car.fce")
 	c.high_stakes = is_fce4(fce)
 	c.display_name = read_name(viv.get_file("fedata.eng"), c.id, c.high_stakes)
+	c.info = read_info(viv.get_file("fedata.eng"), c.high_stakes, viv.get_file("car.fce"))
+	c.rank = read_rank(viv.get_file("fedata.eng"), c.high_stakes)
 	c.carp = parse_carp(viv.get_file("carp.txt").get_string_from_ascii())
 	if c.high_stakes:
 		c._convert_hs_carp()
-	var tga := viv.get_file("car00.tga")
-	if not tga.is_empty():
-		var img := Image.new()
-		if img.load_tga_from_buffer(tga) == OK:
-			# The game reads the pixel rows in file order and ignores the TGA "top-down" flag, so
-			# undo the flip Godot applies for those files or the UVs land on the wrong rows.
-			# High Stakes honours the flag (its skins come both ways up).
-			if not c.high_stakes and tga.size() > 17 and tga[17] & 0x20:
-				img.flip_y()
-			if c.high_stakes:
-				_hs_paint_mask(img, fce)
-			_bleed_cutout(img)
-			img.generate_mipmaps()
-			c.texture = ImageTexture.create_from_image(img)
+	for f: String in viv.files:
+		if f.get_extension() in ["bnk", "ctb", "ltb"]:
+			c.sound_files[f] = viv.files[f]
+	c.texture = load_skin(viv.get_file("car00.tga"), c.high_stakes, fce)
 	if fce.is_empty():
 		c.error = "missing car.fce"
 		return c
 	c._parse_fce(fce)
+	if c.high_stakes:
+		c._load_dash(viv, fce)
+		c._load_officer(viv)
 	return c
+
+
+## A car00.tga (or dash00.tga) as a texture, or null. `fce` gives a High Stakes skin its
+## interior colour.
+static func load_skin(tga: PackedByteArray, high_stakes: bool, fce: PackedByteArray) -> Texture2D:
+	if tga.is_empty():
+		return null
+	var img := Image.new()
+	if img.load_tga_from_buffer(tga) != OK:
+		return null
+	# The game reads the pixel rows in file order and ignores the TGA "top-down" flag, so
+	# undo the flip Godot applies for those files or the UVs land on the wrong rows.
+	# High Stakes honours the flag (its skins come both ways up).
+	if not high_stakes and tga.size() > 17 and tga[17] & 0x20:
+		img.flip_y()
+	if high_stakes:
+		_hs_paint_mask(img, fce)
+	_bleed_cutout(img)
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+
+## The dashboard, seats and door cards of the in-car view (dash.fce, dash00.tga). Its one
+## dummy is the driver's eye.
+func _load_dash(viv: Viv, fce: PackedByteArray) -> void:
+	var f := Fce4.parse(viv.get_file("dash.fce"))
+	if f == null or f.parts.is_empty():
+		return
+	var tex := load_skin(viv.get_file("dash00.tga"), true, fce)
+	var eye := Vector3(0.45, 0.42, -0.45)
+	if not f.dummies.is_empty():
+		eye = f.dummies[0].pos
+	var out: Array[Dictionary] = []
+	for p in f.parts:
+		out.append({"name": p.name, "mesh": f.mesh(p), "center": p.center})
+	dash = {"texture": tex, "eye": eye, "parts": out}
+
+
+## The officer, one surface per texture page of cop.art.
+func _load_officer(viv: Viv) -> void:
+	var f := Fce4.parse(viv.get_file("cop.fce"))
+	var mats := Fce4.art_materials(viv.get_file("cop.art"))
+	if f == null or f.parts.is_empty() or mats.is_empty():
+		return
+	var p: Dictionary = f.parts[0]
+	var m := f.mesh(p, mats)
+	# Stood on its feet: the model's origin is at its middle.
+	var lowest := INF
+	for v in m.get_faces():
+		lowest = minf(lowest, v.y)
+	officer = _translated(m, Vector3(0, -lowest, 0))
+
+
+## `m` with every surface moved by `by`, materials kept.
+static func _translated(m: ArrayMesh, by: Vector3) -> ArrayMesh:
+	var out := ArrayMesh.new()
+	for s in m.get_surface_count():
+		var arrays := m.surface_get_arrays(s)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for i in verts.size():
+			verts[i] += by
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		out.surface_set_material(s, m.surface_get_material(s))
+	return out
+
+
+## One of the car file's sound banks (see sound_files), parsed once; null if it has none.
+func sound_bank(name: String) -> EaBnk:
+	if not _sound_banks.has(name):
+		_sound_banks[name] = EaBnk.parse(sound_files.get(name, PackedByteArray()))
+	return _sound_banks[name]
 
 
 ## Quick name lookup for menus, without building meshes.
@@ -81,10 +170,43 @@ static func peek_spec(dir: String) -> Nfs3Car:
 		return c
 	c.high_stakes = is_fce4(viv.get_file("car.fce"))
 	c.display_name = read_name(viv.get_file("fedata.eng"), c.id, c.high_stakes)
+	c.info = read_info(viv.get_file("fedata.eng"), c.high_stakes, viv.get_file("car.fce"))
+	c.rank = read_rank(viv.get_file("fedata.eng"), c.high_stakes)
 	c.carp = parse_carp(viv.get_file("carp.txt").get_string_from_ascii())
 	if c.high_stakes:
 		c._convert_hs_carp()
 	return c
+
+
+## A light dummy's name, decoded: {kind, colour, breakable, flash, intensity, time, delay}.
+## High Stakes spells out seven letters, e.g. HWYN550 or SBNE554: kind (H head, T tail,
+## B brake, R reversing, P parking/marker, S siren), colour (W white, R red, B blue,
+## O orange, Y yellow), breakable (Y/N), flashing (N steady; O and E flash in turn), then
+## digits: intensity (0 broken, 5 the usual), and for flashing lamps the time lit (0 steady,
+## 9 longest) and the delay into the cycle. NFS3 has four letters: kind, where (F front,
+## R rear, M middle), side (L/R) and flashing, e.g. HFLO, TRRN, SMLN; its colours go by kind,
+## and its sirens are red on the left, blue on the right, flashing in turn.
+static func decode_light(dname: String) -> Dictionary:
+	var l := {"kind": dname[0], "colour": "", "breakable": true, "flash": "N",
+		"intensity": 5, "time": 5, "delay": 0}
+	if dname.length() >= 4 and dname[2] in ["Y", "N"]:
+		l.colour = dname[1]
+		l.breakable = dname[2] == "Y"
+		l.flash = dname[3]
+		var keys := ["intensity", "time", "delay"]
+		for k in mini(dname.length() - 4, 3):
+			if dname[4 + k].is_valid_int():
+				l[keys[k]] = int(dname[4 + k])
+	elif dname.length() >= 4:
+		l.flash = dname[3]
+		if l.kind == "S":
+			l.colour = "R" if dname[2] == "L" else "B"
+			l.flash = "O" if dname[2] == "L" else "E"
+	if not l.flash in ["N", "O", "E"]:
+		l.flash = "N"
+	if not l.colour in ["W", "R", "B", "O", "Y"]:
+		l.colour = {"T": "R", "B": "R", "P": "O", "S": "R"}.get(l.kind, "W")
+	return l
 
 
 ## FCE4 files start with 0x00101014; FCE3 ones with anything, 0x00101013 included.
@@ -111,6 +233,68 @@ static func read_name(fedata: PackedByteArray, fallback: String, high_stakes := 
 	if n.is_empty():
 		n = (strings[0] + " " + strings[1]).strip_edges()
 	return n if not n.is_empty() else fallback
+
+
+## fedata.eng's table of strings (offsets at byte 47 in NFS3's, at 0x3C0 in High Stakes',
+## which has one more, unused, after the tyres), by the names below; "history" (a heading
+## and up to seven dated lines) and "colours" (the name of each paint the car file has).
+const INFO_FIELDS := ["make", "model", "name", "price", "status", "weight", "weight_split",
+	"length", "width", "height", "engine", "displacement", "power", "torque", "redline",
+	"brakes", "tyres", "top_speed", "zero_60", "zero_100", "transmission", "gearbox"]
+
+
+static func read_info(fedata: PackedByteArray, high_stakes: bool, fce: PackedByteArray) -> Dictionary:
+	var base := 0x3C0 if high_stakes else 47
+	var n_colours := 0
+	if high_stakes and fce.size() >= FCE4_HEADER_END:
+		n_colours = fce.decode_u32(FCE4_SHIFT + 2044)
+	elif not high_stakes and fce.size() >= HEADER_END:
+		n_colours = fce.decode_u32(2044)
+	var strings: Array[String] = []
+	for i in INFO_FIELDS.size() + 8 + mini(n_colours, 16) + int(high_stakes):
+		var at := base + i * 4
+		if at + 4 > fedata.size():
+			return {}
+		var off := fedata.decode_u32(at)
+		if off <= 0 or off >= fedata.size():
+			return {}
+		strings.append(_c_string(fedata, off).strip_edges())
+	if high_stakes:
+		strings.remove_at(17)
+	var out := {}
+	for i in INFO_FIELDS.size():
+		out[INFO_FIELDS[i]] = strings[i]
+	var k := INFO_FIELDS.size()
+	out.history = strings.slice(k, k + 8).filter(func(h: String) -> bool: return h != "")
+	out.colours = strings.slice(k + 8)
+	return out
+
+
+## The binary head of fedata.eng, as High Stakes reads it (its car record, from the second
+## byte on). class: 0..3 for AAA, AA, A, B, -1 for none (the Knockout); serial: the number a
+## "Model" restriction names (not always carp.txt's); ratings: the overall rating bar (1..20) at
+## each upgrade level, what it ranks rivals by; upgradable: whether it takes upgrades.
+## NFS3's head has its own class (0..2 for A..C, which High Stakes' AA..B stand for),
+## serial and four bars (acceleration, top speed, handling, braking) but no overall one:
+## their mean stands in. {} if the file is too short.
+static func read_rank(fedata: PackedByteArray, high_stakes: bool) -> Dictionary:
+	if high_stakes:
+		if fedata.size() < 0x3A0:
+			return {}
+		var cls := fedata[0x382]
+		var ratings := []
+		for level in 4:
+			ratings.append(fedata[0x399 + level])
+		return {"class": cls if cls <= 3 else -1, "serial": fedata[0x31E], "ratings": ratings,
+			"upgradable": fedata[0x37B] & 0x40 == 0}
+	if fedata.size() < 0x2C:
+		return {}
+	var cls := fedata[0x0A]
+	var bars := 0
+	for k in 4:
+		bars += fedata[0x28 + k]
+	return {"class": cls + 1 if cls <= 2 else -1, "serial": fedata[0x18], "ratings": [roundi(bars / 4.0)],
+		"upgradable": false}
 
 
 ## A zero-terminated Latin-1 string ("La Niña"), or "" when `off` is out of range.
@@ -178,11 +362,16 @@ func _parse_fce(d: PackedByteArray) -> void:
 		error = "damaged car.fce"
 		return
 	# Light "dummies": positions named by type, e.g. HFLO (headlight), TRLN (taillight), SMLN (siren).
-	# High Stakes also marks the licence plates, as ":LICENSE": not lamps.
+	# High Stakes also marks the licence plate, as ":LICENSE" (and ":LICMED", ":LICLOW" for its
+	# lower LODs): not lamps.
 	for i in mini(d.decode_u32(o + 52), 16):
 		var dname := d.slice(o + 2564 + i * 64, o + 2628 + i * 64).get_string_from_ascii().strip_edges().to_upper()
-		if not dname.is_empty() and not dname.begins_with(":"):
-			lights.append({"kind": dname[0], "pos": _v(d, o + 56 + i * 12)})
+		if dname.begins_with(":LICENSE"):
+			plate = {"pos": _v(d, o + 56 + i * 12), "euro": dname.contains("EURO")}
+		elif not dname.is_empty() and not dname.begins_with(":"):
+			var l := decode_light(dname)
+			l.pos = _v(d, o + 56 + i * 12)
+			lights.append(l)
 	var n_pri := d.decode_u32(o + 2044)
 	for i in mini(n_pri, 16):
 		# Hue/saturation/brightness (a 4th value, usually ~128, is ignored). The paint areas of
@@ -234,6 +423,34 @@ func _parse_fce(d: PackedByteArray) -> void:
 	for pi in body_ids:
 		if _part_name(d, pi, o) == ":hb":
 			main_body = pi
+	var main_center := _v(d, o + 252 + main_body * 12)
+	# High Stakes' body parts go into one mesh round the main body's centre, its windows into
+	# a second (see-through, so the driver shows), and with every vertex goes where the
+	# model's damaged copy has it (the dents CarDamage makes). Unindexed, so each emitted
+	# vertex has its own entry.
+	var merged := fce4
+	var damaged_off := d.decode_u32(52) if fce4 else 0
+	var damaged_norm_off := d.decode_u32(56) if fce4 else 0
+	var has_damage := fce4 and damaged_off > 0 and damaged_norm_off > 0
+	# High Stakes rigs the driver to steer: a table of a word per vertex, where ":OD" leaves
+	# his steering wheel and hands unflagged (the rest of him carries 4). They turn about the
+	# wheel's column; the forearms, joining them to the elbows, stretch to follow.
+	var driver_off := d.decode_u32(64) if fce4 else 0
+	var steering_wheel := {}
+	var body_st: SurfaceTool = null
+	var glass_st: SurfaceTool = null
+	var body_dmg := PackedVector3Array()
+	var glass_dmg := PackedVector3Array()
+	# Per emitted vertex: the damaged copy's normal, and the panels (bit mask) it's part of.
+	var body_dmg_n := PackedVector3Array()
+	var glass_dmg_n := PackedVector3Array()
+	var body_panels := PackedInt32Array()
+	var glass_panels := PackedInt32Array()
+	if merged:
+		body_st = SurfaceTool.new()
+		body_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		glass_st = SurfaceTool.new()
+		glass_st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for pi in n_parts:
 		var pname := _part_name(d, pi, o)
 		var wi := wheel_ids.find(pi)
@@ -248,6 +465,18 @@ func _parse_fce(d: PackedByteArray) -> void:
 				or header_end + maxi(vert_off, norm_off) + (first_v + nv) * 12 > d.size():
 			error = "damaged car.fce"
 			return
+		var in_body := merged and pi in body_ids
+		var part_dmg := has_damage and in_body and header_end + maxi(damaged_off, damaged_norm_off) + (first_v + nv) * 12 <= d.size()
+		# A vertex belongs to every panel of the triangles round it, so the copies of it
+		# (unindexed) bend alike and the panels stay joined.
+		var panels := {}
+		if part_dmg:
+			for ti in nt:
+				var q := header_end + tri_off + (first_t + ti) * TRI_SIZE
+				var mask := d.decode_u32(q + 28) >> FCE4_PANEL_SHIFT
+				for k in 3:
+					var vi := d.decode_u32(q + 4 + k * 4)
+					panels[vi] = int(panels.get(vi, 0)) | mask
 		# The underside is a few big, near-level quads spanning the full width; the body above
 		# is rounded at the corners, so their corners poke out below the bumpers as dark,
 		# torn-looking slivers. Pull them in towards their centre, tucked under the body.
@@ -271,25 +500,78 @@ func _parse_fce(d: PackedByteArray) -> void:
 						floor_box = AABB(v, Vector3.ZERO) if floor_tris.is_empty() else floor_box.expand(v)
 					floor_tris[ti] = true
 		var floor_mid := floor_box.get_center()
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var offset := center - main_center if in_body else Vector3.ZERO
+		var steering := {}
+		if in_body and pname == ":od" and driver_off > 0 and header_end + driver_off + (first_v + nv) * 4 <= d.size():
+			var rigged := false
+			for vi in nv:
+				if d.decode_u32(header_end + driver_off + (first_v + vi) * 4) & 4:
+					rigged = true
+				else:
+					steering[vi] = true
+			if not rigged:
+				steering.clear()
+		# The wheel itself is a flat, textured quad: its biggest triangle lies in the rim's plane
+		# and has the quad's diagonal for its longest side, whose middle is the hub.
+		var biggest := 0.0
+		for ti in (nt if not steering.is_empty() else 0):
+			var q := header_end + tri_off + (first_t + ti) * TRI_SIZE
+			var p: Array[Vector3] = []
+			for k in 3:
+				var vi := d.decode_u32(q + 4 + k * 4)
+				if not steering.has(vi):
+					break
+				p.append(_v(d, header_end + vert_off + (first_v + vi) * 12))
+			if p.size() < 3:
+				continue
+			var n := (p[1] - p[0]).cross(p[2] - p[0])
+			if n.length() <= biggest:
+				continue
+			biggest = n.length()
+			var hub := Vector3.ZERO
+			var longest := -1.0
+			for k in 3:
+				var e := p[k].distance_squared_to(p[(k + 1) % 3])
+				if e > longest:
+					longest = e
+					hub = (p[k] + p[(k + 1) % 3]) * 0.5
+			# The column points out through the front of the car, as the in-car view's wheel's does.
+			n = n.normalized()
+			steering_wheel = {"pivot": hub + offset, "axis": n if n.z > 0.0 else -n}
+		var st := body_st if in_body else SurfaceTool.new()
+		if not in_body:
+			st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		for ti in nt:
 			var q := header_end + tri_off + (first_t + ti) * TRI_SIZE
 			if d.decode_u32(q + 4) >= nv or d.decode_u32(q + 8) >= nv or d.decode_u32(q + 12) >= nv:
 				continue
+			var glass := in_body and (d.decode_u32(q + 28) & FCE4_WINDOW) == FCE4_WINDOW
+			var to := glass_st if glass else st
 			# Mirroring X flips handedness; emit the triangle in reverse order to keep it front-facing.
 			for k in [2, 1, 0]:
 				var vi := d.decode_u32(q + 4 + k * 4)
 				var vp := header_end + vert_off + (first_v + vi) * 12
 				var np := header_end + norm_off + (first_v + vi) * 12
-				st.set_normal(_v(d, np).normalized())
+				to.set_normal(_v(d, np).normalized())
 				# FCE4's v runs the other way (the skin's rows are read in file order either way).
 				var tv := d.decode_float(q + 44 + k * 4)
-				st.set_uv(Vector2(d.decode_float(q + 32 + k * 4), tv if fce4 else 1.0 - tv))
+				to.set_uv(Vector2(d.decode_float(q + 32 + k * 4), tv if fce4 else 1.0 - tv))
 				var pos := _v(d, vp)
+				var bent := _v(d, header_end + damaged_off + (first_v + vi) * 12) if part_dmg else pos
 				if floor_tris.has(ti):
 					pos = floor_mid + (pos - floor_mid) * Vector3(0.84, 1.0, 0.92)
-				st.add_vertex(pos)
+					bent = floor_mid + (bent - floor_mid) * Vector3(0.84, 1.0, 0.92)
+				if merged and to == body_st:
+					to.set_uv2(Vector2(1.0 if steering.has(vi) else 0.0, 0.0))
+				to.add_vertex(pos + offset)
+				if in_body:
+					(glass_dmg if glass else body_dmg).append(bent + offset)
+					var bn := _v(d, header_end + damaged_norm_off + (first_v + vi) * 12).normalized() if part_dmg \
+						else _v(d, np).normalized()
+					(glass_dmg_n if glass else body_dmg_n).append(bn)
+					(glass_panels if glass else body_panels).append(int(panels.get(vi, 0)))
+		if in_body:
+			continue
 		var part := {"name": pname, "mesh": st.commit(), "center": center}
 		if wi >= 0 and slots_ok:
 			part.slot = slots[wi]
@@ -299,6 +581,17 @@ func _parse_fce(d: PackedByteArray) -> void:
 		else:
 			# Without a clean set of four wheels, draw them as part of the body.
 			body_parts.append(part)
+	if merged:
+		var body := {"name": ":hb", "mesh": body_st.commit(), "center": main_center}
+		var glass := {"name": "glass", "mesh": glass_st.commit(), "center": main_center, "glass": true}
+		if not steering_wheel.is_empty():
+			body.steering = steering_wheel
+		if has_damage:
+			body.damaged = {"pos": body_dmg, "normal": body_dmg_n, "panels": body_panels}
+			glass.damaged = {"pos": glass_dmg, "normal": glass_dmg_n, "panels": glass_panels}
+		body_parts.push_front(body)
+		if not glass_dmg.is_empty():
+			body_parts.append(glass)
 	wheels.sort_custom(func(a, b): return a.slot < b.slot)
 
 

@@ -2,12 +2,14 @@ extends Node
 ## Photographs cars in a plain studio, parked on their springs:
 ##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops] [id ...] [--lights] [--big] [--low]
 ##       [--yaw=DEG ...] [--dist=M] [--wire] [--track=ID [--at=LAP FRACTION] [--night] [--weather]]
-##       [--tag=NAME]
+##       [--tag=NAME] [--siren] [--steer=-1..1]
 ## Each car is shot from the front and rear three-quarters (or from each --yaw, 0 = dead
 ## ahead); saves shots/cars_<tag>.png, a contact sheet with one row per car, and prints what
 ## the loader found in each model. Ids (folder names) pick cars from the set; --big shoots
 ## larger and closer, --low from near the ground, --wire adds a wireframe of each shot.
 ## --track parks the cars on that track's road instead, in its own light and conditions.
+## --dent crashes each car into a front and a side corner first; --officer stands a High
+## Stakes cruiser's officer beside it; --siren sets the light bar going. The set "heli" is High Stakes' helicopter.
 
 var W := 480
 var H := 300
@@ -45,6 +47,7 @@ func _run() -> void:
 		"cops": paths = Game.cop_cars
 		"hscops": paths = Game.hs_cop_cars
 		"hstraffic": paths = Game.hs_traffic_cars
+		"heli": paths = [Game.hs_helicopter] if Game.hs_helicopter != "" else []
 		"cars": paths = Game.cars.map(func(c): return c.path)
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)
@@ -65,7 +68,7 @@ func _run() -> void:
 	if track_id != "":
 		Game.night = night
 		Game.weather = "--weather" in args
-		var w := TrackWorld.load_track(track_id)
+		var w := TrackWorld.load_track(track_id, night)
 		add_child(w.root)
 		w.light(self, Game.night, Game.weather, get_viewport())
 		var n := int(at * w.path.size()) % w.path.size()
@@ -120,6 +123,26 @@ func _run() -> void:
 	var cols := yaws.size() * (2 if wire else 1)
 	var sheet := Image.create(W * cols, H * paths.size(), false, Image.FORMAT_RGBA8)
 	for i in paths.size():
+		if set_name == "heli":
+			var heli := Helicopter.new()
+			add_child(heli)
+			heli.setup(Fce4.load_helicopter(paths[i]), null, park.origin + Vector3.UP * 2.5, night)
+			heli.set_physics_process(false)
+			var hd := 16.0 if dist_opt <= 0.0 else dist_opt
+			var hcol := 0
+			for yaw_deg in yaws:
+				var yaw := deg_to_rad(yaw_deg)
+				cam.global_position = heli.global_position + Vector3(sin(yaw), 0.25, cos(yaw)) * hd
+				cam.look_at(heli.global_position, Vector3.UP)
+				for k in 4:
+					await get_tree().process_frame
+				var himg := get_viewport().get_texture().get_image()
+				himg.convert(Image.FORMAT_RGBA8)
+				himg.resize(W, H)
+				sheet.blit_rect(himg, Rect2i(0, 0, W, H), Vector2i(W * hcol, H * i))
+				hcol += 1
+			heli.queue_free()
+			continue
 		var data: Object = Game.load_car(paths[i], i)
 		print("%-6s %-22s parts %d wheels %d popups %d lights %d colours %d tex %s half %s%s" % [
 			paths[i].get_file(), data.display_name, data.body_parts.size(), data.wheels.size(),
@@ -136,7 +159,28 @@ func _run() -> void:
 		for k in 90:
 			await get_tree().physics_frame
 		car.freeze = true
+		for a: String in args:
+			if a.begins_with("--steer="):
+				car.steer = float(a.get_slice("=", 1))
+		if "--siren" in args:
+			car.enable_siren(true)
 		var hs: Vector3 = data.half_size
+		if "--dent" in args:
+			var dmg := CarDamage.new()
+			car.add_child(dmg)
+			await get_tree().physics_frame
+			var xf := car.global_transform
+			dmg.hit(xf * Vector3(hs.x * 0.7, 0.1, hs.z), xf.basis * Vector3(-0.3, 0, -1).normalized(), CarDamage.FULL_HIT)
+			dmg.hit(xf * Vector3(-hs.x, 0.1, -hs.z * 0.4), xf.basis * Vector3.RIGHT, CarDamage.FULL_HIT)
+			for k in 6:
+				await get_tree().process_frame
+		if "--officer" in args and car.officer_mesh:
+			var off := MeshInstance3D.new()
+			off.mesh = car.officer_mesh
+			car.add_child(off)
+			off.position = Vector3(hs.x + 0.8, 0.0, 0.3)
+			off.global_position.y = park.origin.y
+			off.rotation.y = -PI / 2
 		var dist := dist_opt if dist_opt > 0.0 else hs.z * (2.2 if big else 3.4) + 3.0
 		var col := 0
 		for yaw_deg in yaws:

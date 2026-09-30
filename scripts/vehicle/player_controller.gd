@@ -13,6 +13,7 @@ func _ready() -> void:
 
 func _physics_process(_dt: float) -> void:
 	car.hold = false
+	car.horn = Input.is_action_pressed("horn")
 	if not enabled:
 		car.throttle = 0.0
 		car.hold = true

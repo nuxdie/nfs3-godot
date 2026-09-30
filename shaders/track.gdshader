@@ -4,6 +4,10 @@ shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_opaque;
 
 uniform sampler2DArray textures : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+// The same array without wrapping, for UVs inside the texture: filtering at a repeat-wrapped
+// edge blends in the opposite edge, which bites a gap out of a tree's trunk where its
+// half-tree blades meet (the trunk runs down the texture's edge).
+uniform sampler2DArray textures_clamped : source_color, filter_linear_mipmap_anisotropic, repeat_disable;
 uniform float brightness = 1.35;
 // Night: the baked shading is scaled by `night_tint`, and the nearest cars' headlights
 // (set each frame by the race) add cones of light. Unshaded, so real lights can't do it.
@@ -51,8 +55,8 @@ varying flat float layer;
 varying flat float one_sided;
 varying vec3 world_pos;
 varying vec3 world_normal;
-// Rate of the game clock that animated textures (fire, water) step on.
-const float TICKS_PER_SECOND = 60.0;
+// Rate of the game clock that animated textures (fire, water) step on (High Stakes: 64).
+uniform float ticks_per_second = 60.0;
 
 // UV2.y packs one_sided (bit 0), animation frame count (x2) and ticks per frame (x16).
 float anim_layer(float base, float packed) {
@@ -61,10 +65,18 @@ float anim_layer(float base, float packed) {
 	if (frames < 2.0) {
 		return base;
 	}
-	return base + mod(floor(TIME * TICKS_PER_SECOND / period), frames);
+	return base + mod(floor(TIME * ticks_per_second / period), frames);
 }
 
 void vertex() {
+	// High Stakes' billboards (Nfs3TrackBuilder.BILLBOARD_XTYPE): CUSTOM0.y = 1, the vertex on
+	// the upright axis and CUSTOM0.x its offset across; turned about the axis to face the camera.
+	if (CUSTOM0.y > 0.5) {
+		vec2 to_cam = CAMERA_POSITION_WORLD.xz - (MODEL_MATRIX * vec4(VERTEX, 1.0)).xz;
+		vec2 dir = length(to_cam) > 0.001 ? normalize(to_cam) : vec2(0.0, 1.0);
+		VERTEX.xz += vec2(dir.y, -dir.x) * CUSTOM0.x;
+		NORMAL = vec3(dir.x, 0.0, dir.y);
+	}
 	layer = anim_layer(UV2.x, UV2.y);
 	one_sided = mod(UV2.y, 2.0);
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -174,7 +186,15 @@ void fragment() {
 	if (mirror_pass && dot(world_pos, mirror_plane.xyz) < mirror_plane.w + 0.3) {
 		discard;
 	}
-	vec4 c = texture(textures, vec3(UV, layer));
+	// Both sampled outside any branch so the mip derivatives stay valid.
+	vec4 c_wrap = texture(textures, vec3(UV, layer));
+	vec4 c_clamp = texture(textures_clamped, vec3(UV, layer));
+	// Under MSAA a pixel only partly covered is still shaded at its centre, which can lie off
+	// the quad: allow a pixel's worth of UV past the edge, or that pixel wraps round to the
+	// see-through side (a dotted line of sky down the trunk where a tree's blades meet).
+	vec2 px = fwidth(UV);
+	bool inside = all(greaterThanEqual(UV, -px)) && all(lessThanEqual(UV, 1.0 + px));
+	vec4 c = inside ? c_clamp : c_wrap;
 	vec3 light = COLOR.rgb * brightness * night_tint * car_shadows();
 	for (int i = 0; i < beam_count; i++) {
 		vec3 d = world_pos - beam_pos[i];

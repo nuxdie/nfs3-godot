@@ -2,7 +2,7 @@ extends Node
 ## Photographs a track from the road at points round the lap, without a race:
 ##   godot --path . -- --trackshots <track> [lap fraction ...] [--night] [--weather]
 ##       [--up=M] [--back=M] [--ahead=M] [--side=M] [--lookside=M] [--tag=NAME] [--hazards]
-##       [--clearmap=FROM-TO]
+##       [--clearmap=FROM-TO] [--eye=X,Y,Z --at=X,Y,Z [--every=S]]
 ## Saves shots/track_<tag><fraction>.png. The eye stands --back m behind the node and --up m
 ## over the road, --side m to the right, and looks at the road --ahead m on (--lookside m to
 ## the right of it). --clearmap prints where the AI's obstacle scan finds room for a car on
@@ -42,7 +42,11 @@ func _run() -> void:
 			print("%s at %.4f%s, %s" % [b.kind, float(b.from) / lay.n,
 				"..%.4f" % (float(b.to) / lay.n) if b.to >= 0 else "", "right" if b.side > 0.0 else "left"])
 	var t0 := Time.get_ticks_msec()
-	var w := TrackWorld.load_track(id)
+	var layout := 0
+	for a: String in args:
+		if a.begins_with("--layout="):
+			layout = int(a.get_slice("=", 1))
+	var w := TrackWorld.load_track(id, "--night" in args, layout)
 	print("built %s in %d ms: %d nodes, %.0f m" % [id, Time.get_ticks_msec() - t0, w.path.size(), w.path.length])
 	add_child(w.root)
 	if "--hazards" in args and id == Game.PROCEDURAL_TRACK:
@@ -60,6 +64,26 @@ func _run() -> void:
 	add_child(cam)
 	cam.make_current()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://shots"))
+	# --eye=X,Y,Z --at=X,Y,Z: from a fixed point instead, a shot every --every=S seconds
+	# (animated objects move on), one per lap fraction given.
+	var eye: Variant = _vec_arg(args, "--eye=")
+	if eye != null:
+		cam.global_position = eye
+		cam.look_at(_vec_arg(args, "--at="), Vector3.UP)
+		var every := 0.5
+		for a: String in args:
+			if a.begins_with("--every="):
+				every = float(a.get_slice("=", 1))
+		for k in 8:
+			await get_tree().process_frame
+		for s in fracs.size():
+			if s > 0:
+				await get_tree().create_timer(every).timeout
+			var file := "shots/track_%seye%d.png" % [tag, s]
+			get_viewport().get_texture().get_image().save_png(file)
+			print("shot ", file)
+		get_tree().quit()
+		return
 	for f: float in fracs:
 		var path := w.path
 		var i := int(f * path.size()) % path.size()
@@ -78,6 +102,15 @@ func _run() -> void:
 			Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000,
 			Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)])
 	get_tree().quit()
+
+
+## The Vector3 of a "--name=X,Y,Z" argument, or null.
+func _vec_arg(args: Array, prefix: String) -> Variant:
+	for a: String in args:
+		if a.begins_with(prefix):
+			var v := a.trim_prefix(prefix).split_floats(",")
+			return Vector3(v[0], v[1], v[2])
+	return null
 
 
 ## Prints what scan_obstacles found on nodes `from`..`to`: a column per metre across the road

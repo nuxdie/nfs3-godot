@@ -1,9 +1,11 @@
 class_name CarDamage
 extends Node
 ## Crash damage (NFS3 itself had none; this is in the spirit of High Stakes): a hard hit
-## dents the body around the point of impact, takes some power off the engine and knocks
-## the steering out of line. Nothing is repaired until the race is restarted. Add as a
-## child of the Car after setup().
+## dents the body around the point of impact, takes some power off the engine, knocks
+## the steering out of line and puts out the lamps near it. High Stakes cars bend toward
+## the damaged copy of the body their model carries instead of a made-up crumple, a whole
+## panel (bonnet, door, roof...) at a time as that game does. Nothing is repaired until the
+## race is restarted. Add as a child of the Car after setup().
 
 const MIN_HIT := 4.0        # m/s of velocity change into a contact before anything bends
 const FULL_HIT := 22.0      # ... and the hit that does the most one crash can
@@ -12,6 +14,7 @@ const DENT_DEPTH := 0.26    # m a full hit pushes in at the centre
 const MAX_DENT := 0.4       # m any vertex can be pushed in over the race
 const HIT_WEAR := 0.14      # overall damage from one full hit
 const MAX_PULL := 0.05      # steering pull at its worst, as a fraction of the lock
+const LAMP_BREAK := 0.25    # the share of a full hit that breaks the lamps near it
 ## A dent only visits the vertices near it: each surface's are filed in a grid of cells this
 ## big by where they sit at rest (a vertex is never more than MAX_DENT from there).
 const CELL := 0.5
@@ -43,13 +46,32 @@ func _ready() -> void:
 	for mi in _car.body_meshes():
 		var src := mi.mesh
 		var surfaces: Array[Dictionary] = []
+		var damaged: Variant = mi.get_meta("damaged") if mi.has_meta("damaged") else null
 		for s in src.get_surface_count():
 			var arrays := src.surface_get_arrays(s)
 			if src.surface_get_primitive_type(s) != Mesh.PRIMITIVE_TRIANGLES or arrays[Mesh.ARRAY_VERTEX] == null:
 				continue
-			surfaces.append({"arrays": arrays, "rest": (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).duplicate(),
+			var sf := {"arrays": arrays, "rest": (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).duplicate(),
 				"normals": arrays[Mesh.ARRAY_NORMAL], "material": src.surface_get_material(s),
-				"key": "%d:%d" % [src.get_instance_id(), s]})
+				"key": "%d:%d" % [src.get_instance_id(), s]}
+			# The model's damaged copy, vertex for vertex (one surface): positions, normals and
+			# which panels each vertex is on. Each panel's box, and how far it's bent.
+			if damaged is Dictionary and s == 0 and (damaged.pos as PackedVector3Array).size() == (sf.rest as PackedVector3Array).size():
+				sf.damaged = damaged
+				var boxes := {}
+				var rest: PackedVector3Array = sf.rest
+				var panels: PackedInt32Array = damaged.panels
+				for i in rest.size():
+					var m := panels[i]
+					var b := 0
+					while m != 0:
+						if m & 1:
+							boxes[b] = AABB(rest[i], Vector3.ZERO) if not boxes.has(b) else (boxes[b] as AABB).expand(rest[i])
+						m >>= 1
+						b += 1
+				sf.panel_boxes = boxes
+				sf.panel_bent = {}
+			surfaces.append(sf)
 		if not surfaces.is_empty():
 			# Loaded cars share their meshes between everyone driving that model: dent a copy.
 			_parts.append({"mi": mi, "mesh": ArrayMesh.new(), "surfaces": surfaces})
@@ -126,6 +148,9 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 	# (Out of sight it isn't seen at all: the car takes the damage without the dent.)
 	if not _car.far:
 		_queue.append([self, p, dir, radius, depth])
+	# Lamps the files mark breakable go out in a hit hard enough to bend them.
+	if s >= LAMP_BREAK:
+		_car.break_lamps(p, radius)
 	for n in _car.fittings():
 		var f := 1.0 - n.position.distance_to(p) / radius
 		if f > 0.0:
@@ -200,6 +225,9 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 		var mesh: ArrayMesh = part.mesh
 		var changed := false
 		for sf in part.surfaces:
+			if sf.has("damaged"):
+				changed = _bend_panels(sf, lp, radius, depth) or changed
+				continue
 			var arrays: Array = sf.arrays
 			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 			var rest: PackedVector3Array = sf.rest
@@ -211,9 +239,9 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 				if d >= radius:
 					continue
 				var f := 1.0 - d / radius
+				var r := rest[i]
 				# Crumple rather than a smooth dimple: a fixed per-position jitter (the same for
 				# every copy of a vertex, so the unindexed triangles stay joined).
-				var r := rest[i]
 				var jitter := 0.6 + 0.8 * absf(fmod(sin(r.dot(Vector3(12.99, 78.23, 37.72))) * 43758.55, 1.0))
 				var off := verts[i] + dir * depth * f * f * (3.0 - 2.0 * f) * jitter - r
 				off = off.limit_length(MAX_DENT)
@@ -232,6 +260,50 @@ func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
 				mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sf.arrays)
 				mesh.surface_set_material(mesh.get_surface_count() - 1, sf.material)
 			mi.mesh = mesh
+
+
+## High Stakes: the panels within `radius` of `lp` (part-local) bend toward the damaged
+## model, a full hit on one all the way. A vertex goes as far as the most bent panel it's
+## on, its normal with it. True if anything moved.
+static func _bend_panels(sf: Dictionary, lp: Vector3, radius: float, depth: float) -> bool:
+	var boxes: Dictionary = sf.panel_boxes
+	var bent: Dictionary = sf.panel_bent
+	var any := false
+	for b: int in boxes:
+		var box: AABB = boxes[b]
+		var d := (lp.clamp(box.position, box.end) - lp).length()
+		if d >= radius:
+			continue
+		var f := 1.0 - d / radius
+		bent[b] = minf(float(bent.get(b, 0.0)) + f * f * (3.0 - 2.0 * f) * depth / DENT_DEPTH * 1.2, 1.0)
+		any = true
+	if not any:
+		return false
+	var dmg: Dictionary = sf.damaged
+	var dpos: PackedVector3Array = dmg.pos
+	var dnorm: PackedVector3Array = dmg.normal
+	var panels: PackedInt32Array = dmg.panels
+	var rest: PackedVector3Array = sf.rest
+	var orig: PackedVector3Array = sf.normals
+	var arrays: Array = sf.arrays
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	for i in rest.size():
+		var m := panels[i]
+		var w := 0.0
+		var b := 0
+		while m != 0:
+			if m & 1:
+				w = maxf(w, float(bent.get(b, 0.0)))
+			m >>= 1
+			b += 1
+		if w <= 0.0:
+			continue
+		verts[i] = rest[i].lerp(dpos[i], w)
+		normals[i] = orig[i].lerp(dnorm[i], w).normalized()
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	return true
 
 
 ## Bent panels catch the light as flat facets: turn the normals of moved triangles toward

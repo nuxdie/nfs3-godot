@@ -25,6 +25,8 @@ var _perf_t := 0.0
 var _cb_us := 0          # physics callbacks (scripts + internal), first to last node
 var _heat := 0           # --heat=N: every cop on the player from the start, at heat N
 var _heated := false
+var _surrender := -1.0     # --surrender=S: S s into a chase after the player, pull over and wait to be busted
+var _chased_t := 0.0
 var _dented := false
 var _perf_win := 5.0     # --perfwin=S: seconds per perf line
 var _scale := 0.0        # --scale=: overrides the 3D resolution scale
@@ -43,6 +45,9 @@ var _tick_first := 0
 ## with its virtual road node and the solid things within a few metres of it.
 var _speeds := {}   # Car -> its last 90 physics ticks' speeds
 var _stopped := {}  # Car -> race time of its last logged stop
+## --aistats: the racers' hits (over 4 m/s closing), by what they hit, printed at the end.
+var _hits := {}
+var _hit_armed := false
 
 
 func _ready() -> void:
@@ -62,13 +67,26 @@ func _ready() -> void:
 	for arg in args:
 		if arg.begins_with("--duration="):
 			duration = float(arg.trim_prefix("--duration="))
+		# --camera=N starts in that camera mode (ChaseCamera.MODES; 3 is the in-car view).
+		elif arg.begins_with("--camera="):
+			Game.camera_mode = clampi(int(arg.trim_prefix("--camera=")), 0, ChaseCamera.MODES.size() - 1)
 	Game.weather = "--weather" in args
+	# The start fly-by only with --intro (it would shift every run's timings).
+	Game.intro_flyby = "--intro" in args
+	# --classic-hud: High Stakes' dials.
+	# (--classic-hud-bottom: the same, bottom centre.)
+	Game.hud_style = 2 if "--classic-hud-bottom" in args else int("--classic-hud" in args)
 	# --classic: the plain NFS3 handling, without body sway and progressive grip (F6 in game).
 	if "--no-traffic" in args:
 		Game.traffic = false
 	if "--no-damage" in args:
 		Game.damage = false
 	Car.body_sway = not "--classic" in args
+	# --hide=map,standings,...: those HUD parts off (Game.HUD_WIDGETS); --no-hud: all of it.
+	for arg in args:
+		if arg.begins_with("--hide="):
+			Game.hud_hidden.assign(arg.trim_prefix("--hide=").split(",", false))
+	Game.hud_on = not "--no-hud" in args
 	Car.progressive_grip = Car.body_sway
 	Game.laps = 2
 	Game.opponents = 3
@@ -76,6 +94,20 @@ func _ready() -> void:
 	for arg in args:
 		if arg.begins_with("--heat="):
 			_heat = int(arg.trim_prefix("--heat="))
+		# --layout=N: the track that way round (Game.LAYOUTS: 1 reverse, 2 mirror, 3 both).
+		if arg.begins_with("--layout="):
+			Game.layout = int(arg.trim_prefix("--layout="))
+		# --seed=N: the same rivals, skills and traffic every run (to compare two).
+		if arg.begins_with("--seed="):
+			seed(int(arg.trim_prefix("--seed=")))
+		# --upgrade=N races the car at High Stakes upgrade level N.
+		if arg.begins_with("--upgrade="):
+			Game.set_upgrade(Game.car_index, int(arg.trim_prefix("--upgrade=")))
+		# --shots=S,S,... takes the screenshots at those times instead.
+		if arg.begins_with("--shots="):
+			shots = Array(arg.trim_prefix("--shots=").split(",")).map(func(v: String) -> float: return v.to_float())
+		if arg.begins_with("--surrender="):
+			_surrender = float(arg.trim_prefix("--surrender="))
 	for arg in args:
 		if arg.begins_with("--perfwin="):
 			_perf_win = float(arg.trim_prefix("--perfwin="))
@@ -123,12 +155,38 @@ func _ready() -> void:
 		# Just photograph the front end.
 		if "--settings" in args:
 			get_tree().current_scene.open_settings.call_deferred()
+		# --hud-settings: the settings' HUD page.
+		if "--hud-settings" in args:
+			get_tree().current_scene.open_settings.call_deferred(1)
+		# --tournaments: High Stakes' tournaments panel open.
+		if "--tournaments" in args:
+			get_tree().current_scene._open_tournaments.call_deferred()
+		# --cars: the car browser open (on the car given as the third argument).
+		if "--cars" in args:
+			get_tree().current_scene._open_cars.call_deferred()
+		# --screen=home|track|car|options|tournaments: that screen of the front end.
+		for arg in args:
+			if arg.begins_with("--screen="):
+				get_tree().current_scene.show_screen.call_deferred(arg.trim_prefix("--screen="))
 		for k in 60:
 			await get_tree().process_frame
 		if DisplayServer.get_name() != "headless":
 			get_viewport().get_texture().get_image().save_png("shots/menu.png")
 		get_tree().quit()
 		return
+	# --circuit=N: High Stakes' circuit N (its first race), on a scratch career file.
+	for arg in args:
+		if arg.begins_with("--circuit="):
+			Game.career_path = "user://career_autotest.cfg"
+			var career := Game.career_data()
+			Game.career_money = 10000000
+			var cid := int(arg.trim_prefix("--circuit="))
+			for tt in career.tournaments:
+				if cid in tt.circuits:
+					print("circuit %d: %s" % [cid, Game.start_circuit(tt, cid)])
+		# --laps=N: shorter races (after the circuit has set its own).
+		if arg.begins_with("--laps="):
+			Game.laps = int(arg.trim_prefix("--laps="))
 	get_tree().change_scene_to_file.call_deferred("res://scenes/race.tscn")
 
 
@@ -230,8 +288,21 @@ func _physics_process(dt: float) -> void:
 		get_tree().quit()
 	if "--ghosttest" in OS.get_cmdline_user_args():
 		_ghost_test()
+	if "--traffictest" in OS.get_cmdline_user_args():
+		_traffic_test()
 	if _heat > 0 and race.state == 2 and not _heated:
 		_heat_up(p)
+	# --no-ai-speeds: without the speed tables only.
+	if "--no-ai-speeds" in OS.get_cmdline_user_args() and race.path and not race.path.ai_speeds[0].is_empty():
+		race.path.ai_speeds = [PackedFloat32Array(), PackedFloat32Array()]
+	# --no-ai-tables: the AI without the original game's speed tables and racing line (to compare).
+	if "--no-ai-tables" in OS.get_cmdline_user_args() and race.path and not race.path.ai_speeds[0].is_empty():
+		race.path.ai_speeds = [PackedFloat32Array(), PackedFloat32Array()]
+		race.path.racing_line = [PackedFloat32Array(), PackedFloat32Array()]
+	# --rbcam: the camera on the roadblock (its outer cruiser) once one is up.
+	if "--rbcam" in OS.get_cmdline_user_args() and not race.roadblock.is_empty() and race.cam.target != race.roadblock[0]:
+		race.cam.target = race.roadblock[0]
+		race.cam.mode = 1
 	if "--ram" in OS.get_cmdline_user_args() and race.state == 2:
 		_ram(p, dt)
 	elif "--resttest" in OS.get_cmdline_user_args() and race.state == 2:
@@ -240,8 +311,17 @@ func _physics_process(dt: float) -> void:
 		# Nothing to drive: flick through the field for a while instead.
 		if race.state == 2 and t < 30.0 and int(t / 6.0) != int((t - dt) / 6.0):
 			race._watch_step(1)
+	elif _surrender >= 0.0 and race.heat > 0 and _chased_t >= _surrender:
+		# Pulled over: brake to a stop, then sit on the handbrake (holding the brake reverses).
+		for a in ["accelerate", "brake", "steer_left", "steer_right", "handbrake"]:
+			Input.action_release(a)
+		Input.action_press("brake" if p.speed > 1.0 else "handbrake")
+		if _ai:
+			_ai.enabled = false
 	elif race.path and r.size() > 0:
 		_drive(p)
+	if race.heat > 0:
+		_chased_t += dt
 	if int(t * 2) != int((t - dt) * 2):
 		print("t=%.1f state=%d kmh=%d gear=%d rpm=%d wheels=%d lap=%d node=%d pos=%d slip=%.2f" % [t, race.state, p.kmh(), p.gear, p.rpm, p.grounded_wheels, r.get("lap", -9), r.get("node", -1), race.position_of(p), p.slip])
 		if race.spectating():
@@ -289,8 +369,43 @@ func _physics_process(dt: float) -> void:
 				var surfs: int = g.mesh.get_surface_count() if g is MeshInstance3D and g.mesh else 1
 				print("  car part %s %s vis=%s surfs=%d tris=%d mat=%s" % [g.get_parent().name, g.get_class(), g.is_visible_in_tree(), surfs,
 					_tris(g.mesh) if g is MeshInstance3D and g.mesh else 0, g.material_override.get_class() if g.material_override else "-"])
+	if "--aistats" in OS.get_cmdline_user_args() and race.state == 2 and not _hit_armed:
+		_hit_armed = true
+		for rr: Dictionary in race.racers:
+			var rc: Car = rr.car
+			rc.body_entered.connect(_count_hit.bind(rc))
 	if t > duration:
+		if _hit_armed:
+			print("aistats ", _hits)
+		# How far each racer got (m along the lap, laps included), and how often it was reset.
+		var dist := []
+		for rr: Dictionary in race.racers:
+			dist.append("%s %.0f m" % [rr.name.left(10), rr.lap * race.path.length + float(rr.get("progress", 0.0))])
+		print("distance ", " | ".join(dist))
 		get_tree().quit()
+
+
+func _count_hit(other: Node, c: Car) -> void:
+	var rel := c.linear_velocity
+	var kind := "wall"
+	if other is Car:
+		rel -= (other as Car).linear_velocity
+		if other.has_meta("traffic"):
+			kind = "traffic_oncoming" if c.forward_dir().dot((other as Car).forward_dir()) < 0.0 else "traffic_same"
+		else:
+			kind = "cop" if (other as Car).is_cop else "racer"
+	elif other.name == "Road" or other.name == "Terrain":
+		return
+	if rel.length() < 4.0:
+		return
+	var who := "player" if c == race.player else "ai"
+	var k := who + "_" + kind
+	if other is Car:
+		var d: Vector3 = (other as Car).global_position - c.global_position
+		# Where the other car was (m ahead / right of this one), and which way it faced (deg).
+		print("hit t=%.1f %s %s ahead=%.1f side=%.1f v=%.0f ov=%.0f heading=%.0f" % [t, c.name, k, d.dot(c.forward_dir()), d.dot(-c.global_basis.x),
+			c.speed, (other as Car).linear_velocity.dot(c.forward_dir()), rad_to_deg(c.forward_dir().angle_to((other as Car).forward_dir()))])
+	_hits[k] = _hits.get(k, 0) + 1
 
 
 ## Let a ghost AIController pick throttle/brake/steer (it brakes for bends and backs off
@@ -668,6 +783,33 @@ func _ghost_test() -> void:
 			print("  %s 0.5 s later: wheels=%d up=%.2f speed=%.1f (cruise %.1f) lateral=%.1f (lane %.1f)" % [c.name,
 				c.grounded_wheels, c.global_basis.y.y, c.speed, ai.cruise_speed, race.path.lateral(c.global_position, ai.node), ai.lane])
 		_gt_state[c] = st
+
+
+var _tt_next := 0.0
+var _tt_pos := {}        # traffic car -> where it was at the last line, to spot it being brought back
+
+
+## --traffictest: every 2 s, each traffic car: its distance from the player, which way it's
+## going, its lane (and the lateral offset it holds against the lane's), its speed against
+## its cruising speed, whether it's giving way to a cop or sounding the horn, and "BACK"
+## when the race brought it back into play since the last line.
+func _traffic_test() -> void:
+	if t < _tt_next:
+		return
+	_tt_next = t + 2.0
+	var p := race.path as TrackPath
+	print("traffic t=%.0f player %.0f km/h" % [t, race.player.kmh()])
+	for c: Car in race.traffic_cars:
+		var ai: AIController = race._controller(c)
+		var dir := -1 if ai.reverse_dir else 1
+		var back: bool = _tt_pos.has(c) and (_tt_pos[c] as Vector3).distance_to(c.global_position) > 150.0
+		_tt_pos[c] = c.global_position
+		print("  %-8s %5.0f m %s lane %d/%d lat %5.1f (want %5.1f) %4.1f m/s of %4.1f%s%s%s%s" % [c.display_name.left(8),
+			c.global_position.distance_to(race.player.global_position), "fwd" if dir > 0 else "rev",
+			ai.traffic_lane, p.lane_count(ai.node, ai.drive_side * dir), p.lateral(c.global_position, ai.node),
+			p.lane_offset(ai.node, ai.drive_side * dir, ai.traffic_lane), c.speed, ai.traffic_speed(ai.node, dir),
+			" YIELD%d" % ai._yield if ai._yield != AIController.Yield.NONE else "", " HORN" if c.horn else "",
+			" glide" if ai._ghost else "", " BACK" if back else ""])
 
 
 func _log_stops() -> void:

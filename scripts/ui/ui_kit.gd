@@ -76,9 +76,8 @@ static func draw_slant(ci: CanvasItem, r: Rect2, color: Color, slant := SLANT) -
 ## A key-cap chip ("ENTER", "TAB", "←→"); returns its width so callers can lay out rows.
 ## "↑↓" and "←→" are drawn as arrow pairs (the text fonts have no arrow glyphs).
 static func draw_key(ci: CanvasItem, pos: Vector2, key: String, size := 13, color := INK) -> float:
-	var f := font("cond", 1)
 	var arrows := key == "↑↓" or key == "←→"
-	var w := (size * 1.9 if arrows else f.get_string_size(key, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x) + 12.0
+	var w := key_width(key, size)
 	var h := size + 9.0
 	var r := Rect2(pos - Vector2(0, h * 0.5), Vector2(w, h))
 	ci.draw_rect(r, Color(color, 0.12))
@@ -91,8 +90,15 @@ static func draw_key(ci: CanvasItem, pos: Vector2, key: String, size := 13, colo
 			var n := Vector2(-d.y, d.x)
 			ci.draw_colored_polygon(PackedVector2Array([c + d * s * 1.2, c - d * s + n * s, c - d * s - n * s]), color)
 	else:
-		ci.draw_string(f, Vector2(r.position.x + 6, pos.y + size * 0.36), key, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
+		ci.draw_string(font("cond", 1), Vector2(r.position.x + 6, pos.y + size * 0.36), key, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
 	return w
+
+
+## How wide draw_key() draws `key`.
+static func key_width(key: String, size := 13) -> float:
+	if key == "↑↓" or key == "←→":
+		return size * 1.9 + 12.0
+	return font("cond", 1).get_string_size(key, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x + 12.0
 
 
 ## Row of "[KEY] action" hints starting at `pos` (vertically centred on it).

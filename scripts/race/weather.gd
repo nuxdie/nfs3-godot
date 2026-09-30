@@ -56,6 +56,7 @@ var _flash_t := 0.0
 var _thunder_in := -1.0
 var _thunder_vol := 0.0
 var _rain_audio: AudioStreamPlayer
+var _rain_gain := 1.0     # the game's rain recording is ~12 dB under the synthesised hiss
 var _thunder_audio: AudioStreamPlayer
 
 
@@ -228,15 +229,27 @@ static func _fallback_sprite(snow: bool) -> Image:
 
 
 func _build_audio(snow: bool) -> void:
+	var bank := GameSounds.shared()
+	var rain := bank.rain if bank else null
 	if not snow:
 		_rain_audio = AudioStreamPlayer.new()
-		_rain_audio.stream = _rain_loop()
+		# The game's rain on the roof if there's one, else a synthesised hiss.
+		var game_rain := rain.stream(GameSounds.RAIN) if rain else null
+		_rain_audio.stream = game_rain if game_rain else _rain_loop()
+		_rain_gain = 4.0 if game_rain else 1.0
 		_rain_audio.volume_db = -80.0
+		_rain_audio.bus = Game.BUS_SFX
 		add_child(_rain_audio)
 		_rain_audio.play()
 	if _lightning:
 		_thunder_audio = AudioStreamPlayer.new()
-		_thunder_audio.stream = _thunder()
+		_thunder_audio.bus = Game.BUS_SFX
+		var claps := AudioStreamRandomizer.new()
+		if rain:
+			for patch: int in GameSounds.THUNDER:
+				if rain.stream(patch):
+					claps.add_stream(-1, rain.stream(patch))
+		_thunder_audio.stream = claps if claps.streams_count > 0 else _thunder()
 		add_child(_thunder_audio)
 
 
@@ -307,7 +320,7 @@ func _update_precip(dt: float, eye: Vector3) -> void:
 	if _rain_audio:
 		# Muffled in a tunnel or under a bridge.
 		var under := 0.25 if _cover.covered(eye, 2.0) else 1.0
-		_rain_audio.volume_db = linear_to_db(maxf(_amount * 0.35 * under, 0.0001))
+		_rain_audio.volume_db = linear_to_db(maxf(_amount * 0.35 * under * _rain_gain, 0.0001))
 
 
 func _cycle_amount(t: float) -> float:

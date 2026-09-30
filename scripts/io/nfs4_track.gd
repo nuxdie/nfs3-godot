@@ -8,6 +8,8 @@ class_name Nfs4Track
 
 ## High Stakes units to NFS3's (which the cars and their handling are made for).
 const SCALE := 1.3
+## The game's clock: animated objects, animated textures and blinking glows count its ticks.
+const TICKS_PER_SECOND := 64.0
 const POLY_SIZE := 13
 const VROAD_SIZE := 84
 const BLOCK_HEADER_SIZE := 1512
@@ -34,9 +36,18 @@ const SURFACE_TERRAIN := 14
 ## of it: not the roof of a covered bridge or a tunnel's ceiling.
 const MIN_FACING := 0.5
 const ROAD_REACH := 3.0
+## The most nodes a wall may dip in by before the dip counts as real (see _fill_wall_dips).
+const WALL_DIP_NODES := 3
+## The most (m) a wall may step in per node across level ground (see _taper_wall_steps).
+const WALL_TAPER := 2.0
 
 var t: Nfs3Track
 var _tex_of := {}   # Vector4i(archive index, uv flags, lane, frames) -> first Nfs3Track.textures index
+var _ground := {}   # block index -> _ground_of's polys
+
+
+static func has_night_version(dir: String) -> bool:
+	return DataPath.find_ci(dir, "trn.frd") != ""
 
 
 ## Whether `dir` is a High Stakes track folder.
@@ -44,19 +55,29 @@ static func is_track_dir(dir: String) -> bool:
 	return dir != "" and DataPath.find_ci(dir, "tr.frd") != "" and DataPath.find_ci(dir, "tr.ini") != ""
 
 
-static func load_dir(dir: String) -> Nfs3Track:
+## With `night`, the track's night version where it has one (trn.frd: the same geometry
+## with the street lamps and lit windows baked into its lighting; trn0.qfs: its textures
+## with the windows lit, where they differ).
+static func load_dir(dir: String, night := false) -> Nfs3Track:
 	var r := Nfs4Track.new()
 	r.t = Nfs3Track.new()
 	var t := r.t
 	t.name = "hs_" + dir.get_file().to_lower()
+	t.ticks_per_second = TICKS_PER_SECOND
+	t.vroad_walls = true
+	t.soft_effects = true
 	var frd_path := DataPath.find_ci(dir, "tr.frd")
+	if night and has_night_version(dir):
+		frd_path = DataPath.find_ci(dir, "trn.frd")
+		t.night_version = true
 	var frd := FileAccess.get_file_as_bytes(frd_path) if frd_path != "" else PackedByteArray()
 	if frd.is_empty():
 		t.error = "missing tr.frd"
 		return t
 	if not r._parse_frd(frd):
 		return t
-	var fsh := Fsh.load_file(DataPath.find_ci(dir, "tr0.qfs"))
+	var qfs := DataPath.find_ci(dir, "trn0.qfs") if t.night_version else ""
+	var fsh := Fsh.load_file(qfs if qfs != "" else DataPath.find_ci(dir, "tr0.qfs"))
 	if fsh == null:
 		t.error = "missing texture archive"
 		return t
@@ -76,7 +97,10 @@ static func load_dir(dir: String) -> Nfs3Track:
 			ti.cutout = img.detect_alpha() != Image.ALPHA_NONE
 			ti.additive = additive[ti.qfs_index] != 0
 	# Data/Tracks/<Name> -> Data/GameArt/sfx.fsh
-	t._add_lane_images(Fsh.load_file(DataPath.find_ci(dir.get_base_dir().get_base_dir(), "gameart/sfx.fsh")))
+	var sfx := Fsh.load_file(DataPath.find_ci(dir.get_base_dir().get_base_dir(), "gameart/sfx.fsh"))
+	t._add_lane_images(sfx)
+	if sfx and sfx.by_name.has("glw0") and sfx.by_name.has("glw3"):
+		t.glow_sprites = [sfx.by_name.glw0, sfx.by_name.glw3]
 	return t
 
 
@@ -133,6 +157,12 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		vr.right = _dir(d, p + 36)
 		vr.left_wall = d.decode_float(p + 48) * SCALE
 		vr.right_wall = d.decode_float(p + 52) * SCALE
+		# Traffic lanes (the PSX slice's avgPavedWidthLf/Rt and laneCount): widths in metres
+		# as they are, not in the track's units (they fit the walls only that way).
+		vr.lane_w_left = d.decode_float(p + 56)
+		vr.lane_w_right = d.decode_float(p + 60)
+		vr.lanes_left = clampi(d.decode_u32(p + 68), 0, 8)
+		vr.lanes_right = clampi(d.decode_u32(p + 72), 0, 8)
 		t.vroad.append(vr)
 		p += VROAD_SIZE
 
@@ -169,8 +199,11 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		# Collision bounds with vroad normals per road stretch, object references and
 		# sound sources: not needed here.
 		p += h.n_poly * 24 + h.n_xref * 20 + h.n_polyobj * 20 + h.n_sound * 16
+		# Light sources: a point and a type whose low word picks the glow from the .ini's
+		# [track glows] table (see TrackGlows); the game ignores the high word.
 		for li in h.n_light:
 			b.lights.append(Nfs3Track.fixed(d, p + li * 16) * SCALE)
+			b.light_types.append(d.decode_u16(p + li * 16 + 12))
 		p += h.n_light * 16
 		for c in 11:
 			var n: int = h.sz[c]
@@ -194,6 +227,8 @@ func _parse_frd(d: PackedByteArray) -> bool:
 		p = _read_xobjs(d, p + 4, d.decode_u32(p), t.blocks[-1])
 		if p < 0:
 			return false
+	_fill_wall_dips()
+	_taper_wall_steps()
 	_flag_road()
 	return true
 
@@ -215,7 +250,8 @@ func _read_xobjs(d: PackedByteArray, p: int, n: int, b: Nfs3Track.Block) -> int:
 		heads.append([d.decode_u32(q), _point(d, q + 12), d.decode_u32(q + 32), d.decode_u32(q + 44)])
 	p += n * XOBJ_HEADER_SIZE
 	for hd in heads:
-		var x := {"ref": hd[1], "unmirrored": true}
+		# xtype: 2 billboard (see Nfs3TrackBuilder.BILLBOARD_XTYPE), 3 animated, 6 physics prop.
+		var x := {"ref": hd[1], "unmirrored": true, "xtype": hd[0]}
 		match hd[0]:
 			3:
 				# Animated: 2 unknown bytes, type, id, key count, delay, keys as in NFS3.
@@ -233,7 +269,9 @@ func _read_xobjs(d: PackedByteArray, p: int, n: int, b: Nfs3Track.Block) -> int:
 				p += 8 + n_keys * 20
 			6:
 				# Physics prop: position, mass, orientation, half extents; the header's
-				# point is its position too.
+				# point is its position too. The game knocks these about (benches, cones,
+				# barrels, hay bales): Nfs3TrackBuilder._is_prop takes them whatever their size.
+				x.physics = true
 				p += 72
 		var nv: int = hd[2]
 		var np: int = hd[3]
@@ -335,6 +373,128 @@ static func _split_objects(polys: Array) -> Array:
 			groups[root] = []
 		groups[root].append(poly)
 	return groups.values()
+
+
+## Pushes back out a wall that dips in for a node or few (at most WALL_DIP_NODES) between
+## wider ones, as far as the ground stays level with the road. The slices' wall distances are
+## coarse (steps of ~5 m) and uneven: across a wide run-off such a dip is a wall in the middle
+## of open grass (the Dolphin Cove gully, nodes 774-776). A wall that narrows and stays narrow
+## is a real funnel and is left alone.
+func _fill_wall_dips() -> void:
+	var n := t.vroad.size()
+	for side in [-1.0, 1.0]:
+		var w := PackedFloat32Array()
+		for vr in t.vroad:
+			w.append(vr.right_wall if side > 0.0 else vr.left_wall)
+		for i in n:
+			var before := 0.0
+			var after := 0.0
+			for k in range(1, WALL_DIP_NODES + 1):
+				before = maxf(before, w[posmod(i - k, n)])
+				after = maxf(after, w[(i + k) % n])
+			var target := minf(before, after)
+			if target < w[i] + 1.0:
+				continue
+			var reach := _level_reach(i, side, w[i], target)
+			if side > 0.0:
+				t.vroad[i].right_wall = reach
+			else:
+				t.vroad[i].left_wall = reach
+
+
+## Where a wall steps in across ground still level with the road, draws it in over several
+## nodes instead, WALL_TAPER at a time (~18 degrees), and no further out than that ground
+## reaches: the slices' widths jump by 10-35 m from one node to the next at the ends of
+## run-offs, lay-bys and lots (Dolphin Cove 317-321, Rocky Pass, Hills, Redrock), a wall
+## across the car's path that stopped it dead. Tapered from both ways, for either direction.
+func _taper_wall_steps() -> void:
+	var n := t.vroad.size()
+	for side in [-1.0, 1.0]:
+		var w := PackedFloat32Array()
+		for vr in t.vroad:
+			w.append(vr.right_wall if side > 0.0 else vr.left_wall)
+		var out := w.duplicate()
+		for step in [1, -1]:
+			var run := w.duplicate()
+			# Twice round, so a taper carries on over the lap's seam.
+			for k in 2 * n:
+				var i := posmod(k * step, n)
+				var target: float = run[posmod(i - step, n)] - WALL_TAPER
+				if target > run[i] + 0.5:
+					run[i] = maxf(run[i], _level_reach(i, side, run[i], target))
+			for i in n:
+				out[i] = maxf(out[i], run[i])
+		for i in n:
+			if side > 0.0:
+				t.vroad[i].right_wall = out[i]
+			else:
+				t.vroad[i].left_wall = out[i]
+
+
+## How far (m, from `from` up to `to`) the ground at node `i` stays level with the road
+## on `side` (+1 right): facing up and within ROAD_REACH of its surface, as _flag_road asks.
+func _level_reach(i: int, side: float, from: float, to: float) -> float:
+	var vr := t.vroad[i]
+	var up := vr.normal.normalized()
+	var right := vr.right.normalized() * side
+	var bi := i / NODES_PER_BLOCK
+	var reach := from
+	var d := from + 1.0
+	while d <= to:
+		var q := vr.pos + right * d
+		var q2 := Vector2(q.x, q.z)
+		var level := false
+		for bk in range(maxi(bi - 1, 0), mini(bi + 2, t.blocks.size())):
+			for g: Array in _ground_of(bk):
+				var box: Rect2 = g[0]
+				if not box.has_point(q2):
+					continue
+				var c2: PackedVector2Array = g[1]
+				if not (Geometry2D.point_is_inside_triangle(q2, c2[0], c2[1], c2[2]) \
+						or Geometry2D.point_is_inside_triangle(q2, c2[0], c2[2], c2[3])):
+					continue
+				var nrm: Vector3 = g[2]
+				var a: Vector3 = g[3]
+				if nrm.dot(up) <= MIN_FACING:
+					continue
+				# The poly's height under the sample point.
+				var y := a.y - (nrm.x * (q.x - a.x) + nrm.z * (q.z - a.z)) / nrm.y
+				if absf((Vector3(q.x, y, q.z) - vr.pos).dot(up)) < ROAD_REACH:
+					level = true
+					break
+			if level:
+				break
+		if not level:
+			break
+		reach = d
+		d += 1.0
+	return reach
+
+
+## Block `bi`'s road and terrain polys that face up at all, for _level_reach: [ground-plane
+## bounds, corners on the ground plane, normal, a corner] each, made on first use.
+func _ground_of(bi: int) -> Array:
+	if _ground.has(bi):
+		return _ground[bi]
+	var out := []
+	var b := t.blocks[bi]
+	for p: Nfs3Track.Poly in b.road:
+		if p.v[0] >= b.verts.size() or p.v[1] >= b.verts.size() or p.v[2] >= b.verts.size() or p.v[3] >= b.verts.size():
+			continue
+		var a := b.verts[p.v[0]]
+		var c := b.verts[p.v[2]]
+		var nrm := (c - a).cross(b.verts[p.v[1]] - b.verts[p.v[3]]).normalized()
+		if nrm.y < 0.01:
+			continue
+		var c2 := PackedVector2Array()
+		for k in 4:
+			c2.append(Vector2(b.verts[p.v[k]].x, b.verts[p.v[k]].z))
+		var box := Rect2(c2[0], Vector2.ZERO)
+		for k in range(1, 4):
+			box = box.expand(c2[k])
+		out.append([box.grow(0.01), c2, nrm, a])
+	_ground[bi] = out
+	return out
 
 
 ## Marks each block's road polys drivable when they lie between the walls of the nearest
