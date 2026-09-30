@@ -44,7 +44,18 @@ const FIT_TRACK := 1.5
 const FIT_MIN := 0.25
 const FIT_LEVEL := 0.7
 const FIT_SPAN := 2
-const FIT_CELL := 8.0
+const FIT_CELL := 4.0
+## _open_walls: how far (m) past the lanes a wall may go, the step it goes out by, and the
+## rise and drop the ground may take at a step and still carry on, how far above and below
+## the slice it may go (the walls reach 6 m over it and 3 m under); over how many
+## slices each way a wall goes by the nearest.
+const EDGE_REACH := 10.0
+const EDGE_STEP := 1.0
+const EDGE_RISE := 1.0
+const EDGE_DROP := 1.0
+const EDGE_UP := 4.0
+const EDGE_DOWN := 2.5
+const EDGE_SPAN := 2
 
 enum Kind { ROAD, GROUND, SCENERY }
 
@@ -68,6 +79,14 @@ var closed := true
 var sprint := PackedInt32Array()
 ## Its camera animations ("CmAn": camera00..04), the fly-bys round the car before the start.
 var flybys: Array[CanFile] = []
+## The rest of the road network the lap meets (shortcuts, side streets, the other ways at
+## a junction): per segment its slices (Array of VRoad), for the walls to leave them open
+## and fence them in themselves.
+var side_roads: Array = []
+## Where the lap's walls stand, [left, right] per slice (TrackPath.wall_left/wall_right):
+## past the verges, where the slices' own wall distances are their lanes' edges.
+var fences: Array[PackedFloat32Array] = []
+var _spare: Array[Vector2i] = []   # the segments the lap doesn't take: first, last slice
 
 
 static func is_track_file(path: String) -> bool:
@@ -97,8 +116,18 @@ static func load_file(path: String, _night := false) -> Nfs5Track:
 		return t
 	var order := t._route(crp, simd)
 	t._add_vroad(simd, order)
+	t._add_side_roads(simd)
 	t._read_geometry(crp, fsh, simd)
-	t._fit_vroad()
+	var grid := t._level_grid()
+	t._fit_vroad(grid, t.vroad, t.closed)
+	t.fences = t._open_walls(grid, t.vroad, t.closed)
+	# Nothing keeps to a side road's lanes: its walls go straight out to the fences.
+	for road: Array in t.side_roads:
+		t._fit_vroad(grid, road, false)
+		var fence := t._open_walls(grid, road, false)
+		for k in road.size():
+			road[k].left_wall = fence[0][k]
+			road[k].right_wall = fence[1][k]
 	t._read_flybys(crp)
 	return t
 
@@ -185,6 +214,9 @@ func _route(crp: Crp, simd: Array[Dictionary]) -> PackedInt32Array:
 			break
 		used.append(best)
 		cur = best
+	for j in segs.size():
+		if not j in used:
+			_spare.append(segs[j])
 	var order := PackedInt32Array()
 	for s in used:
 		for i in range(segs[s].x, segs[s].y + 1):
@@ -253,19 +285,50 @@ static func _nearest(simd: Array[Dictionary], order: PackedInt32Array, p: Vector
 
 func _add_vroad(simd: Array[Dictionary], order: PackedInt32Array) -> void:
 	for i in order:
-		var s: Dictionary = simd[i]
-		var vr := Nfs3Track.VRoad.new()
-		vr.pos = s.pos
-		vr.normal = s.up
-		vr.forward = s.fwd
-		vr.right = s.right
-		vr.left_wall = s.left
-		vr.right_wall = s.right_w
-		vr.lanes_left = clampi(s.lanes_l, 0, 8)
-		vr.lanes_right = clampi(s.lanes_r, 0, 8)
-		vr.lane_w_left = s.lane_l
-		vr.lane_w_right = s.lane_r
-		vroad.append(vr)
+		vroad.append(_slice(simd[i]))
+
+
+static func _slice(s: Dictionary) -> Nfs3Track.VRoad:
+	var vr := Nfs3Track.VRoad.new()
+	vr.pos = s.pos
+	vr.normal = s.up
+	vr.forward = s.fwd
+	vr.right = s.right
+	vr.left_wall = s.left
+	vr.right_wall = s.right_w
+	vr.lanes_left = clampi(s.lanes_l, 0, 8)
+	vr.lanes_right = clampi(s.lanes_r, 0, 8)
+	vr.lane_w_left = s.lane_l
+	vr.lane_w_right = s.lane_r
+	return vr
+
+
+## The segments the lap doesn't take that meet it, or meet one that does, an end within
+## JUNCTION_REACH of it: they're side_roads.
+func _add_side_roads(simd: Array[Dictionary]) -> void:
+	var near: Array[Vector3] = []   # the slices of the lap and of the side roads kept so far
+	for vr in vroad:
+		near.append(vr.pos)
+	var left := _spare.duplicate()
+	var grew := true
+	while grew:
+		grew = false
+		for seg: Vector2i in left.duplicate():
+			var ends := [simd[seg.x].pos, simd[seg.y].pos]
+			var meets := false
+			for q in near:
+				if q.distance_to(ends[0]) < JUNCTION_REACH or q.distance_to(ends[1]) < JUNCTION_REACH:
+					meets = true
+					break
+			if not meets:
+				continue
+			var road := []
+			for i in range(seg.x, seg.y + 1):
+				road.append(_slice(simd[i]))
+				near.append(simd[i].pos)
+			side_roads.append(road)
+			left.erase(seg)
+			grew = true
 
 
 ## Every article's triangles at full detail (level 0), sorted into its chunk by the slice
@@ -368,21 +431,10 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 ## and takes the top level surface within FIT_TRACK of that at its lane centres. The first,
 ## and one where that finds nothing (the slices jump from one segment to the next), goes
 ## by the nearest road within FIT_REACH.
-func _fit_vroad() -> void:
-	var grid := {}   # XZ cell -> [piece, first corner index] of the level road and ground
-	for c in chunks:
-		for pc: Piece in [c.pieces[Kind.ROAD], c.pieces[Kind.GROUND]]:
-			for i in range(0, pc.pos.size(), 3):
-				var n := (pc.pos[i + 1] - pc.pos[i]).cross(pc.pos[i + 2] - pc.pos[i])
-				if absf(n.normalized().y) < FIT_LEVEL:
-					continue
-				var box := AABB(pc.pos[i], Vector3.ZERO).expand(pc.pos[i + 1]).expand(pc.pos[i + 2])
-				for x in range(floori(box.position.x / FIT_CELL), floori(box.end.x / FIT_CELL) + 1):
-					for z in range(floori(box.position.z / FIT_CELL), floori(box.end.z / FIT_CELL) + 1):
-						grid.get_or_add(Vector2i(x, z), []).append([pc, i])
+func _fit_vroad(grid: Dictionary, road: Array, loop: bool) -> void:
 	var off := NAN
 	var offs := PackedFloat32Array()
-	for vr in vroad:
+	for vr: Nfs3Track.VRoad in road:
 		var lanes := PackedFloat32Array([0.0])
 		if vr.lanes_left > 0:
 			lanes.append(-0.5 * vr.lanes_left * vr.lane_w_left)
@@ -421,16 +473,89 @@ func _fit_vroad() -> void:
 		offs.append(0.0 if is_nan(off) else off)
 	# A deck of two layers (a ramp's top and its underside) can be picked a slice apart:
 	# each slice goes by the middle of its neighbours'.
-	var n := vroad.size()
+	var n := road.size()
 	for k in n:
 		var near := PackedFloat32Array()
 		for j in range(k - FIT_SPAN, k + FIT_SPAN + 1):
-			if closed or (j >= 0 and j < n):
+			if loop or (j >= 0 and j < n):
 				near.append(offs[posmod(j, n)])
 		near.sort()
 		var dy := near[near.size() / 2]
 		if absf(dy) > FIT_MIN:
-			vroad[k].pos.y += dy
+			road[k].pos.y += dy
+
+
+## The level triangles of the road and the ground (the backdrop's too) by XZ cell
+## (FIT_CELL): [piece, first corner index] each, for _fit_vroad and _open_walls.
+func _level_grid() -> Dictionary:
+	var grid := {}
+	# The big stretches of terrain (the backdrop's ground) run up to the verges too.
+	for c in chunks + [{"pieces": backdrop}]:
+		for pc: Piece in [c.pieces[Kind.ROAD], c.pieces[Kind.GROUND]]:
+			for i in range(0, pc.pos.size(), 3):
+				var n := (pc.pos[i + 1] - pc.pos[i]).cross(pc.pos[i + 2] - pc.pos[i])
+				if absf(n.normalized().y) < FIT_LEVEL:
+					continue
+				var box := AABB(pc.pos[i], Vector3.ZERO).expand(pc.pos[i + 1]).expand(pc.pos[i + 2])
+				for x in range(floori(box.position.x / FIT_CELL), floori(box.end.x / FIT_CELL) + 1):
+					for z in range(floori(box.position.z / FIT_CELL), floori(box.end.z / FIT_CELL) + 1):
+						grid.get_or_add(Vector2i(x, z), []).append([pc, i])
+	return grid
+
+
+## The top level surface's height at `p` (x, z) between `lo` and `hi`, or NAN.
+static func _surface_at(grid: Dictionary, p: Vector3, lo: float, hi: float) -> float:
+	var best := NAN
+	for e: Array in grid.get(Vector2i(floori(p.x / FIT_CELL), floori(p.z / FIT_CELL)), []):
+		var pc: Piece = e[0]
+		var i: int = e[1]
+		var hit = Geometry3D.ray_intersects_triangle(Vector3(p.x, hi, p.z), Vector3.DOWN,
+			pc.pos[i], pc.pos[i + 1], pc.pos[i + 2])
+		if hit != null and hit.y >= lo and (is_nan(best) or hit.y > best):
+			best = hit.y
+	return best
+
+
+## Where each slice's walls stand, [left, right]: the slices' own wall distances are their
+## lanes' outer edges (the road, for the AI and the grid), and walls there would stand on the
+## white line, with the verge, the pavement or the hard shoulder behind them. Each goes out over
+## the ground beyond, EDGE_STEP at a time while it carries on (up a bank no steeper than
+## EDGE_RISE, down one no steeper than EDGE_DROP, and from EDGE_DOWN under the slice's
+## plane to EDGE_UP over it, where the wall hangs from), to EDGE_REACH at most. A bank too steep to climb stops the car itself,
+## and where the ground stops at a wall, a building or a barrier, those are solid. A slice
+## goes by the least of its neighbours' (EDGE_SPAN each way), so a gap between two
+## buildings doesn't pocket out.
+func _open_walls(grid: Dictionary, road: Array, loop: bool) -> Array[PackedFloat32Array]:
+	var n := road.size()
+	var out := [PackedFloat32Array(), PackedFloat32Array()]
+	for vr: Nfs3Track.VRoad in road:
+		for side in 2:
+			var sg := 1.0 if side == 1 else -1.0
+			var d: float = vr.right_wall if side == 1 else vr.left_wall
+			var at := vr.pos + vr.right * d * sg
+			# The ground at the lane edge: a banked road can be off the slice's tilt there.
+			var h := _surface_at(grid, at, at.y - EDGE_DOWN, at.y + EDGE_DOWN)
+			while not is_nan(h) and d < (vr.right_wall if side == 1 else vr.left_wall) + EDGE_REACH:
+				at = vr.pos + vr.right * (d + EDGE_STEP) * sg
+				var nh := _surface_at(grid, at, h - EDGE_DROP, h + EDGE_RISE)
+				# The wall hangs off the slice (Nfs3TrackBuilder.make_walls): no further than
+				# it still reaches the ground from.
+				if is_nan(nh) or nh - at.y > EDGE_UP or at.y - nh > EDGE_DOWN:
+					break
+				h = nh
+				d += EDGE_STEP
+			out[side].append(d)
+	var walls: Array[PackedFloat32Array] = [PackedFloat32Array(), PackedFloat32Array()]
+	for side in 2:
+		walls[side].resize(n)
+		for k in n:
+			var least := INF
+			for j in range(k - EDGE_SPAN, k + EDGE_SPAN + 1):
+				if loop or (j >= 0 and j < n):
+					least = minf(least, out[side][posmod(j, n)])
+			var road_edge: float = road[k].right_wall if side == 1 else road[k].left_wall
+			walls[side][k] = maxf(road_edge, least)
+	return walls
 
 
 ## The sea's layers ("wtr" textures, alpha 95 at most) are blended over what the game draws
@@ -480,6 +605,13 @@ func mirror_world() -> void:
 				pc.colour[i + 2] = col
 	for c in chunks:
 		c.center = Vector3(-c.center.x, c.center.y, c.center.z)
+	for road: Array in side_roads:
+		for vr: Nfs3Track.VRoad in road:
+			mirror_vroad(vr)
+	if fences.size() == 2:
+		var left := fences[0]
+		fences[0] = fences[1]
+		fences[1] = left
 
 
 ## The virtual road's slices along the lap (Godot space) for the menu's map.

@@ -19,13 +19,11 @@ const BUMP_STOP_DAMPING := 4.0      # x damper rate
 const RAY_LEAD := 0.25
 # Deceleration from the engine when coasting off the pedals, m/s^2.
 const ENGINE_BRAKE := 0.6
-# Body sway: the bodywork rides its springs as a damped oscillator, so it lags, leans into a
-# bend and overshoots a little on a quick direction change. Radians per m/s^2 at pitch_roll
-# [45] 1, natural frequency (Hz), damping ratio, and the most it may lean.
-const SWAY_GAIN := 0.0095
-const SWAY_HZ := 1.4
-const SWAY_DAMPING := 0.5
-const SWAY_MAX := 0.12
+# Body sway: the springs already pitch and roll the car itself about as far as a real one
+# (some 2.5 degrees a g); the bodywork only makes up the difference to its own [45], eased in
+# at this rate (1/s) and never by more than this (rad).
+const SWAY_SMOOTH := 12.0
+const SWAY_MAX := 0.05
 # Progressive grip: past the limit the tyre gives up its grip gradually with the slip angle,
 # from the peak (rad) to the full slide, instead of all at once as soon as it breaks away.
 const SLIP_PEAK := 0.12
@@ -46,10 +44,49 @@ const DETAIL_RANGE := 140.0
 ## Porsche Unleashed's Carreras raise their rear spoiler above this speed (m/s, 80 km/h)
 ## and lower it again below the second (15 km/h), as the real cars do.
 const SPOILER_UP := 22.2
+## s a Porsche Unleashed cabriolet takes to fold its top away or raise it.
+const TOP_FOLD_TIME := 2.5
 const SPOILER_DOWN := 4.2
+## s the pop-up headlamps take to rise or go down; the lamps light once they're up.
+const POPUP_TIME := 0.6
+## s the Carreras' spoiler takes to rise or go down (through its frames, where it has them).
+const SPOILER_TIME := 0.8
+## Porsche Unleashed's wipers: s for a sweep up and back at full rain, and at the lightest
+## (and the longest pause between sweeps there: intermittent).
+const WIPE_FAST := 1.1
+const WIPE_SLOW := 1.7
+const WIPE_PAUSE := 2.5
+## The indicators' cycle (s, lit for the first half), and when a car signals by itself: turning
+## this hard (steer) below this speed (m/s), held this long (s) after.
+const INDICATOR_CYCLE := 0.7
+const INDICATE_STEER := 0.45
+const INDICATE_SPEED := 12.0
+const INDICATE_HOLD := 1.2
+## Porsche Unleashed's doors, bonnet and boot (Nfs5Car.LID_GROUPS: 6 left door, 7 right, 8
+## bonnet, 9 boot) and windows: s to open or close, and to wind a window down or up.
+const LID_TIME := 0.9
+const WINDOW_TIME := 2.0
+## A hit this hard (share of a full one) within LATCH_REACH m of a door or lid springs its
+## latch: it then hangs ajar (LATCH_AJAR radians) and swings on the car's motion, the bonnet
+## blown up by the air as the car goes faster (full open by BONNET_BLOW_SPEED m/s), the
+## others pressed shut by it.
+const LATCH_BREAK := 0.55
+const LATCH_REACH := 1.2
+const LATCH_AJAR := 0.12
+const BONNET_BLOW_SPEED := 45.0
+## How hard it's raining or snowing where the camera is, 0..1 (Weather sets it): the wipers
+## go and the fog lamps light with it.
+static var precipitation := 0.0
 const REST_AFTER := 1.0   # s an AI car is held motionless before it sleeps
 ## Whether brake and reversing lamps cast real light (Low quality: just the glowing lamps).
 static var lamp_lights := true
+static var _glow_tex: GradientTexture2D   # the lamp glows' soft disc, shared
+static var _glint_mat: ShaderMaterial      # Porsche Unleashed's chrome glints (car_glint.gdshader), shared
+static var _glint_frame := -1              # ... its sun last set this frame
+static var _sun_ref: WeakRef               # the scene's sun (DirectionalLight3D), found once
+## Porsche Unleashed's lamp glows use the game's own glare (Nfs5Car.fx("GLAR")), its star
+## rays smaller than the plain disc's soft edge: drawn this much bigger.
+const PU_GLARE_SCALE := 1.5
 static var progressive_grip := true
 
 # --- control inputs, written by a controller every physics frame
@@ -59,11 +96,13 @@ var steer := 0.0          # -1 left .. +1 right
 var handbrake := false
 var hold := false         # parked: full brakes, never engages reverse
 var horn := false
+var shift_request := 0    # manual gearbox: +1 up, -1 down; cleared once the box can act on it
 
 # --- telemetry
 var speed := 0.0          # signed forward speed, m/s
 var rpm := 1000.0
 var gear := 1             # -1 reverse, 1..n forward
+var manual := false       # shifted by shift_request, on the manual gearing (set_manual)
 var slip := 0.0           # 0..1 how much the tyres are sliding
 var grounded_wheels := 0
 var steer_angle := 0.0
@@ -89,12 +128,14 @@ var off_road := 0.0        # share of the grounded wheels on loose ground (grass
 var water_depth := 0.0     # m the car is under a stream or lake surface (set by the race): it wades
 var idle_rpm := 1000.0     # [12]
 var redline := 7000.0      # [13]
-var final_drive := 3.8     # [79] (automatic) or [11]
+var final_drive := 3.8     # [79] (automatic) or [11] (manual)
 var v2rpm := PackedFloat32Array()        # [76] or [7], per gear slot (R, N, 1..)
 var ratios := PackedFloat32Array()       # [77] or [8], x gear ratio factor [63]
 var gear_eff := PackedFloat32Array()     # [78] or [9]
 var torque_curve := PackedFloat32Array() # [10], Nm every 256 rpm, x engine tuning [60]
 var n_gears := 5           # [75] or [3], less reverse and neutral
+## The file's two gearboxes, [automatic, manual]: {n_gears, final_drive, v2rpm, ratios, gear_eff}.
+var _gearboxes: Array[Dictionary] = []
 var shift_delay := 0.2     # [4] s without drive while changing gear
 var shift_blip := PackedFloat32Array()   # [5] rpm the engine keeps over the new gear on an upshift
 var brake_blip := PackedFloat32Array()   # [6] rpm blipped over the new gear on a braking downshift
@@ -153,10 +194,11 @@ var _blip := 0.0            # rpm held over the new gear while a shift goes thro
 var _wear := 0.0            # grip worn off the tyres [37]
 var _prev_vel := Vector3.ZERO
 var _acc := Vector2.ZERO    # smoothed acceleration in the car's frame: x to the left, y forward
+var _heave_acc := 0.0       # ... and up it, smoothed (a sprung lid bounces with it)
 var _body_tilt: Node3D
 var _tilt_pivot := Vector3.ZERO     # roll and pitch centre, car-local (at axle height)
 var _tilt := Vector2.ZERO           # body pitch (x) and roll (y), rad
-var _tilt_vel := Vector2.ZERO
+var _ride := Vector3.ZERO           # the body riding up on wheels past their arches: pitch, roll (rad), heave (m)
 var _half_size := Vector3(0.9, 0.7, 2.2)
 var _shift_timer := 0.0
 var _upside_timer := 0.0
@@ -178,19 +220,61 @@ var _brake_lights: Array[Node3D] = []
 var _lamps: Array[Node3D] = []   # head and running tail glows, shown while the headlights are on
 var _head_glows: Array[Node3D] = []
 var _popups: Array[Node3D] = []   # pop-up headlamps, raised while the headlights are on
+var _popup_moves: Array[Dictionary] = []   # each one's way down: {center, hinge, fold, sink} (see Nfs3Car.popup_lights)
+var _popup_t := 1.0               # the pop-ups' pose: 0 down .. 1 up (the headlights start on)
 var _popup_covers: Array[Node3D] = []   # Porsche Unleashed: the same lamps down, shown while they're off
 var _spoiler_down: Array[Node3D] = []   # Porsche Unleashed: the Carrera's rear spoiler lowered...
 var _spoiler_up: Array[Node3D] = []     # ... and raised, above SPOILER_UP until below SPOILER_DOWN
 var _spoiler_raised := false
+var _spoiler_moving: Array[MeshInstance3D] = []   # ... and on its way, by its blend shapes (frames)
+var _spoiler_frames := 0
+var _spoiler_t := 0.0                  # its pose: 0 down .. 1 up
+var _wipers: Array = []                # [MeshInstance3D, frames]: Porsche Unleashed's wipers, parked (0) .. up (frames - 1)
+var _wipe_t := 0.0                     # s into the current sweep (and pause), 0 parked
+var _signals: Array = []               # [glow, side]: the indicators, side -1 left, 1 right (as `indicate`)
+var _fog_glows: Array[Node3D] = []     # fog lamps, lit with the headlights in rain and snow
+## The indicators, set by a controller: -1 left, 1 right, 2 all four (hazards), 0 none
+## (the car signals by itself for a slow, tight turn).
+var indicate := 0
+## What opens (Porsche Unleashed): group -> {parts: [[MeshInstance3D, rest position]], hinge,
+## axis, open (radians), t (0 shut .. 1 open), goal, centre, broken, angle, spin}; the windows
+## by door: {parts, drop, t, goal}; the bays by the lid over them: [MeshInstance3D].
+var _lids := {}
+var _windows := {}
+var _bays := {}
+var _skin_mat: ShaderMaterial   # the skin's material, lit where the lamps' lenses are
+var _lens_state := {}           # uniform -> value, as last set on it
+var _indicate_auto := 0
+var _indicate_hold := 0.0
+var _indicator_t := 0.0
+var _indicator_shown := 0
+var _hood_up: Array[Node3D] = []       # Porsche Unleashed's cabriolets: the hood's frame and rear window, up...
+var _hood_folded: Array[Node3D] = []   # ... the hood folded away, down...
+var _hood_top: Array[MeshInstance3D] = []   # ... and the soft top, folding by its blend shapes (frames)
+var _hood_frames := 0
+var _top_t := 0.0                      # the top's pose: 0 raised .. _hood_frames - 1 folded
+var fold_speed := 1.0                  # how fast the top folds (tools set 0 to hold a pose)
+var top_down := false
+var spoiler_raise := false               # the menu's showroom: the spoiler up whatever the speed
 var _plates: Array[Node3D] = []   # the licence plate (High Stakes cars)
-var _dash_data := {}              # the car file's in-car view (High Stakes), built on first use
+var _dash_data := {}              # the car file's in-car view (High Stakes' dash, built on first use; Porsche Unleashed's eye)
+var _driver_mat: ShaderMaterial   # the people inside (car_driver.gdshader), or null
 var _dash: Node3D                 # ...its dashboard, seats and doors, shown instead of the body
 var _dash_needles: Array[Dictionary] = []   # {node, axis, turns, rpm}
+var _cabin_on := false   # a Porsche Unleashed car's own cabin is the in-car view
+var _cabin_mirror_glass: Array[Dictionary] = []   # its side mirrors' glass: {node, point, normal}
+var _cabin_mirrors: Node3D   # ...their CarMirrors, made on first use, shown with the in-car view
 var _dash_wheel: Node3D
 var _dash_wheel_axis := Vector3.BACK
 var _dash_lit: Array[Node3D] = []
 var _dash_mats: Array[Material] = []   # the needles' materials: [by day, lit]
 var _dash_lit_on := false
+var _mirrors: CarMirrors           # the in-car view's side mirrors, or null
+var _rear_mirror: Node3D           # the in-car view's rear-view mirror, made on first use, or null
+## Whether the in-car view shows its rear-view mirror (the HUD's M; while it does, the HUD's
+## own mirror stands down), and the car whose in-car view is showing, or null.
+static var rear_mirror_wanted := true
+static var in_car_view: Car
 var _paint := Color.WHITE
 var _steer_mats: Array[ShaderMaterial] = []   # the materials turning the steering wheel and the driver's hands
 var _steer_shapes: Array = []   # [MeshInstance3D, angles]: Porsche Unleashed's arms and hands, posed by blend shapes
@@ -213,6 +297,23 @@ const REVERSE_CONE := Vector3(14.0, 0.75, 0.9)   # track shader: reach, cos(oute
 ## Render layer bit of everything drawn on the car, so the reflection probe riding inside it
 ## can leave the car out.
 const VISUAL_LAYER := 2
+## The car's own outside, seen from inside it: drawn only by its side mirrors (CarMirrors).
+const OWN_VIEW_LAYER := 32
+## The in-car view's dashboard, seats and doors: everything but the side mirrors sees them.
+const DASH_LAYER := 64
+## The rear-view mirror's own housing and glass, which its view leaves out.
+const REAR_MIRROR_LAYER := 128
+## Neither game models a rear-view mirror inside: one is hung at the top of the windscreen,
+## on the car's centreline: its glass (m, rounded ends), housing rim and depth, and how far
+## the glass sits below the windscreen's top and behind the glass there.
+const REAR_MIRROR_SIZE := Vector2(0.25, 0.07)
+const REAR_MIRROR_RIM := 0.008
+const REAR_MIRROR_DEPTH := 0.03
+const REAR_MIRROR_DROP := 0.065
+const REAR_MIRROR_BACK := 0.075
+## How far Porsche Unleashed's speedo and rev needles sweep, full scale (turns): the files
+## don't say; their dials run about three quarters of the way round.
+const CABIN_NEEDLE_TURNS := 0.75
 ## The light dummies' colours: white, red, blue, orange, yellow. (Each lamp's glow keeps what
 ## the wet road reflects of it as meta "glint": [which way it shines, 1 ahead, -1 behind,
 ## 0 all round; colour x strength], see lit_lamps().)
@@ -284,7 +385,9 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		if paint.a == 0.0:
 			paint = data.colours[0] if data.colours.size() > 0 else Color.WHITE
 		sm.set_shader_parameter("paint", paint)
+		sm.set_shader_parameter("interior_paint", _interior_of(paint))
 		mat = sm
+		_skin_mat = sm
 		_paint = paint
 		# The wheels share the skin but take a rubber finish on the tyres.
 		wheel_mat = sm.duplicate()
@@ -297,6 +400,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		driver_mat.shader = Game.shader("res://shaders/car_driver.gdshader")
 		driver_mat.set_shader_parameter("albedo_tex", data.texture)
 		driver_mat.set_shader_parameter("paint", _paint)
+		_driver_mat = driver_mat
 	for p in data.body_parts:
 		var mi := MeshInstance3D.new()
 		mi.mesh = p.mesh
@@ -327,13 +431,42 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			mi.set_meta("damaged", p.damaged)
 		if p.get("popup_closed", false):
 			_popup_covers.append(mi)
+		match p.get("hood", ""):
+			"up": _hood_up.append(mi)
+			"down": _hood_folded.append(mi)
+			"top":
+				_hood_top.append(mi)
+				_hood_frames = maxi(_hood_frames, int(p.get("hood_frames", 0)))
 		match p.get("spoiler", ""):
 			"down": _spoiler_down.append(mi)
 			"up":
 				_spoiler_up.append(mi)
 				mi.visible = false
+			"moving":
+				_spoiler_moving.append(mi)
+				_spoiler_frames = int(p.get("spoiler_frames", 0))
+				mi.visible = false
+		if p.has("wiper_frames"):
+			_wipers.append([mi, int(p.wiper_frames)])
+			_pose_frames(mi, 0.0)
 		_body_tilt.add_child(mi)
+		_add_opening(p, mi)
+		if p.has("bay"):
+			continue   # (it doesn't dent: nobody sees it but through an open lid)
+		if p.has("mirror_glass"):
+			# Porsche Unleashed's side mirrors' glass: in the in-car view, CarMirrors shows the
+			# view back on it (and the mirrors' own views leave it out, as the dash's: below).
+			_cabin_mirror_glass.append({"node": mi, "point": p.mirror_glass.point, "normal": p.mirror_glass.normal})
+			continue
+		if p.has("needle"):
+			# Porsche Unleashed's speedo and rev needles, turning about their hubs in the
+			# in-car view (they don't dent).
+			_dash_needles.append({"node": mi, "axis": p.axis, "rpm": p.needle == "rpm", "turns": CABIN_NEEDLE_TURNS,
+				"zero": p.zero, "round_scale": true})
+			continue
 		_body_meshes.append(mi)
+	if has_soft_top():
+		set_top_down(Game.tops_down, true)
 	for p in data.popup_lights:
 		var mi := MeshInstance3D.new()
 		mi.mesh = p.mesh
@@ -342,6 +475,18 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			mi.material_override = mat
 		_body_tilt.add_child(mi)
 		_popups.append(mi)
+		# Without the game's word on how they move, they tip forward about their back edge
+		# as they sink their own height, under the lids the body has.
+		var bb: AABB = p.mesh.get_aabb()
+		var move := {"center": p.center, "hinge": Vector3.ZERO, "fold": 0.0, "sink": 0.0}
+		if p.has("sink") or p.has("fold"):
+			for k in ["hinge", "fold", "sink"]:
+				move[k] = p.get(k, move[k])
+		else:
+			move.hinge = p.center + Vector3(0.0, bb.position.y, bb.position.z)
+			move.fold = 0.5
+			move.sink = bb.size.y + 0.02
+		_popup_moves.append(move)
 
 	var hs: Vector3 = data.half_size
 	_half_size = hs
@@ -349,6 +494,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 	var wheel_parts: Array = data.wheels
 	var body_faces := PackedVector3Array()
 	for p in data.body_parts:
+		if p.has("bay"):
+			continue
 		for v in p.mesh.get_faces():
 			body_faces.append(v + p.center)
 	for slot in 4:
@@ -402,9 +549,14 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 
 	# Many traffic cars list all-zero gear ratios; derive them from the speed-to-rpm table
 	# (rpm per m/s = ratio * final drive * 60 / (2 pi r)).
-	for i in mini(ratios.size(), v2rpm.size()):
-		if ratios[i] == 0.0 and v2rpm[i] != 0.0 and final_drive > 0.0:
-			ratios[i] = absf(v2rpm[i]) * TAU * _r_drive / 60.0 / final_drive
+	for box in _gearboxes:
+		var r: PackedFloat32Array = box.ratios
+		var v: PackedFloat32Array = box.v2rpm
+		for i in mini(r.size(), v.size()):
+			if r[i] == 0.0 and v[i] != 0.0 and box.final_drive > 0.0:
+				r[i] = absf(v[i]) * TAU * _r_drive / 60.0 / box.final_drive
+		box.ratios = r
+	_use_gearbox(0)
 	_calibrate_drag(data.carp_value(65, 1.0))
 
 	# Body collision: a box that stays clear of the ground (the wheels hold the car up).
@@ -434,8 +586,14 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 	# body size.
 	var heads := _lamps_of(data, "H", Vector3(hs.x * 0.7, 0.0, hs.z))
 	var tails := _lamps_of(data, "T", Vector3(hs.x * 0.7, 0.0, -hs.z))
+	# ... set onto the bodywork (the pop-ups raised: their lamps shine only then).
+	var lamp_faces := body_faces.duplicate()
+	for p in data.popup_lights:
+		for v in p.mesh.get_faces():
+			lamp_faces.append(v + p.center)
+	_seat_lamps(data.lights + heads + tails, lamp_faces)
 	for l in heads:
-		var glow := _lamp_glow(l.pos + Vector3(0, 0, 0.08), LAMP_COLOURS[l.colour], 0.32 * _lamp_size(l))
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.32 * _lamp_size(l), 1.0)
 		glow.set_meta("glint", [1.0, _colour_v(l.colour) * 2.5])
 		glow.set_meta("lamp", l)
 		_head_glows.append(glow)
@@ -445,8 +603,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 	_lamps.append_array(_head_glows)
 	# Running tail lamps, and the parking and marker lamps (P), dimmer, with the headlights.
 	for l in tails + _lamps_of(data, "P"):
-		var glow := _lamp_glow(l.pos + Vector3(0, 0, signf(l.pos.z) * 0.06), LAMP_COLOURS[l.colour] * 0.45,
-			0.22 * _lamp_size(l))
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour] * 0.45, 0.22 * _lamp_size(l), signf(l.pos.z))
 		glow.set_meta("glint", [signf(l.pos.z), _colour_v(l.colour) * 0.8])
 		glow.set_meta("lamp", l)
 		_lamps.append(glow)
@@ -471,12 +628,28 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 	if brakes.all(func(l: Dictionary) -> bool: return absf(l.pos.x) < 0.25):
 		brakes.append_array(tails)
 	for l in brakes:
-		var glow := _lamp_glow(l.pos - Vector3(0, 0, 0.08), LAMP_COLOURS[l.colour], 0.3 * _lamp_size(l))
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.3 * _lamp_size(l), -1.0)
 		glow.set_meta("glint", [-1.0, _colour_v(l.colour) * 2.2])
 		glow.set_meta("lamp", l)
 		glow.visible = false
 		_body_tilt.add_child(glow)
 		_brake_lights.append(glow)
+	# Indicators (Porsche Unleashed's), each flashing with its side (+X is the driver's left),
+	# and fog lamps.
+	for l in _lamps_of(data, "I"):
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.24 * _lamp_size(l), signf(l.pos.z))
+		glow.set_meta("glint", [signf(l.pos.z), _colour_v(l.colour) * 1.2])
+		glow.set_meta("lamp", l)
+		glow.visible = false
+		_body_tilt.add_child(glow)
+		_signals.append([glow, -1 if l.pos.x >= 0.0 else 1])
+	for l in _lamps_of(data, "F"):
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.28 * _lamp_size(l), signf(l.pos.z))
+		glow.set_meta("glint", [signf(l.pos.z), _colour_v(l.colour) * 1.5])
+		glow.set_meta("lamp", l)
+		glow.visible = false
+		_body_tilt.add_child(glow)
+		_fog_glows.append(glow)
 	# Reversing lamps: High Stakes marks them; on NFS3 cars, just inboard of the taillights.
 	var reverses := _lamps_of(data, "R")
 	if reverses.is_empty():
@@ -484,8 +657,9 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			var r := Nfs3Car.decode_light("RWYN350")
 			r.pos = l.pos - Vector3(signf(l.pos.x) * 0.16, 0.03, 0.0)
 			reverses.append(r)
+		_seat_lamps(reverses, lamp_faces)
 	for l in reverses:
-		var glow := _lamp_glow(l.pos - Vector3(0, 0, 0.07), LAMP_COLOURS[l.colour], 0.22 * _lamp_size(l))
+		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.22 * _lamp_size(l), -1.0)
 		glow.set_meta("glint", [-1.0, _colour_v(l.colour) * 1.2])
 		glow.set_meta("lamp", l)
 		glow.visible = false
@@ -533,12 +707,17 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		_body_tilt.add_child(beam)
 		_beams.append(beam)
 	set_high_beam(false)
+	if data is Nfs5Car:
+		_pu_effects(data)
 	for g: GeometryInstance3D in find_children("*", "GeometryInstance3D", true, false):
 		g.layers = VISUAL_LAYER
+	for m in _cabin_mirror_glass:
+		(m.node as GeometryInstance3D).layers = DASH_LAYER
 
 
-## Reads the car's carp.txt (see the tuning vars for which field is which). The gearbox is
-## automatic, so the automatic set [75..79] wins over the manual one where both are given.
+## Reads the car's carp.txt (see the tuning vars for which field is which). It lists an
+## automatic gearbox [75..79] and a manual one [3], [7..9], [11]; each takes what it lacks
+## from the other, and the car starts on the automatic (set_manual switches).
 ## Serial number [0] and subdivide level [55] (the original renderer's mesh detail) have no
 ## bearing here.
 func _load_spec(data: Object) -> void:
@@ -551,17 +730,27 @@ func _load_spec(data: Object) -> void:
 	grip = clampf(data.carp_value(30, 3.2) / 3.2 * data.carp_value(66, 1.0), 0.4, 1.6)
 	idle_rpm = maxf(data.carp_value(12, 1000.0), 700.0)   # some traffic cars list 0
 	redline = data.carp_value(13, 7000.0)
-	final_drive = data.carp_value(79, data.carp_value(11, 3.8))
 	var gear_factor: float = data.carp_value(63, 1.0)
-	v2rpm = _scaled(_table(carp, [76, 7], [-220, 0, 230, 150, 110, 88, 70, 0]), gear_factor)
-	ratios = _scaled(_table(carp, [77, 8], [2.1, 0, 2.3, 1.5, 1.12, 0.88, 0.7, 0]), gear_factor)
-	gear_eff = _table(carp, [78, 9], [0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85])
+	_gearboxes.clear()
+	# Field numbers: gear count, speed-to-rpm, ratios, efficiency, final drive.
+	var fields := [[75, 76, 77, 78, 79], [3, 7, 8, 9, 11]]
+	for m in 2:
+		var own: Array = fields[m]
+		var other: Array = fields[1 - m]
+		var box := {
+			"final_drive": data.carp_value(own[4], data.carp_value(other[4], 3.8)),
+			"v2rpm": _scaled(_table(carp, [own[1], other[1]], [-220, 0, 230, 150, 110, 88, 70, 0]), gear_factor),
+			"ratios": _scaled(_table(carp, [own[2], other[2]], [2.1, 0, 2.3, 1.5, 1.12, 0.88, 0.7, 0]), gear_factor),
+			"gear_eff": _table(carp, [own[3], other[3]], [0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85]),
+		}
+		var forward := 0
+		for i in range(2, box.v2rpm.size()):
+			if box.v2rpm[i] > 0.0:
+				forward += 1
+		box.n_gears = clampi(int(data.carp_value(own[0], data.carp_value(other[0], forward + 2.0))) - 2, 1, maxi(forward, 1))
+		_gearboxes.append(box)
+	_use_gearbox(0)
 	torque_curve = _scaled(_table(carp, [10], [300.0]), data.carp_value(60, 1.0))
-	var forward := 0
-	for i in range(2, v2rpm.size()):
-		if v2rpm[i] > 0.0:
-			forward += 1
-	n_gears = clampi(int(data.carp_value(75, data.carp_value(3, forward + 2.0))) - 2, 1, maxi(forward, 1))
 	shift_delay = data.carp_value(4, 6.0) * TICK
 	shift_blip = _table(carp, [5], [0.0])
 	brake_blip = _table(carp, [6], [0.0])
@@ -646,6 +835,25 @@ static func _scaled(t: PackedFloat32Array, k: float) -> PackedFloat32Array:
 	return t
 
 
+func _use_gearbox(i: int) -> void:
+	var box := _gearboxes[i]
+	final_drive = box.final_drive
+	v2rpm = box.v2rpm
+	ratios = box.ratios
+	gear_eff = box.gear_eff
+	n_gears = box.n_gears
+
+
+## A driver who shifts by hand (the player, with the manual gearbox chosen): the car then
+## changes gear only on shift_request, on the file's manual gearing.
+func set_manual(on: bool) -> void:
+	manual = on
+	shift_request = 0
+	if not _gearboxes.is_empty():
+		_use_gearbox(int(on))
+		gear = mini(gear, n_gears)
+
+
 ## Entry `i` of a per-gear (or per-tick) table, the last entry past its end.
 static func _at(t: PackedFloat32Array, i: int, fallback: float) -> float:
 	if t.is_empty():
@@ -719,13 +927,296 @@ func set_headlight_beam(allowed: bool, per_lamp := false) -> void:
 	set_headlights(headlights_on)
 
 
-func _set_spoiler(up: bool) -> void:
-	_spoiler_raised = up
-	var inside := _dash != null and _dash.visible
+## Whether this car has a soft top to raise and lower (a Porsche Unleashed cabriolet).
+func has_soft_top() -> bool:
+	return not _hood_top.is_empty() and not _hood_folded.is_empty()
+
+
+## Lowers or raises the soft top: it folds through its frames over TOP_FOLD_TIME (`now`:
+## straight there).
+func set_top_down(down: bool, now := false) -> void:
+	if not has_soft_top():
+		return
+	top_down = down
+	# (The side windows go down with the top, as they're driven.)
+	for side: int in _windows:
+		set_window_down(side, down, now)
+	if now or _hood_frames < 2:
+		_top_t = float(_hood_frames - 1) if down else 0.0
+	_pose_top()
+
+
+## Moves the top a step toward where top_down wants it.
+func _fold_top(dt: float) -> void:
+	var goal := float(_hood_frames - 1) if top_down else 0.0
+	if _top_t == goal:
+		return
+	_top_t = move_toward(_top_t, goal, dt * fold_speed * (_hood_frames - 1) / TOP_FOLD_TIME)
+	_pose_top()
+
+
+## The top at _top_t, between two of its frames; the hood's frame and rear window only while
+## it's fully up, the folded hood only once it's all the way down.
+func _pose_top() -> void:
+	var last := float(maxi(_hood_frames - 1, 0))
+	var k := mini(int(_top_t), maxi(_hood_frames - 2, 0))
+	var f := _top_t - k
+	for mi in _hood_top:
+		mi.visible = _top_t < last
+		for i in mi.get_blend_shape_count():
+			mi.set_blend_shape_value(i, 1.0 - f if i == k else f if i == k + 1 else 0.0)
+	for mi in _hood_up:
+		mi.visible = _top_t == 0.0
+	for mi in _hood_folded:
+		mi.visible = _top_t >= last
+
+
+## Porsche Unleashed's effects: the game's glare on the lamps, the sun's glints off the
+## chrome (a mesh per door or lid they ride on, posed with it), the exhaust (CarExhaust).
+func _pu_effects(data: Nfs5Car) -> void:
+	var glare := Nfs5Car.fx("GLAR")
+	if glare:
+		var glows: Array = _lamps + _brake_lights + _reverse_lights + _fog_glows
+		for sg in _signals:
+			glows.append(sg[0])
+		for g in glows:
+			if g is MeshInstance3D and (g as MeshInstance3D).mesh is QuadMesh:
+				var q := (g as MeshInstance3D).mesh as QuadMesh
+				(q.material as ShaderMaterial).set_shader_parameter("glow_tex", glare)
+				q.size *= PU_GLARE_SCALE
+	var glint := Nfs5Car.fx("GLNT")
+	if glint and not data.glints.is_empty():
+		if _glint_mat == null:
+			_glint_mat = ShaderMaterial.new()
+			_glint_mat.shader = preload("res://shaders/car_glint.gdshader")
+			_glint_mat.set_shader_parameter("glint_tex", glint)
+		var by_lid := {}
+		for gl: Dictionary in data.glints:
+			if not by_lid.has(gl.lid):
+				by_lid[gl.lid] = []
+			by_lid[gl.lid].append(gl)
+		for lid: int in by_lid:
+			var st := SurfaceTool.new()
+			st.begin(Mesh.PRIMITIVE_TRIANGLES)
+			var n := 0
+			for gl: Dictionary in by_lid[lid]:
+				var phase := Color(randf(), 0.0, 0.0)
+				for corner in [Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 0), Vector2(1, 1), Vector2(0, 1)]:
+					st.set_color(phase)
+					st.set_normal(gl.facing)
+					st.set_uv(corner)
+					st.add_vertex(gl.pos)
+				n += 1
+			var mi := MeshInstance3D.new()
+			mi.name = "Glints"
+			mi.mesh = st.commit()
+			mi.material_override = _glint_mat
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.extra_cull_margin = 0.5
+			_body_tilt.add_child(mi)
+			if _lids.has(lid):
+				_lids[lid].parts.append([mi, Vector3.ZERO])
+	if not data.exhausts.is_empty():
+		var ex: Node3D = preload("res://scripts/vehicle/car_exhaust.gd").new()
+		ex.name = "Exhaust"
+		ex.pipes = data.exhausts
+		_body_tilt.add_child(ex)
+
+
+## Points the glints' sun where the scene's is (once a frame, for every car): none at night.
+static func _aim_glints(tree: SceneTree) -> void:
+	if _glint_mat == null or _glint_frame == Engine.get_process_frames():
+		return
+	_glint_frame = Engine.get_process_frames()
+	var sun: DirectionalLight3D = _sun_ref.get_ref() if _sun_ref else null
+	if (sun == null or not sun.is_inside_tree()) and _glint_frame % 30 == 0:
+		sun = null
+		for l in tree.root.find_children("*", "DirectionalLight3D", true, false):
+			if (l as DirectionalLight3D).visible:
+				sun = l
+				break
+		_sun_ref = weakref(sun) if sun else null
+	if sun == null or not sun.visible or Game.night:
+		_glint_mat.set_shader_parameter("sun_energy", 0.0)
+		return
+	_glint_mat.set_shader_parameter("sun_dir", sun.global_basis.z.normalized())
+	_glint_mat.set_shader_parameter("sun_energy", clampf(sun.light_energy, 0.0, 1.5))
+
+
+## Files a Porsche Unleashed part that opens (Nfs5Car's "lid", "window" and "bay" keys).
+func _add_opening(p: Dictionary, mi: MeshInstance3D) -> void:
+	if p.has("lid"):
+		var g: int = p.lid
+		if not _lids.has(g):
+			_lids[g] = {"parts": [], "hinge": p.hinge, "axis": p.axis, "open": p.open, "t": 0.0, "goal": 0.0,
+				"centre": Vector3.ZERO, "broken": false, "angle": 0.0, "spin": 0.0, "n": 0}
+		if not p.has("window"):
+			_lids[g].parts.append([mi, p.center])
+			if not p.has("spoiler") and not p.has("mirror_glass"):
+				var c: Vector3 = p.center + p.mesh.get_aabb().get_center()
+				_lids[g].centre = (_lids[g].centre * _lids[g].n + c) / (_lids[g].n + 1)
+				_lids[g].n += 1
+	if p.has("window"):
+		var w: int = p.window
+		if not _windows.has(w):
+			_windows[w] = {"parts": [], "drop": p.drop, "t": 0.0, "goal": 0.0}
+		_windows[w].parts.append([mi, p.center])
+	if p.has("bay"):
+		if not _bays.has(p.bay):
+			_bays[p.bay] = []
+		_bays[p.bay].append(mi)
+		mi.visible = false
+
+
+## Whether this car has `what` to open (Nfs5Car.DOOR_LEFT, DOOR_RIGHT, BONNET or BOOT).
+func can_open(what: int) -> bool:
+	return _lids.has(what)
+
+
+func is_open(what: int) -> bool:
+	return _lids.has(what) and _lids[what].goal > 0.0
+
+
+## Opens or shuts a door, the bonnet or the boot over LID_TIME (`now`: straight there). One
+## whose latch a crash sprang shuts again (repaired) when told to.
+func set_open(what: int, open: bool, now := false) -> void:
+	if not _lids.has(what):
+		return
+	var l: Dictionary = _lids[what]
+	l.goal = 1.0 if open else 0.0
+	if not open:
+		l.broken = false
+	if now:
+		l.t = l.goal
+		l.angle = l.open * l.t
+		l.spin = 0.0
+	_pose_lid(what)
+
+
+## Winds a door's window (the door's group) down or up over WINDOW_TIME.
+func set_window_down(side: int, down: bool, now := false) -> void:
+	if not _windows.has(side):
+		return
+	_windows[side].goal = 1.0 if down else 0.0
+	if now:
+		_windows[side].t = _windows[side].goal
+	_pose_lid(side)
+
+
+func has_windows() -> bool:
+	return not _windows.is_empty()
+
+
+## A crash at car-local `p`, `s` of a full hit (CarDamage): springs the latch of a door or lid
+## near enough to it.
+func latch_hit(p: Vector3, s: float) -> void:
+	if s < LATCH_BREAK:
+		return
+	for g: int in _lids:
+		var l: Dictionary = _lids[g]
+		if not l.broken and l.goal == 0.0 and (l.centre as Vector3).distance_to(p) < LATCH_REACH:
+			l.broken = true
+			l.spin = randf_range(1.0, 3.0) * signf(l.open)
+
+
+## The doors, lids and windows a step on: toward where they're told, or, with the latch
+## sprung, swinging on their hinges: pulled back toward ajar, flung by the body's motion.
+func _move_openings(dt: float) -> void:
+	for g: int in _lids:
+		var l: Dictionary = _lids[g]
+		var before: float = l.angle
+		if l.broken and l.goal == 0.0:
+			var full: float = absf(l.open)
+			var rest := LATCH_AJAR
+			var v := absf(speed)
+			if g == Nfs5Car.BONNET:
+				rest = lerpf(LATCH_AJAR, full, clampf(v / BONNET_BLOW_SPEED, 0.0, 1.0) ** 2)
+			else:
+				rest = LATCH_AJAR * clampf(1.0 - v / 15.0, 0.0, 1.0)
+			# The body's lurches: a door swings out as the car turns away from its side, a lid
+			# bounces with the heave.
+			var shove := 0.0
+			if g in [Nfs5Car.DOOR_LEFT, Nfs5Car.DOOR_RIGHT]:
+				shove = _acc.x * (-1.0 if g == Nfs5Car.DOOR_LEFT else 1.0) * 0.6
+			else:
+				shove = -_heave_acc * 0.25
+			var a := absf(l.angle)
+			var w: float = l.spin * signf(l.open)
+			w += ((rest - a) * 40.0 - w * 3.0 + shove) * dt
+			a += w * dt
+			if a < 0.0:
+				a = 0.0
+				w = -w * 0.35
+			elif a > full:
+				a = full
+				w = -w * 0.3
+			l.angle = a * signf(l.open)
+			l.spin = w * signf(l.open)
+			l.t = a / full
+		elif l.t != l.goal:
+			l.t = move_toward(l.t, l.goal, dt / LID_TIME)
+			l.angle = l.open * smoothstep(0.0, 1.0, l.t)
+		if l.angle != before:
+			_pose_lid(g)
+	for side: int in _windows:
+		var w: Dictionary = _windows[side]
+		if w.t != w.goal:
+			w.t = move_toward(w.t, w.goal, dt / WINDOW_TIME)
+			_pose_lid(side)
+
+
+## A door or lid (and its window) where its angle has it, and the bay under a lid shown
+## while it's open.
+func _pose_lid(g: int) -> void:
+	var b := Basis.IDENTITY
+	var hinge := Vector3.ZERO
+	if _lids.has(g):
+		var l: Dictionary = _lids[g]
+		b = Basis(l.axis, l.angle)
+		hinge = l.hinge
+		for pm in l.parts:
+			(pm[0] as Node3D).transform = Transform3D(b, hinge + b * (pm[1] - hinge))
+		for mi in _bays.get(g, []):
+			mi.visible = absf(l.angle) > 0.01
+	if _windows.has(g):
+		var w: Dictionary = _windows[g]
+		var drop: Vector3 = w.drop * smoothstep(0.0, 1.0, w.t)
+		for pm in w.parts:
+			(pm[0] as Node3D).transform = Transform3D(b, hinge + b * (pm[1] + drop - hinge))
+
+
+## Sets one of the skin's lamp-lens uniforms (car.gdshader), when it changes.
+func _set_lens(uniform: String, value: float) -> void:
+	if _skin_mat == null or _lens_state.get(uniform, -1.0) == value:
+		return
+	_lens_state[uniform] = value
+	_skin_mat.set_shader_parameter(uniform, value)
+
+
+## The spoiler at _spoiler_t: lowered, raised, or between them through its frames (without
+## them it just goes from one to the other halfway).
+func _pose_spoiler() -> void:
+	var moving := _spoiler_t > 0.0 and _spoiler_t < 1.0 and not _spoiler_moving.is_empty()
+	var up := _spoiler_t >= (1.0 if not _spoiler_moving.is_empty() else 0.5)
 	for mi in _spoiler_up:
-		mi.visible = up and not inside
+		mi.visible = up and not moving
 	for mi in _spoiler_down:
-		mi.visible = not up and not inside
+		mi.visible = not up and not moving
+	for mi in _spoiler_moving:
+		mi.visible = moving
+		if moving:
+			_pose_frames(mi, smoothstep(0.0, 1.0, _spoiler_t) * (_spoiler_frames - 1))
+
+
+## Poses a part by its blend shapes, a frame each: at `f`, between two of them.
+static func _pose_frames(mi: MeshInstance3D, f: float) -> void:
+	var n := mi.get_blend_shape_count()
+	if n == 0:
+		return
+	var k := clampi(int(f), 0, maxi(n - 2, 0))
+	var t := clampf(f - k, 0.0, 1.0)
+	for i in n:
+		mi.set_blend_shape_value(i, 1.0 - t if i == k else t if i == k + 1 else 0.0)
 
 
 ## Poses blend-shaped arms and hands for the wheel turned `angle` (their shapes' angles
@@ -752,19 +1243,51 @@ func set_paint(tint: Color) -> void:
 		var m := (n as MeshInstance3D).material_override as ShaderMaterial
 		if m and not done.has(m) and m.get_shader_parameter("paint") != null:
 			m.set_shader_parameter("paint", c)
+			if m.get_shader_parameter("interior_paint") != null:
+				m.set_shader_parameter("interior_paint", _interior_of(c))
 			done[m] = true
 
 
-func set_headlights(on: bool) -> void:
+## The cabin colour that goes with `paint`, one of the car's colours (Porsche Unleashed's
+## pair each paint with an interior), or transparent: the cabin as the skin has it.
+func _interior_of(paint: Color) -> Color:
+	if car_data == null or not "interior_colours" in car_data or car_data.interior_colours.is_empty():
+		return Color(0, 0, 0, 0)
+	var i := maxi(car_data.colours.find(paint), 0)
+	return car_data.interior_colours[mini(i, car_data.interior_colours.size() - 1)]
+
+
+## Switches the headlights (and the tail lamps with them). Pop-up headlamps rise first and
+## go down after, over POPUP_TIME (`now`: straight there).
+func set_headlights(on: bool, now := false) -> void:
 	headlights_on = on
+	if now or _popups.is_empty():
+		_popup_t = 1.0 if on else 0.0
+		_pose_popups()
+	_show_lamps()
+
+
+func _show_lamps() -> void:
+	var heads := headlights_on and _popup_t == 1.0
+	_set_lens("head_lit", 1.0 if heads else 0.0)
+	_set_lens("tail_lit", 1.0 if headlights_on else 0.0)
 	for i in _beams.size():
-		_beams[i].visible = on and _beam_allowed and (i > 0) == _split_beams and not _beam_broken(i)
+		_beams[i].visible = heads and _beam_allowed and (i > 0) == _split_beams and not _beam_broken(i)
 	for l in _lamps:
-		l.visible = on
-	for l in _popups:
-		l.visible = on and not (_dash and _dash.visible)
+		l.visible = heads if _head_glows.has(l) else headlights_on
+
+
+## The pop-ups at _popup_t: each turned about its hinge and let down by its share of the way;
+## Porsche Unleashed's own lamps-down parts (the covers) shown once they're all the way down.
+func _pose_popups() -> void:
+	var down := 1.0 - smoothstep(0.0, 1.0, _popup_t)
+	for i in _popups.size():
+		var m := _popup_moves[i]
+		var b := Basis(Vector3.RIGHT, m.fold * down)
+		_popups[i].transform = Transform3D(b, m.center + m.hinge - b * m.hinge + Vector3(0.0, -m.sink * down, 0.0))
+		_popups[i].visible = _popup_t > 0.0
 	for l in _popup_covers:
-		l.visible = not on and not (_dash and _dash.visible)
+		l.visible = _popup_t == 0.0
 
 
 func set_high_beam(on: bool) -> void:
@@ -814,8 +1337,8 @@ func lit_lamps() -> Array:
 	var out := []
 	var xf := get_global_transform_interpolated()
 	var fwd := xf.basis.z.normalized()
-	var glows: Array = _lamps + _brake_lights + _reverse_lights
-	for sg in _siren_glows:
+	var glows: Array = _lamps + _brake_lights + _reverse_lights + _fog_glows
+	for sg in _siren_glows + _signals:
 		glows.append(sg[0])
 	for g: Node3D in glows:
 		if g.visible and g.has_meta("glint"):
@@ -839,6 +1362,48 @@ static func _lamps_of(data: Object, kind: String, fallback := Vector3.INF) -> Ar
 			l.pos = fallback if side == "L" else Vector3(-fallback.x, fallback.y, fallback.z)
 			out.append(l)
 	return out
+
+
+## Lamps sit this far (m) at most in front of the bodywork behind them, as seen along the car.
+const LAMP_SEAT_REACH := 0.3
+
+
+## Sets each lamp onto the outside of the bodywork straight behind it along the car: the light
+## dummies float up to 15 cm clear of their lenses (High Stakes' 550 Maranello's the most),
+## and the reversing lamps made up for NFS3's cars sink in where the tail wraps round. A lamp
+## LAMP_SEAT_REACH or more in front of anything, or set in behind a lip or spoiler further
+## out than OUT, stays put; one seated already (the car data's lamps are shared by its
+## cars) isn't looked at again.
+static func _seat_lamps(lamps: Array, faces: PackedVector3Array) -> void:
+	var todo: Array[Dictionary] = []
+	for l: Dictionary in lamps:
+		if not l.get("seated", false) and l.kind != "S":
+			l["seated"] = true
+			todo.append(l)
+	if todo.is_empty():
+		return
+	const OUT := 0.1   # the rays start this far out, so a lamp just under the skin finds it
+	var depth := PackedFloat32Array()
+	depth.resize(todo.size())
+	depth.fill(INF)
+	for i in range(0, faces.size(), 3):
+		var a := faces[i]
+		var b := faces[i + 1]
+		var c := faces[i + 2]
+		var lo := a.min(b).min(c)
+		var hi := a.max(b).max(c)
+		for k in todo.size():
+			var p: Vector3 = todo[k].pos
+			if p.x < lo.x or p.x > hi.x or p.y < lo.y or p.y > hi.y:
+				continue
+			var inward := Vector3(0, 0, -signf(p.z))
+			var hit: Variant = Geometry3D.ray_intersects_triangle(p - inward * OUT, inward, a, b, c)
+			if hit != null:
+				depth[k] = minf(depth[k], (hit as Vector3).distance_to(p - inward * OUT))
+	for k in todo.size():
+		if depth[k] < LAMP_SEAT_REACH + OUT:
+			var l := todo[k]
+			l.pos -= Vector3(0, 0, signf(l.pos.z) * (depth[k] - OUT))
 
 
 ## The leftmost and rightmost of some lamps, in that order.
@@ -871,27 +1436,26 @@ static func _flash_lit(l: Dictionary, t: float) -> bool:
 	return phase < l.time * 0.1
 
 
-## A small camera-facing additive sprite: reads as a lit lamp in daylight without costing a light.
-static func _lamp_glow(pos: Vector3, colour: Color, size: float) -> MeshInstance3D:
-	var g := Gradient.new()
-	g.set_color(0, Color(1, 1, 1, 1))
-	g.set_color(1, Color(1, 1, 1, 0))
-	g.add_point(0.25, Color(1, 1, 1, 0.9))
-	var t := GradientTexture2D.new()
-	t.gradient = g
-	t.fill = GradientTexture2D.FILL_RADIAL
-	t.fill_from = Vector2(0.5, 0.5)
-	t.fill_to = Vector2(0.5, 0.0)
-	t.width = 32
-	t.height = 32
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	m.albedo_texture = t
-	m.albedo_color = colour
-	m.disable_fog = true
+## A small camera-facing additive sprite: reads as a lit lamp in daylight without costing a
+## light. Centred on the lamp; car_lamp.gdshader keeps the bodywork round it from cutting it.
+static func _lamp_glow(pos: Vector3, colour: Color, size: float, facing := 0.0) -> MeshInstance3D:
+	if _glow_tex == null:
+		var g := Gradient.new()
+		g.set_color(0, Color(1, 1, 1, 1))
+		g.set_color(1, Color(1, 1, 1, 0))
+		g.add_point(0.25, Color(1, 1, 1, 0.9))
+		_glow_tex = GradientTexture2D.new()
+		_glow_tex.gradient = g
+		_glow_tex.fill = GradientTexture2D.FILL_RADIAL
+		_glow_tex.fill_from = Vector2(0.5, 0.5)
+		_glow_tex.fill_to = Vector2(0.5, 0.0)
+		_glow_tex.width = 32
+		_glow_tex.height = 32
+	var m := ShaderMaterial.new()
+	m.shader = preload("res://shaders/car_lamp.gdshader")
+	m.set_shader_parameter("glow_tex", _glow_tex)
+	m.set_shader_parameter("colour", colour)
+	m.set_shader_parameter("facing", facing)
 	var q := QuadMesh.new()
 	q.size = Vector2(size, size)
 	q.material = m
@@ -899,6 +1463,7 @@ static func _lamp_glow(pos: Vector3, colour: Color, size: float) -> MeshInstance
 	mi.mesh = q
 	mi.position = pos
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.extra_cull_margin = size
 	mi.layers = VISUAL_LAYER
 	return mi
 
@@ -950,8 +1515,8 @@ func enable_siren(on: bool) -> void:
 ## A crash at car-local `p`: puts out the breakable lamps (see Nfs3Car.decode_light())
 ## within `radius` of it, and the beam of a main headlamp among them.
 func break_lamps(p: Vector3, radius: float) -> void:
-	var glows: Array = _lamps + _brake_lights + _reverse_lights
-	for sg in _siren_glows:
+	var glows: Array = _lamps + _brake_lights + _reverse_lights + _fog_glows
+	for sg in _siren_glows + _signals:
 		glows.append(sg[0])
 	var broke := false
 	# The glows decide what the crash reaches; the brake lamps' lights go out with theirs.
@@ -974,6 +1539,8 @@ func break_lamps(p: Vector3, radius: float) -> void:
 	_reverse_lights.assign(_reverse_lights.filter(keep))
 	_wigwags = _wigwags.filter(func(w: Array) -> bool: return keep.call(w[0]))
 	_siren_glows = _siren_glows.filter(func(sg: Array) -> bool: return keep.call(sg[0]))
+	_signals = _signals.filter(func(sg: Array) -> bool: return keep.call(sg[0]))
+	_fog_glows.assign(_fog_glows.filter(keep))
 	set_headlights(headlights_on)
 
 
@@ -1028,7 +1595,7 @@ func reset_to(xf: Transform3D, drop := 0.1) -> void:
 	_prev_vel = Vector3.ZERO
 	_acc = Vector2.ZERO
 	_tilt = Vector2.ZERO
-	_tilt_vel = Vector2.ZERO
+	_ride = Vector3.ZERO
 	was_reset.emit()
 
 
@@ -1042,6 +1609,14 @@ func _torque_at(r: float) -> float:
 
 func _gear_index(g: int) -> int:
 	return 0 if g < 0 else g + 1
+
+
+func _shift(to: int) -> void:
+	var up := to > gear
+	gear = to
+	_shift_timer = shift_delay
+	# Heel-and-toe: braking into the lower gear blips the throttle to match the revs.
+	_blip = _at(brake_blip if not up and _brake_pedal > 0.1 else shift_blip, _gear_index(gear), 0.0)
 
 
 func _physics_process(dt: float) -> void:
@@ -1062,8 +1637,9 @@ func _physics_process(dt: float) -> void:
 	_prev_vel = vel
 	var acc_now := Vector2(clampf(acc.dot(global_basis.x), -20.0, 20.0), clampf(acc.dot(fwd), -20.0, 20.0))
 	_acc = _acc.lerp(acc_now, 1.0 - exp(-dt * 8.0))
+	_heave_acc = lerpf(_heave_acc, clampf(acc.dot(global_basis.y), -30.0, 30.0), 1.0 - exp(-dt * 12.0))
 
-	# --- gearbox (automatic) and reverse
+	# --- gearbox (automatic, or by hand) and reverse
 	_shift_timer = maxf(_shift_timer - dt, 0.0)
 	flat_t = maxf(flat_t - dt, 0.0)
 	var flat := flat_t > 0.0
@@ -1074,17 +1650,27 @@ func _physics_process(dt: float) -> void:
 		gear = -1
 	elif gear < 0 and throttle > 0.1 and speed > -1.0:
 		gear = 1
-	if gear > 0 and _shift_timer <= 0.0:
+	if manual and _shift_timer <= 0.0 and shift_request != 0:
+		# By hand: up to top gear, down only where the lower gear won't over-rev, and down
+		# from 1st (or up from reverse) near a standstill.
+		if gear < 0:
+			if shift_request > 0 and speed > -1.0:
+				gear = 1
+		elif shift_request > 0:
+			if gear < n_gears:
+				_shift(gear + 1)
+		elif gear > 1:
+			if abs_speed * v2rpm[_gear_index(gear - 1)] < redline:
+				_shift(gear - 1)
+		elif abs_speed < 1.0:
+			gear = -1
+		shift_request = 0
+	elif not manual and gear > 0 and _shift_timer <= 0.0:
 		var r := abs_speed * v2rpm[_gear_index(gear)]
 		if r > redline * 0.94 and gear < n_gears:
-			gear += 1
-			_shift_timer = shift_delay
-			_blip = _at(shift_blip, _gear_index(gear), 0.0)
+			_shift(gear + 1)
 		elif gear > 1 and abs_speed * v2rpm[_gear_index(gear - 1)] < redline * 0.7:
-			gear -= 1
-			_shift_timer = shift_delay
-			# Heel-and-toe: braking into the lower gear blips the throttle to match the revs.
-			_blip = _at(brake_blip if _brake_pedal > 0.1 else shift_blip, _gear_index(gear), 0.0)
+			_shift(gear - 1)
 	var gi := _gear_index(gear)
 
 	# --- pedals: they travel at the car's own rates, in 128ths per tick: the gas by gear
@@ -1393,34 +1979,64 @@ func _physics_process(dt: float) -> void:
 			bl.visible = braking_lit and (lamp_lights or not bl is Light3D)
 		for rl in _reverse_lights:
 			rl.visible = _reversing_lit and (lamp_lights or not rl is Light3D)
+		_set_lens("brake_lit", 1.0 if braking_lit else 0.0)
+		_set_lens("reverse_lit", 1.0 if _reversing_lit else 0.0)
 
 
 func has_cockpit() -> bool:
 	return not _dash_data.is_empty()
 
 
-## The driver's eye, car-local, for the in-car view.
+## The driver's eye, car-local, for the in-car view. In a cabin of the car's own model it
+## sways with the body, so the dash doesn't swing into the view.
 func cockpit_eye() -> Vector3:
-	return _dash_data.get("eye", Vector3(0.4, 0.45, -0.3))
+	var eye: Vector3 = _dash_data.get("eye", Vector3(0.4, 0.45, -0.3))
+	if _dash_data.get("own_cabin", false):
+		return global_transform.affine_inverse() * _body_tilt.global_transform * eye
+	return eye
 
 
 ## The in-car view: the dashboard, seats and doors instead of the body and wheels (the
-## camera sits inside them). False when the car file has none.
+## camera sits inside them), which only the side mirrors still draw. A Porsche Unleashed
+## car has its cabin in its own model: that stays, and only the driver's head goes. False
+## when the car file has none.
 func set_cockpit(on: bool) -> bool:
 	if _dash_data.is_empty():
 		return false
+	if on:
+		in_car_view = self
+	elif in_car_view == self:
+		in_car_view = null
+	if _dash_data.get("own_cabin", false):
+		_cabin_on = on
+		if _driver_mat:
+			_driver_mat.set_shader_parameter("hide_head", on)
+		if on and _cabin_mirrors == null:
+			_cabin_mirrors = Node3D.new()
+			_cabin_mirrors.name = "Mirrors"
+			_body_tilt.add_child(_cabin_mirrors)
+			if not _cabin_mirror_glass.is_empty():
+				var mirrors := CarMirrors.new()
+				_cabin_mirrors.add_child(mirrors)
+				mirrors.setup(self, _cabin_mirror_glass, _dash_data.eye, _half_size)
+			_build_rear_mirror(_cabin_mirrors, _body_tilt, _dash_data.eye)
+		if _cabin_mirrors:
+			_cabin_mirrors.visible = on
+		return true
 	if on and _dash == null:
 		_build_dash()
+		_build_rear_mirror(_dash, self, cockpit_eye())
 	if _dash:
 		_dash.visible = on
-	for mi in _body_meshes + _popups:
-		mi.visible = not on and (headlights_on or not (mi in _popups)) and not (headlights_on and mi in _popup_covers) \
-			and not (mi in _spoiler_up and not _spoiler_raised) and not (mi in _spoiler_down and _spoiler_raised)
-	for p in _plates:
-		p.visible = not on
+	var outside: Array = _body_meshes + _popups + _plates
 	for w in _wheels:
 		if w.has("visual"):
-			w.visual.visible = not on
+			outside.append_array((w.visual as Node).find_children("*", "GeometryInstance3D", true, false))
+	for g: GeometryInstance3D in outside.filter(func(n: Node) -> bool: return n is GeometryInstance3D):
+		if not g.has_meta("shadow"):
+			g.set_meta("shadow", g.cast_shadow)
+		g.layers = OWN_VIEW_LAYER if on else VISUAL_LAYER
+		g.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF if on else g.get_meta("shadow")
 	return true
 
 
@@ -1445,16 +2061,25 @@ func _build_dash() -> void:
 	needle_lit.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 	_dash_mats = [mat, needle_lit]
 	var re := RegEx.create_from_string("\\(\\s*([\\d.]+)\\s*to\\s*([\\d.]+)\\s*\\)")
+	var glass: Array[Dictionary] = []
 	for p: Dictionary in _dash_data.parts:
 		var mi := MeshInstance3D.new()
 		mi.mesh = p.mesh
 		mi.material_override = mat
-		mi.layers = VISUAL_LAYER
+		mi.layers = DASH_LAYER
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var holder := Node3D.new()
 		holder.position = p.center
 		holder.add_child(mi)
 		_dash.add_child(holder)
+		if p.has("glass"):
+			var g := MeshInstance3D.new()
+			g.mesh = p.glass.mesh
+			g.material_override = mat
+			g.layers = DASH_LAYER
+			g.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			holder.add_child(g)
+			glass.append({"node": g, "point": p.center + p.glass.point, "normal": p.glass.normal})
 		var pname: String = p.name
 		# Parts are named by the views they show in (:F front, :L, :R, :B) and what they are:
 		# ":F_MPH (0.0 to 0.63)" is the speedo needle, sweeping 0.63 of a turn.
@@ -1478,6 +2103,215 @@ func _build_dash() -> void:
 			holder.position.z -= 0.0015
 			holder.visible = false
 			_dash_lit.append(holder)
+	if not glass.is_empty():
+		_mirrors = CarMirrors.new()
+		_mirrors.name = "Mirrors"
+		_dash.add_child(_mirrors)
+		_mirrors.setup(self, glass, cockpit_eye(), _half_size)
+
+
+## The rear-view mirror, under `parent` (at the origin of `space`, the car or its body; the
+## eye `eye` in `space`). A Porsche Unleashed cabin mostly has one modelled on the
+## centreline, under the roof (or on the dash top, the 356's): its glass, a small flat patch
+## facing the eye, is taken for the mirror's. Anywhere else one is hung from the windscreen's top on the centreline, found by
+## casting rays ahead from the eye at rising heights: their hits come nearer smoothly up the
+## leaning glass, until they pass over the car or meet the roof's lining, a jump nearer.
+## Either glass is taken as turned to show the eye what lies straight behind.
+func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
+	var inv := space.global_transform.affine_inverse()
+	var tris := PackedVector3Array()   # near the centreline, ahead of and above the eye
+	var meshes: Array = _body_meshes.duplicate()
+	if _dash:
+		meshes.append_array(_dash.find_children("*", "MeshInstance3D", true, false))
+	for mi: MeshInstance3D in meshes:
+		if mi.mesh == null or not mi.is_inside_tree():
+			continue
+		var xf := inv * mi.global_transform
+		var f := mi.mesh.get_faces()
+		for i in range(0, f.size() - 2, 3):
+			var a := xf * f[i]
+			var b := xf * f[i + 1]
+			var c := xf * f[i + 2]
+			if minf(a.x, minf(b.x, c.x)) > 0.15 or maxf(a.x, maxf(b.x, c.x)) < -0.15 \
+					or maxf(a.z, maxf(b.z, c.z)) < eye.z + 0.15 or maxf(a.y, maxf(b.y, c.y)) < eye.y - 0.1:
+				continue
+			tris.append_array([a, b, c])
+	_rear_mirror = Node3D.new()
+	_rear_mirror.name = "RearMirror"
+	parent.add_child(_rear_mirror)
+	var glass := MeshInstance3D.new()
+	var glass_at: Vector3
+	var model_glass := _model_rear_glass(tris, eye)
+	if not model_glass.is_empty():
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var lift := (eye - (model_glass.point as Vector3)).normalized() * 0.002
+		for v: Vector3 in model_glass.faces:
+			st.add_vertex(v + lift)
+		glass.mesh = st.commit()
+		glass_at = model_glass.point
+	else:
+		glass_at = _hang_rear_mirror(tris, eye)
+	var back := Vector3(0.0, -sin(CarMirrors.AIM_DOWN), -cos(CarMirrors.AIM_DOWN))
+	var n := ((eye - glass_at).normalized() + back).normalized()
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.12, 0.13, 0.15)
+	dark.metallic = 0.8
+	dark.roughness = 0.15
+	glass.material_override = dark
+	_rear_mirror.add_child(glass)
+	if model_glass.is_empty():
+		var x_axis := Vector3.UP.cross(n).normalized()
+		var basis := Basis(x_axis, n.cross(x_axis), n)
+		glass.mesh = _rounded_slab(REAR_MIRROR_SIZE, 0.0)
+		glass.transform = Transform3D(basis, glass_at)
+		var shell := StandardMaterial3D.new()
+		shell.albedo_color = Color(0.045, 0.045, 0.05)
+		shell.roughness = 0.55
+		var housing := MeshInstance3D.new()
+		housing.mesh = _rounded_slab(REAR_MIRROR_SIZE + Vector2.ONE * REAR_MIRROR_RIM * 2.0, REAR_MIRROR_DEPTH)
+		housing.material_override = shell
+		housing.transform = Transform3D(basis, glass_at - n * 0.001)
+		_rear_mirror.add_child(housing)
+		# Its stalk, from the housing's back up to where the windscreen meets the roof.
+		var stem_from := glass_at - n * REAR_MIRROR_DEPTH + basis.y * (REAR_MIRROR_SIZE.y * 0.25)
+		var stem_to: Vector3 = _rear_mirror.get_meta("mount")
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.007
+		cyl.bottom_radius = 0.009
+		cyl.height = maxf(stem_from.distance_to(stem_to), 0.01)
+		cyl.radial_segments = 8
+		cyl.rings = 1
+		var stem := MeshInstance3D.new()
+		stem.mesh = cyl
+		stem.material_override = shell
+		var along := (stem_to - stem_from).normalized()
+		var side := along.cross(Vector3.RIGHT if absf(along.x) < 0.9 else Vector3.BACK).normalized()
+		stem.transform = Transform3D(Basis(side, along, side.cross(along)), (stem_from + stem_to) * 0.5)
+		_rear_mirror.add_child(stem)
+	for g: GeometryInstance3D in _rear_mirror.get_children():
+		g.layers = REAR_MIRROR_LAYER
+		g.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mirrors := CarMirrors.new()
+	_rear_mirror.add_child(mirrors)
+	var gl: Array[Dictionary] = [{"node": glass, "point": glass_at, "normal": n, "rear": true}]
+	mirrors.setup(self, gl, eye, _half_size)
+	_rear_mirror.visible = rear_mirror_wanted
+
+
+## A modelled rear-view mirror's glass among `tris` (see _build_rear_mirror): the nearest
+## flat patch, mirror-sized, across the car's length a little way ahead, about the eye's
+## height or above, near the centreline. {faces, point (its middle)}, or {} if there's none.
+static func _model_rear_glass(tris: PackedVector3Array, eye: Vector3) -> Dictionary:
+	var planes := {}   # its plane (normal to a tenth, facing back; depth to the cm) -> [faces, area, weighted middle]
+	for i in range(0, tris.size(), 3):
+		var a := tris[i]
+		var b := tris[i + 1]
+		var c := tris[i + 2]
+		var cross := (b - a).cross(c - a)
+		var mid := (a + b + c) / 3.0
+		if cross.length() < 1e-7 or absf(mid.x) > 0.15 or mid.y < eye.y - 0.1 or mid.z - eye.z > 0.9:
+			continue
+		var n := cross.normalized() * (-1.0 if cross.z > 0.0 else 1.0)
+		# (Turned to the driver, as some are, a little.)
+		if n.z > -0.75:
+			continue
+		var key := Vector3i(roundi(n.x * 10.0), roundi(n.y * 10.0), roundi(n.dot(mid) * 100.0))
+		if not planes.has(key):
+			planes[key] = [PackedVector3Array(), 0.0, Vector3.ZERO]
+		var pl: Array = planes[key]
+		var faces: PackedVector3Array = pl[0]
+		faces.append_array([a, b, c])
+		pl[0] = faces
+		pl[1] += cross.length() * 0.5
+		pl[2] += mid * cross.length() * 0.5
+	var best := {}
+	for key: Vector3i in planes:
+		var pl: Array = planes[key]
+		var area: float = pl[1]
+		if area < 0.003 or area > 0.03:
+			continue
+		var box := AABB((pl[0] as PackedVector3Array)[0], Vector3.ZERO)
+		for v: Vector3 in pl[0]:
+			box = box.expand(v)
+		# Wider than tall, and not much bigger than a mirror.
+		if box.size.x < box.size.y * 1.5 or box.size.x > 0.35 or box.size.y > 0.12:
+			continue
+		var mid: Vector3 = pl[2] / area
+		if best.is_empty() or eye.distance_to(mid) < eye.distance_to(best.point):
+			best = {"faces": pl[0], "point": mid}
+	return best
+
+
+## Where a rear-view mirror's glass hangs when the cabin has none (see _build_rear_mirror),
+## in `tris`' space; its stalk's top as _rear_mirror's meta "mount".
+func _hang_rear_mirror(tris: PackedVector3Array, eye: Vector3) -> Vector3:
+	var ahead := func(y: float) -> float:   # how far ahead of the eye the ray at `y` hits, or INF
+		var best := INF
+		var from := Vector3(0.0, y, eye.z)
+		for i in range(0, tris.size(), 3):
+			var hit: Variant = Geometry3D.ray_intersects_triangle(from, Vector3.BACK, tris[i], tris[i + 1], tris[i + 2])
+			if hit != null and (hit as Vector3).z - eye.z > 0.15:
+				best = minf(best, (hit as Vector3).z - eye.z)
+		return best
+	var top := eye.y + 0.2
+	var reach := 0.75
+	var h := eye.y
+	var last: float = ahead.call(h)
+	while last < 1.4 and h < eye.y + 0.6:
+		var d: float = ahead.call(h + 0.01)
+		if d >= 1.4 or last - d > 0.04:
+			break
+		h += 0.01
+		last = d
+	if h > eye.y and last < 1.4:
+		top = h
+		reach = last
+	var y := top - REAR_MIRROR_DROP
+	var d_at: float = ahead.call(y)
+	_rear_mirror.set_meta("mount", Vector3(0.0, top, eye.z + reach - 0.01))
+	return Vector3(0.0, y, eye.z + clampf((d_at if d_at < 1.4 else reach) - REAR_MIRROR_BACK, 0.3, 0.8))
+
+
+## A flat plate `size` across its X and Y, its ends rounded, facing +Z; `depth` > 0 makes it a
+## slab that deep behind (-Z), sides and back closed.
+static func _rounded_slab(size: Vector2, depth: float) -> ArrayMesh:
+	var r := size.y * 0.5
+	var outline := PackedVector2Array()
+	for k in 9:
+		var a := -PI * 0.5 + PI * k / 8.0
+		outline.append(Vector2(size.x * 0.5 - r + r * cos(a), r * sin(a)))
+	for k in 9:
+		var a := PI * 0.5 + PI * k / 8.0
+		outline.append(Vector2(-size.x * 0.5 + r + r * cos(a), r * sin(a)))
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var faces := [[0.0, 1.0]] if depth <= 0.0 else [[0.0, 1.0], [-depth, -1.0]]
+	for face in faces:
+		for i in range(1, outline.size() - 1):
+			var tri := [outline[0], outline[i], outline[i + 1]] if face[1] > 0.0 else [outline[0], outline[i + 1], outline[i]]
+			for p: Vector2 in tri:
+				st.set_normal(Vector3(0, 0, face[1]))
+				st.set_uv(Vector2(p.x / size.x + 0.5, 0.5 - p.y / size.y))
+				st.add_vertex(Vector3(p.x, p.y, face[0]))
+	if depth > 0.0:
+		for i in outline.size():
+			var p := outline[i]
+			var q := outline[(i + 1) % outline.size()]
+			var nrm := Vector3(q.y - p.y, p.x - q.x, 0.0).normalized()
+			for v: Vector3 in [Vector3(p.x, p.y, 0), Vector3(q.x, q.y, -depth), Vector3(q.x, q.y, 0),
+					Vector3(p.x, p.y, 0), Vector3(p.x, p.y, -depth), Vector3(q.x, q.y, -depth)]:
+				st.set_normal(nrm)
+				st.add_vertex(v)
+	return st.commit()
+
+
+## A Porsche Unleashed dial's full scale: the rev counter's the thousand past a tenth over
+## the redline, the speedo's the 20 km/h (m/s here) past a twentieth over the top speed.
+func _dial_full_scale(revs: bool) -> float:
+	if revs:
+		return ceilf(redline * 1.1 / 1000.0) * 1000.0
+	return ceilf(top_speed * 1.05 * 3.6 / 20.0) * 20.0 / 3.6
 
 
 ## How far the steering wheel is turned (radians, + clockwise as the driver sees it): it
@@ -1493,12 +2327,14 @@ func _update_dash() -> void:
 		_dash_wheel.basis = Basis(_dash_wheel_axis, wheel_turn())
 	for n in _dash_needles:
 		# The dials' scales aren't in the files: the speedo reads to a little past the car's top
-		# speed, the rev counter to a quarter past its redline.
-		var f := clampf(rpm / (redline * 1.25), 0.0, 1.0) if n.rpm else clampf(absf(speed) / (top_speed * 1.1), 0.0, 1.0)
-		(n.node as Node3D).basis = Basis(n.axis, f * float(n.turns) * TAU)
-	# The dials light up with the headlights after dark.
+		# speed, the rev counter to a quarter past its redline (Porsche Unleashed's, round figures).
+		var full := _dial_full_scale(n.rpm) if n.get("round_scale", false) \
+			else redline * 1.25 if n.rpm else top_speed * 1.1
+		var f := clampf((rpm if n.rpm else absf(speed)) / full, 0.0, 1.0)
+		(n.node as Node3D).basis = Basis(n.axis, float(n.get("zero", 0.0)) + f * float(n.turns) * TAU)
+	# The dials light up with the headlights after dark (High Stakes' dash: its lit faces).
 	var lit := headlights_on and Game.night
-	if lit == _dash_lit_on:
+	if lit == _dash_lit_on or _dash_mats.is_empty():
 		return
 	_dash_lit_on = lit
 	for l in _dash_lit:
@@ -1515,7 +2351,9 @@ func body_meshes() -> Array[MeshInstance3D]:
 ## Lamp glows, lights and beams that sit on the bodywork, for CarDamage to move with a dent.
 func fittings() -> Array[Node3D]:
 	var out: Array[Node3D] = []
-	out.append_array(_lamps + _brake_lights + _reverse_lights + _beams + _plates)
+	out.append_array(_lamps + _brake_lights + _reverse_lights + _fog_glows + _beams + _plates)
+	for sg in _signals:
+		out.append(sg[0])
 	return out
 
 
@@ -1523,6 +2361,48 @@ func fittings() -> Array[Node3D]:
 ## contact), "hit" (the ray result, ditto), "slip" 0..1, "front", "left".
 func wheel_states() -> Array[Dictionary]:
 	return _wheels
+
+
+## The wipers a step on: while it rains or snows they sweep up and back, faster the harder
+## it comes down, with a pause between sweeps when it's light; once it stops they finish
+## the sweep they're on and park.
+func _wipe(dt: float) -> void:
+	var amount := clampf(precipitation, 0.0, 1.0)
+	if _wipe_t == 0.0 and amount < 0.05:
+		return
+	var sweep := lerpf(WIPE_SLOW, WIPE_FAST, amount)
+	var pause := WIPE_PAUSE * clampf(1.0 - amount * 2.0, 0.0, 1.0) if amount >= 0.05 else 0.0
+	_wipe_t += dt
+	if _wipe_t >= sweep + pause:
+		_wipe_t = 0.0 if amount < 0.05 else fmod(_wipe_t - sweep - pause, sweep)
+	if far:
+		return
+	# Up and back, easing at each end as the motor's crank does.
+	var up := 0.5 - 0.5 * cos(TAU * minf(_wipe_t / sweep, 1.0))
+	for w in _wipers:
+		_pose_frames(w[0], up * (w[1] - 1))
+
+
+## The indicators' flashing: the side the controller asks for, else the one the car turns
+## to at a crawl (held a moment after), all four once it's stuck on its roof.
+func _flash_indicators(dt: float) -> void:
+	if absf(speed) < INDICATE_SPEED and absf(speed) > 0.5 and absf(steer) > INDICATE_STEER:
+		_indicate_auto = 1 if steer > 0.0 else -1
+		_indicate_hold = INDICATE_HOLD
+	else:
+		_indicate_hold -= dt
+		if _indicate_hold <= 0.0:
+			_indicate_auto = 0
+	var side := indicate if indicate != 0 else 2 if is_stuck_upside_down() else _indicate_auto
+	if side != _indicator_shown:
+		_indicator_shown = side
+		_indicator_t = 0.0
+	_indicator_t += dt
+	var lit := side != 0 and fmod(_indicator_t, INDICATOR_CYCLE) < INDICATOR_CYCLE * 0.5
+	for sg in _signals:
+		sg[0].visible = lit and (side == 2 or side == sg[1])
+	_set_lens("indicator_left", 1.0 if lit and side in [2, -1] else 0.0)
+	_set_lens("indicator_right", 1.0 if lit and side in [2, 1] else 0.0)
 
 
 func is_stuck_upside_down() -> bool:
@@ -1546,12 +2426,37 @@ func _process(dt: float) -> void:
 			sl[0].visible = lit.has(sl[1])
 		for w in _wigwags:
 			w[0].visible = _flash_lit(w[1], _siren_t)
-	if _dash and _dash.visible:
+	if _dash and _dash.visible or _cabin_on:
 		_update_dash()
+		if _rear_mirror:
+			_rear_mirror.visible = rear_mirror_wanted
+	if not _hood_top.is_empty():
+		_fold_top(dt)
+	var popup_goal := 1.0 if headlights_on else 0.0
+	if _popup_t != popup_goal and not _popups.is_empty():
+		_popup_t = move_toward(_popup_t, popup_goal, dt / POPUP_TIME)
+		_pose_popups()
+		if _popup_t == popup_goal or not headlights_on:
+			_show_lamps()
 	if not _spoiler_up.is_empty():
-		var v := absf(speed)
+		var v := 99.0 if spoiler_raise else absf(speed)
 		if v > SPOILER_UP and not _spoiler_raised or v < SPOILER_DOWN and _spoiler_raised:
-			_set_spoiler(not _spoiler_raised)
+			_spoiler_raised = not _spoiler_raised
+		var goal := 1.0 if _spoiler_raised else 0.0
+		if _spoiler_t != goal:
+			_spoiler_t = move_toward(_spoiler_t, goal, dt / SPOILER_TIME)
+			_pose_spoiler()
+	if not _wipers.is_empty():
+		_wipe(dt)
+	if not (_lids.is_empty() and _windows.is_empty()):
+		_move_openings(dt)
+	_aim_glints(get_tree())
+	if not _signals.is_empty():
+		_flash_indicators(dt)
+	var fogs := headlights_on and precipitation > 0.05
+	if not _fog_glows.is_empty() and _fog_glows[0].visible != fogs:
+		for g in _fog_glows:
+			g.visible = fogs
 	# The driver turns his wheel as far as the in-car view's.
 	if not (_steer_mats.is_empty() and _steer_shapes.is_empty()) and wheel_turn() != _steer_shown:
 		_steer_shown = wheel_turn()
@@ -1563,30 +2468,49 @@ func _process(dt: float) -> void:
 	if far or freeze or resting:
 		return
 	# The body leans back under power, dips under braking and rolls out of a bend [45].
-	var lean := Vector2(-_acc.y, _acc.x) * pitch_roll
 	if body_sway:
-		# On its springs: a softer-damped car [46] wallows more before it settles.
-		var target := (lean * SWAY_GAIN).limit_length(SWAY_MAX)
-		var omega := TAU * SWAY_HZ
-		var zeta := SWAY_DAMPING * lerpf(1.2, 0.8, clampf(bumpiness, 0.0, 1.0))
-		var h := minf(dt, 1.0 / 30.0)
-		_tilt_vel += ((target - _tilt) * omega * omega - _tilt_vel * 2.0 * zeta * omega) * h
-		_tilt += _tilt_vel * h
-		_tilt = _tilt.limit_length(SWAY_MAX * 1.2)
+		# The springs do that already (the car's own lag and wallow with them); [45] scales
+		# how far this body goes on them. Read off the wheels, so it's the body against its
+		# wheels whatever the camber, and nothing while a wheel is off the ground.
+		var goal := Vector2.ZERO
+		if grounded_wheels == 4:
+			var c: Array[float] = [_wheels[0].compression, _wheels[1].compression, _wheels[2].compression, _wheels[3].compression]
+			var track := maxf(absf(_wheels[0].center.x - _wheels[1].center.x), 1.0)
+			var base := maxf(_wheels[0].center.z - _wheels[2].center.z, 1.0)
+			var springs := Vector2((c[0] + c[1] - c[2] - c[3]) * 0.5 / base, (c[1] + c[3] - c[0] - c[2]) * 0.5 / track)
+			goal = (springs * (clampf(pitch_roll, 0.3, 1.5) - 1.0)).limit_length(SWAY_MAX)
+		_tilt = _tilt.lerp(goal, 1.0 - exp(-SWAY_SMOOTH * dt))
 	else:
-		_tilt = lean * 0.005
-		_tilt_vel = Vector2.ZERO
+		_tilt = Vector2(-_acc.y, _acc.x) * pitch_roll * 0.005
+	# The models leave the tyres only a little room in their arches, less than the springs
+	# travel with a hard corner's load or the downforce on them: where a wheel would rise past
+	# its arch, the body rides up on it instead (a plane through the corners: heave, pitch and
+	# roll), as on a bump stop; what's left the tyre takes by dipping into the road.
+	var over: Array[float] = []
+	for w in _wheels:
+		var dy: float = _tilt.y * w.center.x - _tilt.x * w.center.z
+		over.append(maxf(w.compression - w.lift_max - dy, 0.0))
+	var ride := Vector3.ZERO
+	if over.max() > 0.0:
+		var track := maxf(absf(_wheels[0].center.x - _wheels[1].center.x), 1.0)
+		var base := maxf(_wheels[0].center.z - _wheels[2].center.z, 1.0)
+		ride = Vector3(-(over[0] + over[1] - over[2] - over[3]) * 0.5 / base,
+				(over[0] + over[2] - over[1] - over[3]) * 0.5 / track,
+				minf((over[0] + over[1] + over[2] + over[3]) * 0.25, 0.08))
+	_ride = _ride.lerp(ride, 1.0 - exp(-30.0 * dt))
 	# Leaning about the roll centre at axle height, so the roof swings out rather than the
 	# sills digging in; it's the identity at rest, which keeps the parts car-local (CarDamage).
-	var tilt_basis := Basis.from_euler(Vector3(_tilt.x, 0.0, _tilt.y))
-	_body_tilt.transform = Transform3D(tilt_basis, _tilt_pivot - tilt_basis * _tilt_pivot)
+	var tilt_basis := Basis.from_euler(Vector3(_tilt.x + _ride.x, 0.0, _tilt.y + _ride.y))
+	_body_tilt.transform = Transform3D(tilt_basis, _tilt_pivot - tilt_basis * _tilt_pivot + Vector3(0, _ride.z, 0))
 	for w in _wheels:
 		if not w.has("visual"):
 			continue
 		# Wheel centre sits `compression` above its fully-extended position, but never
-		# further up than the arch allows: past that (a hard landing) the tyre dips into the
-		# road rather than showing through the bodywork.
-		var y: float = w.center.y + minf(w.compression, w.lift_max)
+		# further up than the arch allows, where the body's lean has put it: past that (a hard
+		# landing) the tyre dips into the road rather than showing through the bodywork.
+		var arch: Vector3 = w.center + Vector3(0, w.radius, 0) - _tilt_pivot
+		var lift: float = w.lift_max + (tilt_basis * arch).y - arch.y + _ride.z
+		var y: float = w.center.y + minf(w.compression, lift)
 		w.visual.position.y = lerpf(w.visual.position.y, y, 1.0 - exp(-55.0 * dt))
 		w.visual.rotation.y = steer_angle if w.front else 0.0
 		w.spin_node.rotation.x = fmod(w.spin, TAU)

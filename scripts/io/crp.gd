@@ -165,7 +165,7 @@ func colours(e: Entry) -> PackedColorArray:
 ## corner, already offset into the level's arrays)}. Its info rows say where in the
 ## level's vertex, uv and colour arrays this part's slice starts (in bytes); its index rows
 ## where its per-corner byte indices start among the part's own.
-func part(e: Entry) -> Dictionary:
+func part(e: Entry, sequential := false) -> Dictionary:
 	var d := data
 	var o := e.offset
 	var p := {"trans": d.decode_u16(o + 2), "material": d.decode_s16(o + 4), "count": e.count,
@@ -190,6 +190,16 @@ func part(e: Entry) -> Dictionary:
 		rows[d.decode_u16(at + 2)] = d.decode_s32(at + 4)
 		at += 8
 	var indices_at := at
+	if sequential and n_index == 0 and base.has(INFO_VERTEX):
+		# No index rows: its corners are the vertices (and UVs) in order (the cars' dial
+		# needles; also much of the tracks' water, animated props and people, not drawn yet).
+		p.vertex.resize(e.count)
+		p.uv.resize(e.count if base.has(INFO_UV) else 0)
+		for k in e.count:
+			p.vertex[k] = k + base[INFO_VERTEX]
+			if base.has(INFO_UV):
+				p.uv[k] = k + base[INFO_UV]
+		return p
 	if not rows.has(INDEX_VERTEX) or indices_at + n_index * e.count > d.size():
 		return p
 	var vb: int = base.get(INFO_VERTEX, 0)

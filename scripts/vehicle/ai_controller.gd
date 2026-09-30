@@ -33,7 +33,8 @@ var speed_factor := 1.0
 var basis: Car = null
 var target: Car = null       # COP: who to chase
 var chasing := false
-var chase_slot := 0          # COP: 0 rams / PITs from behind, 1 gets ahead and blocks
+var chase_slot := 0          # COP: its place round the target (CHASE_SPOTS), set by the race
+var aggression := 0          # COP: 0..2, how close it sits and how long it rams (the race's heat)
 var home := -1               # COP: node it parks at; -1 patrols the track instead
 var home_lane := 0.0         # COP: lateral offset of its parking spot
 var gap := Vector3.INF       # COP: the way through a roadblock, while one is up
@@ -57,6 +58,36 @@ enum Yield { NONE, IGNORE, STOP, PULL_OVER }
 var _yield := Yield.NONE     # TRAFFIC: what it's doing about a cruiser with its siren on
 var _yield_v := 0.0          # speed it's slowing through while giving way
 var _cop_check := 0.0
+# COP chasing (AIState_Chase): how it goes about it this tick, where the target is on the road,
+# how long it has held its place, and the ram ("murder mode") it's on and its cool-down.
+enum Chase { CLOSE, FAR, APPROACH, WAIT }
+var _mode := Chase.CLOSE
+var _t_node := -1
+var _t_ahead := 0.0          # m further round the lap the target is than the cop
+var _t_dir := 1              # which way round the lap the target is going
+var _in_slot_t := 0.0
+var _ram_t := 0.0
+var _ram_cool := 0.0
+var _passing := false        # getting round the target to a place in front
+
+## COP: each chaser's place round its target (m to its right, m ahead of it), by aggression
+## (AIH_Cop_chasePositions): the first dead ahead to block, one ahead on the left, one
+## alongside on the right, the rest behind (the original stacks those three on one spot;
+## here they're staggered).
+const CHASE_SPOTS := [
+	[Vector2(0, 8), Vector2(-6, 8), Vector2(6, 0), Vector2(0, -10), Vector2(-3, -16), Vector2(3, -16)],
+	[Vector2(0, 5), Vector2(-4, 5), Vector2(4, 5), Vector2(0, -5), Vector2(-3, -11), Vector2(3, -11)],
+]
+## By aggression (AIHigh_Cop_AggressionData): s in its place before it rams, how near
+## (m across, m along) it must be, how long the ram lasts, and the brake check in front.
+const RAM_HOLD := [0.6, 0.45, 0.25]
+const RAM_LAT := [10.0, 14.0, 18.0]
+const RAM_LONG := [13.0, 15.0, 18.0]
+const RAM_TIME := [5.0, 7.5, 11.0]
+const RAM_COOL := 2.0         # s back in its place before the next ram
+const BRAKE_CHECK := [0.79, 0.73, 0.65]
+const CUT_OFF_RATE := 0.25    # chance a second of swerving across the nose of a car just behind
+const TARGET_SLOW := 6.7      # m/s: a target slower than this is stopped for, not chased
 var _honk_t := 0.0           # s the horn has left to sound
 var _lane_change_cool := 0.0
 var others: Array = []       # cars to avoid (set by the race)
@@ -77,6 +108,7 @@ var _limit_chase := false
 
 func _ready() -> void:
 	car = get_parent() as Car
+	car.collision_mask |= Nfs3TrackBuilder.AI_WALL_LAYER
 	process_physics_priority = -10
 	_limit_ticks = randi() % LIMIT_TICKS
 	_ghost_check = randf() * 0.25
@@ -98,10 +130,7 @@ func _physics_process(dt: float) -> void:
 	var chase := role == Role.COP and chasing and is_instance_valid(target)
 	var home_d := 0.0
 	if chase:
-		# Follow the road whichever way the target is going round it.
-		var along := target.linear_velocity.dot(path.forward(node))
-		if absf(along) > 3.0:
-			reverse_dir = along < 0.0
+		_chase_mode()
 	elif role == Role.COP:
 		home_d = _head_home()
 	var dir := -1 if reverse_dir else 1
@@ -158,7 +187,7 @@ func _physics_process(dt: float) -> void:
 	var desired := _limit
 	car.power_scale = 1.0
 	if chase:
-		var plan := _chase(aim, desired)
+		var plan := _chase(aim, desired, dt)
 		aim = plan[0]
 		desired = plan[1]
 	elif role == Role.TRAFFIC:
@@ -192,7 +221,10 @@ func _physics_process(dt: float) -> void:
 	if role == Role.COP and local.z < 0.0 and desired > 0.0:
 		# Aim behind (turning back for its post, or after a target that doubled back): a
 		# three-point turn - slow, full lock, and backing up with the wheels the other way.
-		desired = minf(desired, 6.0)
+		# Well astern: near enough stop, so it backs up, rather than lap a wide circle round.
+		desired = minf(desired, 6.0 if -local.z < absf(local.x) else 2.0)
+		# Full lock the way round that's nearer; dead astern, the angle to it reads as none.
+		car.steer = -signf(local.x) if absf(local.x) > 0.5 else (signf(car.steer) if car.steer != 0.0 else 1.0)
 		if absf(fwd_speed) < 2.5 and _reverse_t <= 0.0:
 			_reverse_t = 1.1
 
@@ -350,6 +382,9 @@ func _keep_lane(aim_node: int, dir: int, dt: float) -> void:
 	if _yield == Yield.PULL_OVER:
 		want = path.lane_offset(aim_node, side, 99) + side * 1.8
 	lane = move_toward(lane, want, (2.5 if _yield == Yield.PULL_OVER else 1.2) * dt)
+	# Signalling while it eases across or pulls over (the path's right is its own going `dir`).
+	var across := (want - lane) * dir
+	car.indicate = 0 if absf(across) < 0.4 else 1 if across > 0.0 else -1
 
 
 ## TRAFFIC: gives way to the nearest cruiser with its siren on (AIHigh_Traffic::CopCheck):
@@ -571,44 +606,207 @@ func _head_home() -> float:
 	return d
 
 
-## COP chasing: [aim point, desired speed]. Far off it closes in along the road; near, the
-## rammer (slot 0) hits the target from behind or turns its rear out (a PIT) when alongside,
-## and the blocker (slot 1) overtakes and sits on the target's line, braking.
-func _chase(aim: Vector3, limit: float) -> Array:
+## COP chasing: how to go about it (AIState_Chase::Execute), and which way round the road
+## that takes it. A target that has (nearly) stopped, or is coming head-on, is met and
+## stopped for (APPROACH); one well ahead going away is run down along the road (FAR);
+## a cop well up the road going the same way lets it come to it (WAIT); near and going the
+## same way, it takes its place round the target (CLOSE).
+func _chase_mode() -> void:
+	_t_node = path.closest(target.global_position, _t_node if _t_node >= 0 else node)
+	if path.points[_t_node].distance_squared_to(target.global_position) > 30.0 * 30.0:
+		# A new target, or put back somewhere else: the local search only finds the road near the hint.
+		_t_node = path.closest(target.global_position)
+	var L := path.length
+	# m further round the lap the target is than the cop.
+	var ahead := fposmod(_along(target.global_position, _t_node) - _along(car.global_position, node) + L * 0.5, L) - L * 0.5
+	var t_along := target.linear_velocity.dot(path.forward(_t_node))
+	var t_dir := -1 if t_along < 0.0 else 1
+	_t_ahead = ahead
+	_t_dir = t_dir
+	var my_dir := -1 if car.forward_dir().dot(path.forward(node)) < 0.0 else 1
+	var dist := car.global_position.distance_to(target.global_position)
+	var towards := ahead < 0.0   # reverse_dir that heads for the target
+	# How far up the road (the way the target is going) the cop is from it.
+	var up_road := -ahead * t_dir
+	if target.linear_velocity.length() < TARGET_SLOW:
+		_mode = Chase.APPROACH
+		if absf(ahead) > 4.0:
+			reverse_dir = towards
+	elif up_road > 8.0 and my_dir != t_dir:
+		# Coming at it head-on: into its path, slowing to a stop there.
+		_mode = Chase.APPROACH
+		reverse_dir = towards
+	elif up_road > 8.0 and dist > 70.0:
+		_mode = Chase.WAIT
+		reverse_dir = t_dir < 0
+	elif dist > 70.0:
+		_mode = Chase.FAR
+		reverse_dir = towards
+	else:
+		_mode = Chase.CLOSE
+		reverse_dir = t_dir < 0
+
+
+## COP chasing: [aim point, desired speed]. See _chase_mode for the modes; in CLOSE it drives
+## for its place round the target (AIState_Chase::CloseTargeting), and once it has held it
+## a moment it rams (murder mode): it goes for the target's own spot from wherever it is -
+## into its back from behind, a side-swipe from beside, a brake check from in front. Now
+## and then one just ahead of the target swerves across its nose (a cut-off).
+func _chase(aim: Vector3, limit: float, dt: float) -> Array:
 	var to_t := target.global_position - car.global_position
 	var dist := to_t.length()
 	var tv := target.linear_velocity
 	var t_speed := tv.length()
-	var t_fwd := target.forward_dir()
-	var t_left := target.global_basis.x
-	# Catch-up: a cruiser that's fallen behind gets a boost, as in the original.
+	var aggr := clampi(aggression, 0, 2)
+	_passing = false
+	# Catch-up: a cruiser that's fallen behind gets a boost, as in the original's nitrous.
 	car.power_scale = 1.35 if dist > 80.0 else 1.12
-	if dist >= 70.0:
-		return [aim, minf(limit, t_speed + 15.0)]
+	_ram_cool -= dt
+	if _ram_t > 0.0:
+		_ram_t -= dt
+		if _ram_t <= 0.0:
+			_ram_cool = RAM_COOL
+	if _mode != Chase.CLOSE:
+		_ram_t = 0.0
+		_in_slot_t = 0.0
 	var cap := maxf(limit * 1.1, 12.0)
 	if gap != Vector3.INF:
 		# Through the roadblock's gap rather than into the parked cruisers.
 		var to_gap := gap - car.global_position
 		if to_gap.dot(car.forward_dir()) > 2.0 and to_gap.length() < 90.0 and to_gap.length() < dist + 10.0:
 			return [gap, minf(cap, 25.0)]
-	var ahead := -to_t.dot(t_fwd)   # how far the cop is in front of its target
-	var beside := -to_t.dot(t_left)  # + on the target's left
-	if chase_slot == 1:
-		if ahead > 8.0:
-			# In front: sit on the target's line and brake-check it.
-			var tn := path.closest(target.global_position, node)
-			var t_lat := path.lateral(target.global_position, tn)
-			var an := _aim_node(node)
-			var line: Vector3 = path.points[an] + path.rights[an] * t_lat
-			return [line, minf(cap, maxf(t_speed - 4.0, 6.0))]
-		# Pass it, aiming well up the road from it.
-		return [target.global_position + t_fwd * 25.0 + tv * 0.3, minf(cap, t_speed + 14.0)]
-	if dist < 14.0 and ahead > -7.0 and ahead < 1.0 and absf(beside) > 1.2:
-		# Alongside: steer into its rear quarter to spin it round.
-		var pit := target.global_position - t_fwd * 1.6 + t_left * signf(beside) * 0.4
-		return [pit, minf(cap, t_speed + 6.0)]
-	var lead := tv * clampf(dist / 40.0, 0.0, 1.2)
-	return [target.global_position + lead, minf(cap, t_speed + (12.0 if dist > 15.0 else 6.0))]
+	var t_lat := path.lateral(target.global_position, _t_node)
+	match _mode:
+		Chase.FAR:
+			return [aim, minf(limit, t_speed + 15.0)]
+		Chase.WAIT:
+			# A rolling block: on its line, easing off so it closes up.
+			return [_road_aim(t_lat, 1.5), minf(limit, t_speed * 0.6)]
+		Chase.APPROACH:
+			return [target.global_position if dist < 20.0 else _road_aim(t_lat, 1.5), minf(limit, _approach_speed(dist, aggr))]
+	return _close(cap, dt, aggr)
+
+
+## COP: CLOSE chasing (see _chase).
+func _close(cap: float, dt: float, aggr: int) -> Array:
+	var t_speed := target.linear_velocity.length()
+	var ext := _extent(target)
+	# Measured along and across the road, which on a bend the target's own heading isn't.
+	var t_lat := path.lateral(target.global_position, _t_node)
+	var long := -_t_ahead * _t_dir   # m the cop is ahead of the target
+	var lat := (path.lateral(car.global_position, node) - t_lat) * _t_dir   # m to its right
+	var spot: Vector2 = CHASE_SPOTS[mini(aggr, 1)][clampi(chase_slot, 0, 5)]
+	if _ram_t > 0.0:
+		spot = Vector2.ZERO
+	# Where the cop is round the target, and where its place is: -1 / 0 / +1 across (left of,
+	# level with, right of it) and along (behind, level, ahead).
+	# (A metre's slack across: the target weaves about its line.)
+	var lat_pos := -1 if lat < -ext.x - 1.0 else (1 if lat > ext.x + 1.0 else 0)
+	var long_pos := -1 if long < 2.0 - ext.y else (1 if long > ext.y + 2.0 else 0)
+	var big_long := -1 if long < -(ext.y + 2.0) else (1 if long > ext.y + 2.0 else 0)
+	var lat_want := -1 if spot.x < -ext.x else (1 if spot.x > ext.x else 0)
+	var long_want := -1 if spot.y < -ext.y else (1 if spot.y > ext.y else 0)
+
+	# Rams: once it has held its place a moment, or (now and then) just ahead and to one side.
+	if _ram_t <= 0.0:
+		_in_slot_t = _in_slot_t + dt if lat_pos == lat_want and long_pos == long_want else 0.0
+		if _ram_cool <= 0.0 and _in_slot_t > RAM_HOLD[aggr] and absf(lat) < RAM_LAT[aggr] and absf(long) < RAM_LONG[aggr]:
+			_ram_t = RAM_TIME[aggr]
+		elif long > 2.0 * ext.y + 2.0 and long < 12.0 and absf(lat) > ext.x + 1.0 and absf(lat) <= 4.0 \
+				and randf() < CUT_OFF_RATE * dt:
+			_ram_t = 1.0
+		if _ram_t > 0.0:
+			_in_slot_t = 0.0
+			spot = Vector2.ZERO
+			lat_want = 0
+			long_want = 0
+	if _ram_t > 0.0:
+		car.power_scale = 1.3
+
+	# Across: to its place, round the target to get in front of it, or holding its line.
+	var side := 1.0 if (signf(spot.x) if spot.x != 0.0 else signf(lat)) >= 0.0 else -1.0
+	var want_lat := spot.x
+	var hold_line := false
+	var long_force := 0
+	if big_long * long_want == -1:
+		# Behind it with its place ahead: pass on its place's side.
+		want_lat = side * (ext.x + 3.5)
+		_passing = true
+	elif lat_pos * lat_want == -1 and big_long == 0:
+		# Alongside on the wrong side: drop back to cross behind it.
+		long_force = -1
+		hold_line = true
+	elif lat_want == 0 and big_long == 0 and _ram_t <= 0.0:
+		# Level with it and bound for behind or in front: not into its side.
+		hold_line = true
+	elif long_want == 1 and big_long == 1 and lat_pos == 0 and long < 20.0:
+		long_force = -2
+
+	# Along: faster to get to its place, slower when past it, a brake check in front.
+	var v := t_speed
+	var short := spot.y - long   # m its place is ahead of it
+	if long_pos < long_want:
+		v = t_speed + clampf(short * 0.6, 4.0, t_speed * 0.4 + 6.0)
+	elif long_pos > long_want or long_force == -1 or long > 20.0:
+		v = t_speed * _ahead_slowdown(absf(long))
+	elif long_force == -2:
+		v = t_speed * BRAKE_CHECK[aggr]
+	else:
+		v = t_speed + clampf(short * 0.5, -4.0, 4.0)
+	v = minf(cap, maxf(v, 5.0))
+
+	var an: int = _aim_node(node)
+	if _ram_t > 0.0 or absf(long) < 25.0:
+		# Close by it, aim nearer so it gets onto its line (harder at it when ramming).
+		var look := int(clampf(2.0 + car.linear_velocity.length() * (0.08 if _ram_t > 0.0 else 0.11), 2.0, 9.0))
+		an = path.idx(node + look * (-1 if reverse_dir else 1))
+	var off := path.lateral(car.global_position, node)
+	if not hold_line:
+		off = t_lat + want_lat * _t_dir
+	var lo := -maxf(path.left_width[an] - 1.5, 0.0)
+	var hi := maxf(path.right_width[an] - 1.5, 0.0)
+	return [path.points[an] + path.rights[an] * clampf(off, lo, hi), v]
+
+
+## COP: a point on the road ahead (the aim node) `off` m right of the centre line, kept
+## `margin` m inside the walls.
+func _road_aim(off: float, margin: float) -> Vector3:
+	var an := _aim_node(node)
+	var lo := -maxf(path.left_width[an] - margin, 0.0)
+	var hi := maxf(path.right_width[an] - margin, 0.0)
+	return path.points[an] + path.rights[an] * clampf(off, lo, hi)
+
+
+## COP: the most it drives at `dist` m from a target it's meeting or stopping for
+## (AIState_Chase::ApproachTargeting): easing down to a stop 6 m short of it.
+static func _approach_speed(dist: float, aggr: int) -> float:
+	if dist > 150.0:
+		return 80.0 if aggr == 2 else 60.0
+	if dist > 100.0:
+		return 70.0 if aggr == 2 else 50.0
+	if dist > 50.0:
+		return 50.0 if aggr == 2 else 40.0
+	if dist > 25.0:
+		return 40.0 if aggr == 2 else 35.0
+	if dist > 10.0:
+		return [20.0, 10.0, 14.0][aggr]
+	if dist > 6.0:
+		return 6.0 if aggr == 2 else 3.0
+	return 0.0
+
+
+## COP: share of the target's speed to drop to when past its place in front
+## (CalculateCloseTargettingAheadSlowDownFactor), more the further ahead it is.
+static func _ahead_slowdown(ahead: float) -> float:
+	if ahead < 30.0:
+		return 0.95
+	if ahead < 100.0:
+		return 0.8
+	if ahead < 150.0:
+		return 0.75
+	if ahead < 200.0:
+		return 0.7
+	return 0.6
 
 
 ## A node a second or so up the road from `n`, like the normal aim point.
@@ -618,15 +816,17 @@ func _aim_node(n: int) -> int:
 
 
 ## Sideways shift (m, + to the car's left) of the aim point around the nearest car in the way.
-## The chase target is never in the way: hitting it is the point.
+## The chase target is in the way only while the cop is getting round it to its place;
+## otherwise the cop keeps its own distance (and hitting it is often the point).
 func _swerve() -> float:
 	var fwd := car.forward_dir()
 	var left := car.global_basis.x
 	var reach := clampf(absf(car.speed) * 1.2, 10.0, 35.0)
 	var nearest := reach
 	var shift := 0.0
+	var hunting := chasing and not _passing
 	for o in others:
-		if o == car or not is_instance_valid(o) or (chasing and o == target):
+		if o == car or not is_instance_valid(o) or (hunting and o == target):
 			continue
 		var rel: Vector3 = o.global_position - car.global_position
 		var ahead := rel.dot(fwd)

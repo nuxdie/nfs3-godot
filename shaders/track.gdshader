@@ -1,7 +1,7 @@
 shader_type spatial;
 // NFS3 scenery carries pre-baked lighting in its vertex colours, so draw it
 // unshaded: texture * vertex shade. One Texture2DArray per track; UV2.x picks the layer.
-render_mode unshaded, cull_disabled, depth_draw_opaque;
+render_mode unshaded, cull_disabled, depth_draw_opaque, alpha_to_coverage_and_one;
 
 uniform sampler2DArray textures : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 // The same array without wrapping, for UVs inside the texture: filtering at a repeat-wrapped
@@ -214,7 +214,10 @@ void fragment() {
 		ALBEDO = mix(ALBEDO * (1.0 - (0.3 + 0.2 * p) * wet), refl.rgb, refl.a * wet * mix(0.3, 0.9, p));
 	}
 	// Alpha-tested foliage and fences, with alpha-to-coverage under MSAA so the cut-out
-	// edges of the low-res textures aren't stair-stepped.
+	// edges of the low-res textures aren't stair-stepped. That puts the scenery in the
+	// transparent pass, which blends: `alpha_to_coverage_and_one` makes each covered sample
+	// opaque, or a tree's soft rim, blended over the sky and then written to depth, would
+	// hide a tree drawn behind it later and leave a pale outline.
 	ALPHA = c.a;
 	ALPHA_SCISSOR_THRESHOLD = 0.5;
 	ALPHA_ANTIALIASING_EDGE = 0.25;

@@ -6,6 +6,7 @@ class_name Nfs5TrackBuilder
 ## flagged ground (verges, fields, cliffs), but for the ground's steep faces (the walls of
 ## buildings, booths, rock faces), which are solid scenery; what isn't ground is scenery,
 ## solid where it's opaque (rails, posts) and passable where it's a cut-out (foliage).
+## The walls leave the side roads (Nfs5Track.side_roads) open and fence them in too.
 
 ## Its baked colours are half-bright: the game lights them at twice their value.
 const BRIGHTNESS := 2.0
@@ -15,6 +16,11 @@ const SURFACE_GROUND := 14
 ## Ground triangles steeper than this (normal's y) are walls: the sides of buildings, gate
 ## booths, retaining walls, rock faces.
 const STEEP := 0.5
+## _inside: the corridors' lookup cell (m), and how far along a slice (either way) and
+## above or below it a point counts as beside it.
+const CORRIDOR_CELL := 16.0
+const CORRIDOR_ALONG := 4.0
+const CORRIDOR_RISE := 4.0
 ## Opaque scenery at least this big (m across, and high) keeps the chase camera out.
 const CAMERA_BLOCK_SIZE := Vector2(6.0, 2.5)
 
@@ -65,8 +71,103 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 	var path := Nfs3TrackBuilder._make_path(t)
 	if not t.closed and t.sprint.size() == 4:
 		path.set_open(t.sprint)
-	root.add_child(Nfs3TrackBuilder.make_walls(path))
+	if t.fences.size() == 2:
+		path.wall_left = t.fences[0]
+		path.wall_right = t.fences[1]
+	for side_road: Array in t.side_roads:
+		for vr: Nfs3Track.VRoad in side_road:
+			path.add_side_slice(vr.pos, vr.right.normalized(), vr.left_wall, vr.right_wall)
+	var corridors := _corridors(t)
+	var gaps := _gaps(t, corridors)
+	var walls := Nfs3TrackBuilder.make_walls(path, gaps)
+	_side_walls(t, corridors, walls)
+	root.add_child(walls)
+	# The gaps closed for the AI only (its cars don't take the shortcuts).
+	for side in 2:
+		for i in gaps[side].size():
+			gaps[side][i] = 1 - gaps[side][i]
+	var ai_walls := Nfs3TrackBuilder.make_walls(path, gaps)
+	ai_walls.name = "AiWalls"
+	ai_walls.collision_layer = Nfs3TrackBuilder.AI_WALL_LAYER
+	root.add_child(ai_walls)
 	return path
+
+
+## Every road's slices by XZ cell (CORRIDOR_CELL): [road (-1 the lap, else a side road's
+## index), slice, its walls left and right (the lap's fences)], for _inside.
+static func _corridors(t: Nfs5Track) -> Dictionary:
+	var grid := {}
+	var roads := [t.vroad] + t.side_roads
+	for r in roads.size():
+		for k in roads[r].size():
+			var vr: Nfs3Track.VRoad = roads[r][k]
+			var lw: float = t.fences[0][k] if r == 0 else vr.left_wall
+			var rw: float = t.fences[1][k] if r == 0 else vr.right_wall
+			grid.get_or_add(Vector2i(floori(vr.pos.x / CORRIDOR_CELL), floori(vr.pos.z / CORRIDOR_CELL)), []).append([r - 1, vr, lw, rw])
+	return grid
+
+
+## Whether `p` is on a road other than `own` (-1 the lap, else a side road's index): within
+## its walls, beside one of its slices, at about its height.
+static func _inside(corridors: Dictionary, p: Vector3, own: int) -> bool:
+	var c := Vector2i(floori(p.x / CORRIDOR_CELL), floori(p.z / CORRIDOR_CELL))
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for e: Array in corridors.get(c + Vector2i(dx, dz), []):
+				if e[0] == own:
+					continue
+				var vr: Nfs3Track.VRoad = e[1]
+				var d := p - vr.pos
+				var lat := d.dot(vr.right)
+				if absf(d.dot(vr.forward)) <= CORRIDOR_ALONG and absf(d.y) < CORRIDOR_RISE \
+						and lat > -e[2] - 0.5 and lat < e[3] + 0.5:
+					return true
+	return false
+
+
+## The lap's walls left out where they cross a side road (make_walls' `open`).
+static func _gaps(t: Nfs5Track, corridors: Dictionary) -> Array:
+	var n := t.vroad.size()
+	var out := [PackedByteArray(), PackedByteArray()]
+	for side in 2:
+		out[side].resize(n)
+		for i in n:
+			var a: Nfs3Track.VRoad = t.vroad[i]
+			var b: Nfs3Track.VRoad = t.vroad[(i + 1) % n]
+			var sg := 1.0 if side == 1 else -1.0
+			var fa := a.pos + a.right * t.fences[side][i] * sg
+			var fb := b.pos + b.right * t.fences[side][(i + 1) % n] * sg
+			out[side][i] = int(_inside(corridors, (fa + fb) * 0.5, -1))
+	return out
+
+
+## Each side road's own walls, into `body`, but where they'd stand across the lap's road or
+## another side road's.
+static func _side_walls(t: Nfs5Track, corridors: Dictionary, body: StaticBody3D) -> void:
+	var faces := PackedVector3Array()
+	for r in t.side_roads.size():
+		var road: Array = t.side_roads[r]
+		for side in 2:
+			var sg := 1.0 if side == 1 else -1.0
+			for k in road.size() - 1:
+				var a: Nfs3Track.VRoad = road[k]
+				var b: Nfs3Track.VRoad = road[k + 1]
+				var fa := a.pos + a.right * (a.right_wall if side == 1 else a.left_wall) * sg
+				var fb := b.pos + b.right * (b.right_wall if side == 1 else b.left_wall) * sg
+				if _inside(corridors, (fa + fb) * 0.5, r):
+					continue
+				var down := Vector3.DOWN * Nfs3TrackBuilder.WALL_DEPTH
+				var up := Vector3.UP * Nfs3TrackBuilder.WALL_HEIGHT
+				faces.append_array([fa + down, fb + down, fb + up, fa + down, fb + up, fa + up])
+	if faces.is_empty():
+		return
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = true
+	var cs := CollisionShape3D.new()
+	cs.name = "SideRoads"
+	cs.shape = shape
+	body.add_child(cs)
 
 
 static func _body(body_name: String, layer: int) -> StaticBody3D:

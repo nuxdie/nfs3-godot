@@ -43,12 +43,15 @@ static func parse(d: PackedByteArray) -> Fce4:
 
 ## The part's mesh, vertices relative to its centre, with one surface per texture page in
 ## `materials` (index = page; triangles on pages past the end use the last one), or a single
-## surface without materials when `materials` is empty.
-func mesh(part: Dictionary, materials: Array = []) -> ArrayMesh:
+## surface without materials when `materials` is empty. `pick` (a triangle's flags -> bool),
+## where given, keeps only the triangles it passes.
+func mesh(part: Dictionary, materials: Array = [], pick := Callable()) -> ArrayMesh:
 	var d := _d
 	var by_page := {}
 	for ti in part.nt:
 		var q: int = HEADER_END + _tri_off + (part.first_t + ti) * TRI_SIZE
+		if pick.is_valid() and not pick.call(d.decode_u32(q + 28)):
+			continue
 		var page := 0 if materials.is_empty() else mini(d.decode_u32(q), materials.size() - 1)
 		if not by_page.has(page):
 			var st := SurfaceTool.new()
@@ -123,6 +126,14 @@ static func art_materials(art: PackedByteArray) -> Array:
 		m.roughness = 0.9
 		mats.append(m)
 	return mats
+
+
+## The part's triangles' flags, in order.
+func tri_flags(part: Dictionary) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for ti in part.nt:
+		out.append(_d.decode_u32(HEADER_END + _tri_off + (part.first_t + ti) * TRI_SIZE + 28))
+	return out
 
 
 func find(name_part: String) -> Dictionary:

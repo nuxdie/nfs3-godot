@@ -1,6 +1,6 @@
 class_name ConfirmDialog
 extends Control
-## A question before something that can't be undone (quitting, a new career, selling a car):
+## A question before something that can't be undone (a new career, selling a car):
 ## the screen dimmed, a kicker, the question large, a line on what it means, and the two
 ## answers side by side. ←→ (or the pointer) pick, Enter or a click answers, Esc is always
 ## "no". It takes all input while it's up and frees itself when answered.
@@ -15,7 +15,7 @@ var _t := 0.0
 
 
 ## Puts the question over `host` (a full-screen Control); `on_yes` runs on a yes. `yes_first`:
-## the yes has the focus to begin with (quitting: Esc then Enter), else the no does.
+## the yes has the focus to begin with, else the no does.
 static func ask(host: Control, kicker: String, title: String, body: String, yes: String, no: String, on_yes: Callable,
 		yes_first := false) -> ConfirmDialog:
 	var d := ConfirmDialog.new()

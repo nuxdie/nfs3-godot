@@ -18,6 +18,10 @@ const FCE4_BODY_PARTS := [":hb", ":olm", ":orm", ":ot", ":oc", ":od", ":oh", ":o
 ## FCE4 triangle flags: the windows have both of these set (the bits above say which window;
 ## 0x02 and 0x04 are set on some cars' windows and not others, 0x04 on plain body too).
 const FCE4_WINDOW := 0x28
+## dash.fce's side mirrors ("driver mirror", "passenger mirror"): their glass has both of these
+## set (a twin of it, flagged otherwise, sits just behind). The bonus cars' copies flag the
+## same glass 0x01 and drop the twin.
+const DASH_MIRROR_GLASS := 0x0A
 ## ...and from this bit up, which body panels a triangle belongs to (roof, boot, nose, each
 ## side, the bonnet...): what High Stakes bends a panel at a time.
 const FCE4_PANEL_SHIFT := 11
@@ -29,7 +33,11 @@ var texture: Texture2D
 var damage_texture: Texture2D          # Porsche Unleashed: the crumpled paint in the skin's layout, or null
 var body_parts: Array[Dictionary] = []   # {name, mesh, center}; High Stakes: + glass, damaged {pos, normal, panels} (see _parse_fce)
 var wheels: Array[Dictionary] = []       # {name, mesh, center} front-left, front-right, rear-left, rear-right
-var popup_lights: Array[Dictionary] = [] # {name, mesh, center}: pop-up headlamps, raised only while the lights are on
+## Pop-up headlamps, raised: {name, mesh, center}, and how they go down (Car animates them):
+## "sink" m straight down, or turned "fold" radians about X through "hinge" (car space).
+## Without either (NFS3's and High Stakes' cars, whose lids are part of the body) they sink
+## their own height under the lids.
+var popup_lights: Array[Dictionary] = []
 var half_size := Vector3(0.9, 0.6, 2.2)
 var colours: Array[Color] = []
 var lights: Array[Dictionary] = []       # {pos} + the dummy's name decoded, see decode_light()
@@ -43,6 +51,8 @@ var info := {}
 ## upgradable}, or {}.
 var rank := {}
 ## High Stakes' in-car view: {texture, eye, parts: [{name, mesh, center}]} from dash.fce, or {}.
+## A side mirror's part has its glass apart: glass {mesh, point, normal}, part-local, the
+## normal facing the eye.
 var dash := {}
 ## The officer who walks up to a busted car (High Stakes' police cars, cop.fce), or null.
 var officer: Mesh
@@ -114,8 +124,42 @@ func _load_dash(viv: Viv, fce: PackedByteArray) -> void:
 		eye = f.dummies[0].pos
 	var out: Array[Dictionary] = []
 	for p in f.parts:
-		out.append({"name": p.name, "mesh": f.mesh(p), "center": p.center})
+		var part := {"name": p.name, "mesh": f.mesh(p), "center": p.center}
+		if (p.name as String).to_lower().contains("mirror"):
+			_split_mirror_glass(f, p, part, eye)
+		out.append(part)
 	dash = {"texture": tex, "eye": eye, "parts": out}
+
+
+## Takes a dash mirror's glass (see DASH_MIRROR_GLASS) out of `part`'s mesh into part.glass,
+## lifted a hair toward the eye off the twin behind it. Left alone where no small set of
+## triangles is flagged so.
+static func _split_mirror_glass(f: Fce4, p: Dictionary, part: Dictionary, eye: Vector3) -> void:
+	var flags := f.tri_flags(p)
+	var want := DASH_MIRROR_GLASS
+	if not Array(flags).any(func(fl: int) -> bool: return fl & want == want):
+		want = 0x01
+	var n_glass := Array(flags).filter(func(fl: int) -> bool: return fl & want == want).size()
+	if n_glass == 0 or n_glass * 2 > flags.size():
+		return
+	var glass := f.mesh(p, [], func(fl: int) -> bool: return fl & want == want)
+	var faces := glass.get_faces()
+	var normal := Vector3.ZERO
+	var point := Vector3.ZERO
+	var area := 0.0
+	for i in range(0, faces.size(), 3):
+		var c := (faces[i + 1] - faces[i]).cross(faces[i + 2] - faces[i])
+		normal += c
+		point += (faces[i] + faces[i + 1] + faces[i + 2]) / 3.0 * c.length()
+		area += c.length()
+	if area <= 0.0:
+		return
+	point /= area
+	normal = normal.normalized()
+	if normal.dot(eye - (p.center + point)) < 0.0:
+		normal = -normal
+	part.mesh = f.mesh(p, [], func(fl: int) -> bool: return fl & want != want)
+	part.glass = {"mesh": _translated(glass, normal * 0.003), "point": point, "normal": normal}
 
 
 ## The officer, one surface per texture page of cop.art.
@@ -635,7 +679,8 @@ static func _hs_paint_mask(img: Image, fce: PackedByteArray) -> void:
 
 ## Cut-out texels hold a key colour (often pure blue) that texture filtering smears onto
 ## the visible edges. Give them the colour of an opaque neighbour instead (alpha stays 0).
-static func _bleed_cutout(img: Image) -> void:
+## `defringe`: also clean up the green seams of NFS3's skins (see _defringe).
+static func _bleed_cutout(img: Image, defringe := true) -> void:
 	if img.get_format() != Image.FORMAT_RGBA8:
 		img.convert(Image.FORMAT_RGBA8)
 	var w := img.get_width()
@@ -649,7 +694,8 @@ static func _bleed_cutout(img: Image) -> void:
 		if alpha[i] < 20:
 			todo.append(i)
 			px[i * 4 + 3] = 0
-	px = _defringe(px, w, h)
+	if defringe:
+		px = _defringe(px, w, h)
 	# Ring by ring outwards from the visible texels until every cut-out texel has a colour:
 	# the small mip levels average whole blocks, so any key colour left over shows at the edges.
 	while not todo.is_empty():

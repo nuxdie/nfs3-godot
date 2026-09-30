@@ -8,6 +8,11 @@ var rights := PackedVector3Array()   # unit vector pointing to the driver's righ
 var ups := PackedVector3Array()
 var left_width := PackedFloat32Array()  # distance from centre to left wall
 var right_width := PackedFloat32Array()
+## Where the invisible walls stand where that's further out than the road's edges above
+## (which the AI, the grid and respawns keep to): Porsche Unleashed's stand behind the verges.
+## Empty: at the road's edges (see wall_width()).
+var wall_left := PackedFloat32Array()
+var wall_right := PackedFloat32Array()
 var cumulative := PackedFloat32Array()  # distance along the path at each node
 var radius := PackedFloat32Array()      # bend radius around each node (m), for AI speeds
 ## The original game's AI tables, [forward, reverse] (either may be empty): target speed
@@ -38,10 +43,40 @@ var lost_margin := 5.0
 var obstructed := PackedByteArray()
 var clear_bits := PackedInt64Array()
 const SPAN := 20
+## Other roads the walls leave open onto (Porsche Unleashed's shortcuts and side streets):
+## their slices by XZ cell (SIDE_CELL), [position, right, left wall, right wall] each.
+var side_roads := {}
+const SIDE_CELL := 16.0
 
 
 func size() -> int:
 	return points.size()
+
+
+## How far from the centre line the wall on that side (`side` > 0: the right) stands at node `i`.
+func wall_width(i: int, side: float) -> float:
+	if side > 0.0:
+		return wall_right[i] if wall_right.size() == points.size() else right_width[i]
+	return wall_left[i] if wall_left.size() == points.size() else left_width[i]
+
+
+func add_side_slice(pos: Vector3, right: Vector3, left_wall: float, right_wall: float) -> void:
+	side_roads.get_or_add(Vector2i(floori(pos.x / SIDE_CELL), floori(pos.z / SIDE_CELL)), []).append(
+		[pos, right, left_wall, right_wall])
+
+
+## Whether `pos` is on one of the side roads, between its walls near one of its slices.
+func on_side_road(pos: Vector3) -> bool:
+	var c := Vector2i(floori(pos.x / SIDE_CELL), floori(pos.z / SIDE_CELL))
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for e: Array in side_roads.get(c + Vector2i(dx, dz), []):
+				var d: Vector3 = pos - e[0]
+				var lat: float = d.dot(e[1])
+				if absf(d.y) < 6.0 and lat > -e[2] - 1.0 and lat < e[3] + 1.0 \
+						and (d - e[1] * lat).length() < SIDE_CELL * 0.5:
+					return true
+	return false
 
 
 ## Runs the lap the other way round (the "reverse" option): node 0, the start line, stays
@@ -70,6 +105,10 @@ func reverse() -> void:
 	var lw: PackedFloat32Array = order.call(right_width)
 	right_width = order.call(left_width)
 	left_width = lw
+	if wall_left.size() == n:
+		var wl: PackedFloat32Array = order.call(wall_right)
+		wall_right = order.call(wall_left)
+		wall_left = wl
 	if lanes.size() == n:
 		var ln: PackedByteArray = order.call(lanes)
 		for i in n:
@@ -207,6 +246,24 @@ func closest(pos: Vector3, hint := -1, window := 24) -> int:
 				misses += 1
 				if misses > 4:
 					break
+	return best
+
+
+## The node nearest `pos` from `back` nodes behind `hint` to `ahead` in front of it, every
+## one looked at: for a car away from the lap (on a shortcut), where closest()'s walk from
+## the hint stops at the first hump in the distances.
+func closest_along(pos: Vector3, hint: int, back: int, ahead: int) -> int:
+	var n := points.size()
+	var best := hint
+	var best_d := INF
+	for k in range(hint - back, hint + ahead + 1):
+		if not closed and (k < 0 or k >= n):
+			continue
+		var i := posmod(k, n)
+		var dd := points[i].distance_squared_to(pos)
+		if dd < best_d:
+			best_d = dd
+			best = i
 	return best
 
 

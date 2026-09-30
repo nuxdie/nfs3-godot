@@ -1,9 +1,10 @@
 class_name LoadingScreen
 extends Control
 ## The picture between the menu and the race, for the race Game is set up for: the track's
-## postcard slowly closing in, what's being raced (the mode, or the tournament and which
-## race of its circuit), the track's name and the race's facts, its map, your car, a tip,
-## and a bar with what's being done. The menu fades it in over itself and the race scene
+## postcard slowly closing in, your car on it (in 3D, with its driver, a Showroom going round
+## it slowly) with its name large and its figures, the track's map with what's being raced
+## (the mode, or the tournament and which race of its circuit), the track's name and the
+## race's facts, a tip, and a bar with what's being done. The menu fades it in over itself and the race scene
 ## opens on the same picture, so the two join up; the race moves the bar through its stages
 ## (the track loads on a worker thread, so all this keeps moving) and fades it out at the end.
 
@@ -46,6 +47,8 @@ var _car_kick := ""             # "Your car · Porsche · class B"
 var _car_line := ""             # its figures: "160 bhp · 227 km/h · 1,030 kg"
 var _tip := ""
 var _map: TrackMap
+var _back: Control              # the picture, under the car
+var _view: Showroom             # your car
 var _time := 0.0
 var _progress := 0.0            # shown
 var _target := 0.0
@@ -57,6 +60,19 @@ var _done := false
 func _init() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	# Drawn before this one's own drawing (the words go over the car): the picture, then the car.
+	_back = Control.new()
+	_back.show_behind_parent = true
+	_back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_back.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_back.draw.connect(_draw_back)
+	add_child(_back)
+	_view = Showroom.new()
+	_view.loading = true
+	_view.show_behind_parent = true
+	_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_view.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_view)
 	_map = TrackMap.new()
 	_map.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_map)
@@ -119,6 +135,16 @@ func _read_game() -> void:
 		_tip = _handoff.tip
 		_time = _handoff.time
 		_handoff = {}
+	_view.set_clock(_time)
+
+
+## Your car on the stage (once it's in the tree: the car finds its place on it).
+func _ready() -> void:
+	if Game.car_index < Game.cars.size():
+		var i := Game.car_index
+		var data: Object = Game.load_car(Game.cars[i].path, i)
+		var up := Game.upgrade_of(i) if Game.circuit_run.is_empty() else Game.garage_upgrade(i)
+		_view.show_car(data, Game.paint_tint(i, data), up, i, 0.0)
 
 
 ## The menu's, as it hands over to the race scene: the next one carries on from this one.
@@ -179,6 +205,9 @@ func _layout() -> void:
 	var w := minf(340.0, size.x * 0.26)
 	_map.size = Vector2(w, w * 0.8)
 	_map.position = Vector2(size.x - M - w, 110.0)
+	# The car between the words down the left and the map, above the track's name.
+	var x0 := size.x * 0.3
+	_view.set_region(Rect2(x0, 90.0, _map.position.x - 30.0 - x0, size.y * 0.62 - 90.0))
 
 
 func _process(dt: float) -> void:
@@ -188,27 +217,38 @@ func _process(dt: float) -> void:
 		_target += (_cap - _target) * (1.0 - exp(-dt * 0.9))
 	_progress = UiKit.damp(_progress, _target, 10.0, dt)
 	queue_redraw()
+	_back.queue_redraw()
 
 
-func _draw() -> void:
+## The track's picture, darkened where the words go, under the car.
+func _draw_back() -> void:
 	var W := size.x
 	var H := size.y
-	draw_rect(Rect2(Vector2.ZERO, size), UiKit.BG)
+	var b := _back
+	b.draw_rect(Rect2(Vector2.ZERO, size), UiKit.BG)
 	if _tex:
 		# Covering the screen, closing in slowly.
 		var ts := _tex.get_size()
 		var s := maxf(W / ts.x, H / ts.y) * (1.04 + 0.05 * (1.0 - exp(-_time * 0.12)))
 		var d := ts * s
-		draw_texture_rect(_tex, Rect2((size - d) * Vector2(0.5, 0.45), d), false, Color(0.62, 0.62, 0.66))
-	_grad(Rect2(0, 0, W * 0.7, H), Color(UiKit.BG, 0.85), Color(UiKit.BG, 0.0), true)
-	_grad(Rect2(0, H * 0.45, W, H * 0.55), Color(UiKit.BG, 0.0), Color(UiKit.BG, 0.95), false)
-	_grad(Rect2(0, 0, W, 140), Color(UiKit.BG, 0.8), Color(UiKit.BG, 0.0), false)
+		b.draw_texture_rect(_tex, Rect2((size - d) * Vector2(0.5, 0.45), d), false, Color(0.62, 0.62, 0.66))
+	_grad(b, Rect2(0, 0, W * 0.7, H), Color(UiKit.BG, 0.85), Color(UiKit.BG, 0.0), true)
+	_grad(b, Rect2(0, H * 0.45, W, H * 0.55), Color(UiKit.BG, 0.0), Color(UiKit.BG, 0.95), false)
+	_grad(b, Rect2(0, 0, W, 140), Color(UiKit.BG, 0.8), Color(UiKit.BG, 0.0), false)
+
+
+func _draw() -> void:
+	var W := size.x
+	var H := size.y
+	# Over the car: the foot of the screen darkened again for the words.
+	_grad(self, Rect2(0, H * 0.7, W, H * 0.3), Color(UiKit.BG, 0.0), Color(UiKit.BG, 0.8), false)
 	# The logo, as the menu's bar has it.
 	var lf := UiKit.font("display")
 	draw_string(lf, Vector2(M, 44), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, UiKit.ACCENT)
 	var lw := lf.get_string_size("NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30).x
 	draw_string(UiKit.font("cond_med", 5), Vector2(M + lw + 8, 43), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 19, UiKit.INK)
-	# The map (open start to flag on a point-to-point run) and your car, right.
+	# The map (open start to flag on a point-to-point run) and what's being raced under it:
+	# the mode (or tournament), the track's name, the race's facts.
 	var mx := _map.position.x
 	var mw := _map.size.x
 	var bf := UiKit.font("body")
@@ -216,19 +256,23 @@ func _draw() -> void:
 		var km := _map.length_m / 1000.0
 		UiKit.kicker(self, Vector2(mx, _map.position.y - 12), "Route" if _map.open else "The lap", mw)
 		draw_string(bf, Vector2(mx, _map.position.y - 12), UiKit.dist(km), HORIZONTAL_ALIGNMENT_RIGHT, mw, 15, UiKit.INK_DIM)
-	if _car != "":
-		var cy := _map.position.y + _map.size.y + 34
-		PickCard.draw_lockup(self, Vector2(mx, cy), mw, _car_kick, _car, _car_line, 30)
-	# What's being raced, bottom left: the kicker, the track's name large, its facts.
+	var ty := _map.position.y + _map.size.y + 34
+	UiKit.kicker(self, Vector2(mx, ty + 13), _over, mw, _over_col)
+	var tfs := UiKit.fit("display", _title, mw, 30, 18)
+	draw_string(lf, Vector2(mx - 2, ty + 18 + tfs * 0.92), _title, HORIZONTAL_ALIGNMENT_LEFT, mw, tfs, UiKit.INK)
+	draw_string(bf, Vector2(mx, ty + 18 + tfs * 0.92 + 24), _facts, HORIZONTAL_ALIGNMENT_LEFT, mw,
+		UiKit.fit("body", _facts, mw, 15, 11), UiKit.INK_DIM)
+	# Your car, bottom left, under it on the stage: what it is, its name large, its figures.
 	var bar_y := H - 40.0
 	var tip_y := bar_y - 46.0
-	var facts_y := tip_y - 40.0
-	var name_y := facts_y - 30.0
+	var line_y := tip_y - 40.0
+	var name_y := line_y - 30.0
 	var max_w := W - M * 3 - mw
-	var fs := UiKit.fit("display", _title, max_w, 96, 40)
-	UiKit.kicker(self, Vector2(M, name_y - fs * 0.86 - 16), _over, max_w, _over_col)
-	draw_string(lf, Vector2(M - 3, name_y), _title, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, UiKit.INK)
-	draw_string(bf, Vector2(M, facts_y), _facts, HORIZONTAL_ALIGNMENT_LEFT, max_w, 18, Color(UiKit.INK, 0.85))
+	if _car != "":
+		var fs := UiKit.fit("display", _car, max_w, 96, 40)
+		UiKit.kicker(self, Vector2(M, name_y - fs * 0.86 - 16), _car_kick, max_w)
+		draw_string(lf, Vector2(M - 3, name_y), _car, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, UiKit.INK)
+		draw_string(bf, Vector2(M, line_y), _car_line, HORIZONTAL_ALIGNMENT_LEFT, max_w, 18, Color(UiKit.INK, 0.85))
 	# A tip.
 	UiKit.kicker(self, Vector2(M, tip_y), "Tip", 40)
 	draw_string(bf, Vector2(M + 40, tip_y), _tip, HORIZONTAL_ALIGNMENT_LEFT, W - M * 2 - 40, 15, UiKit.INK_DIM)
@@ -249,6 +293,6 @@ func _draw() -> void:
 		HORIZONTAL_ALIGNMENT_RIGHT, br.size.x, 14, UiKit.INK)
 
 
-func _grad(r: Rect2, from: Color, to: Color, horizontal: bool) -> void:
+static func _grad(ci: CanvasItem, r: Rect2, from: Color, to: Color, horizontal: bool) -> void:
 	var pts := PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
-	draw_polygon(pts, PackedColorArray([from, to, to, from]) if horizontal else PackedColorArray([from, from, to, to]))
+	ci.draw_polygon(pts, PackedColorArray([from, to, to, from]) if horizontal else PackedColorArray([from, from, to, to]))

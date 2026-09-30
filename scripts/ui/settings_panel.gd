@@ -11,9 +11,10 @@ signal closed
 signal changed
 
 const CONTROLS := [
-	["Driving", [[["↑", "W"], "Throttle"], [["↓", "S"], "Brake · reverse"], [["←→", "A", "D"], "Steer"], [["SPACE"], "Handbrake"]]],
+	["Driving", [[["↑", "W"], "Throttle"], [["↓", "S"], "Brake · reverse"], [["←→", "A", "D"], "Steer"], [["SPACE"], "Handbrake"],
+		[["SHIFT"], "Shift up (manual gearbox)"], [["CTRL"], "Shift down · into reverse (manual)"]]],
 	["Camera", [[["C"], "Change camera"], [["B"], "Look back"], [["M"], "Mirror on / off"]]],
-	["Car", [[["R"], "Reset car"], [["H"], "Horn"], [["L"], "Lights"], [["K"], "High beam"]]],
+	["Car", [[["R"], "Reset car"], [["H"], "Horn"], [["L"], "Lights"], [["K"], "High beam"], [["T"], "Soft top up · down"]]],
 	["Game", [[["ESC"], "Pause"], [["F1"], "HUD on / off"], [["F11"], "Fullscreen (or Alt+Enter)"]]],
 	["Menus", [[["↑↓"], "Move"], [["←→"], "Change a setting"], [["ENTER"], "Choose · start"], [["ESC"], "Back"],
 		[["Q", "E"], "Switch tab"], [["TAB"], "Next page or filter"]]],
@@ -36,7 +37,7 @@ const WIDGET_HELP := {
 	"police": "In a pursuit: the chase, the heat and your tickets.",
 	"lap": "The lap you're on, your best lap and how far round you are.",
 	"map": "The track from above with every car on it.",
-	"mirror": "The rear-view mirror, top centre. M shows or hides it during a race; on Low quality it starts hidden.",
+	"mirror": "The rear-view mirror, top centre (in the in-car view, the car's own). M shows or hides it during a race; on Low quality it starts hidden.",
 	"messages": "Banners for lap times, the final lap, places and the police.",
 	"countdown": "The 3, 2, 1 before the start.",
 	"lights": "The red and blue bar along the top while the police chase you.",
@@ -108,9 +109,12 @@ func _define() -> void:
 		{"id": "damage", "caption": "Damage", "items": off_on, "later": true,
 			"get": func() -> int: return int(Game.damage), "set": func(i: int): Game.damage = i == 1,
 			"help": "Crashes dent the cars and cost them power (not in the original)."},
+		{"id": "gearbox", "caption": "Gearbox", "items": PackedStringArray(["Automatic", "Manual"]), "later": true,
+			"get": func() -> int: return int(Game.manual_gears), "set": func(i: int): Game.manual_gears = i == 1,
+			"help": "The car changes gear itself, or you do: Shift up, Ctrl down (a gamepad's stick clicks), and down from 1st at a standstill into reverse. Manual drives on the car's manual gearing, which on some has an extra gear or two."},
 		{"id": "tops", "caption": "Cabriolets", "items": PackedStringArray(["Top down", "Top up"]), "later": true,
-			"get": func() -> int: return 0 if Game.tops_down else 1, "set": func(i: int): Game.set_tops_down(i == 0),
-			"help": "Porsche Unleashed's cabriolets, roadsters and Speedsters with the hood folded or raised."},
+			"get": func() -> int: return 0 if Game.tops_down else 1, "set": func(i: int): Game.tops_down = i == 0,
+			"help": "How Porsche Unleashed's cabriolets, roadsters and Speedsters start a race: hood folded or raised. T raises or lowers it in the race."},
 		{"id": "intro", "caption": "Start fly-by", "items": off_on, "later": true,
 			"get": func() -> int: return int(Game.intro_flyby), "set": func(i: int): Game.intro_flyby = i == 1,
 			"help": "The camera flies round the grid before the countdown. Any key skips it."},
@@ -131,7 +135,10 @@ func _define() -> void:
 			"help": "The music in the menus and races. Off turns it off."},
 		{"id": "sfx", "caption": "Effects", "items": vol, "slider": true,
 			"get": func() -> int: return Game.sfx_volume, "set": func(i: int): Game.sfx_volume = i,
-			"help": "Engines, tyres, crashes, sirens, the weather and the menus' clicks."},
+			"help": "Engines, tyres, crashes, sirens and the menus' clicks."},
+		{"id": "ambience", "caption": "Ambience", "items": vol, "slider": true,
+			"get": func() -> int: return Game.ambience_volume, "set": func(i: int): Game.ambience_volume = i,
+			"help": "The world around the track: rain and thunder."},
 		{"id": "voice", "caption": "Voice", "items": vol, "slider": true,
 			"get": func() -> int: return Game.voice_volume, "set": func(i: int): Game.voice_volume = i,
 			"help": "The countdown, lap calls and the police's loudhailer and radio."},
@@ -152,7 +159,7 @@ func _define() -> void:
 				if i == 0:
 					Game.hud_hidden.append(id),
 			"help": WIDGET_HELP[id]})
-	_pages = [["units", "damage", "intro"], ["quality", "display", "vsync"], ["volume", "music", "sfx", "voice"],
+	_pages = [["units", "damage", "gearbox", "tops", "intro"], ["quality", "display", "vsync"], ["volume", "music", "sfx", "ambience", "voice"],
 		["hud_on", "hud_style"] + widgets, [], []]
 
 

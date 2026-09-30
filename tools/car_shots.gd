@@ -8,8 +8,11 @@ extends Node
 ## the loader found in each model. Ids (folder names) pick cars from the set; --big shoots
 ## larger and closer, --low from near the ground, --wire adds a wireframe of each shot.
 ## --track parks the cars on that track's road instead, in its own light and conditions.
-## --dent crashes each car into a front and a side corner first; --officer stands a High
+## --topup raises a Porsche Unleashed cabriolet's hood, --topat=T poses it mid-fold, --popat=T the pop-up headlamps mid-rise (0 down .. 1 up). --dent crashes each car into a front and a side corner first; --officer stands a High
 ## Stakes cruiser's officer beside it; --siren sets the light bar going. The set "heli" is High Stakes' helicopter.
+## --wipeat=T, --spoilerat=T hold a Porsche Unleashed car's wipers or spoiler part-way (0 .. 1); --indicate=-1|1|2
+## lights its left, right or all indicators. --open=6,7,8,9 opens its doors, bonnet, boot; --windows winds them down. --camy=M, --looky=M, --fov=DEG place the camera;
+## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --paint=N the car's colour N.
 
 var W := 480
 var H := 300
@@ -163,9 +166,47 @@ func _run() -> void:
 		car.set_headlight_beam(night)
 		car.reset_to(park, 0.05)
 		car.set_headlights(lights or night)
+		for a: String in args:
+			if a.begins_with("--paint=") and int(a.get_slice("=", 1)) < data.colours.size():   # a colour by index
+				car.set_paint(data.colours[int(a.get_slice("=", 1))])
+		if "--topup" in args:
+			car.set_top_down(false, true)
+		for a: String in args:
+			if a.begins_with("--topat="):   # a cabriolet's top mid-fold: 0 up .. frames - 1 folded
+				car.fold_speed = 0.0
+				car._top_t = float(a.get_slice("=", 1))
+				car._pose_top()
 		for k in 90:
 			await get_tree().physics_frame
 		car.freeze = true
+		for a: String in args:
+			if a.begins_with("--popat="):   # the pop-ups held part-way up
+				car.set_process(false)
+				car._popup_t = float(a.get_slice("=", 1))
+				car._pose_popups()
+				car._show_lamps()
+		for a: String in args:
+			# Porsche Unleashed's moving parts held part-way: the wipers (0 parked .. 1 top of the
+			# sweep), the Carreras' spoiler (0 down .. 1 up); the indicators (-1, 1 a side, 2 all).
+			if a.begins_with("--wipeat="):
+				car.set_process(false)
+				for w in car._wipers:
+					Car._pose_frames(w[0], float(a.get_slice("=", 1)) * (w[1] - 1))
+			elif a.begins_with("--spoilerat="):
+				car.set_process(false)
+				car._spoiler_t = float(a.get_slice("=", 1))
+				car._pose_spoiler()
+			elif a.begins_with("--open="):   # Porsche Unleashed: doors and lids open (6 left door, 7 right, 8 bonnet, 9 boot)
+				for g in a.get_slice("=", 1).split(","):
+					car.set_open(int(g), true, true)
+			elif a == "--windows":
+				for side in [6, 7]:
+					car.set_window_down(side, true, true)
+			elif a.begins_with("--indicate="):
+				car.set_process(false)
+				var side := int(a.get_slice("=", 1))
+				for sg in car._signals:
+					sg[0].visible = side == 2 or side == sg[1]
 		for a: String in args:
 			if a.begins_with("--steer="):
 				car.steer = float(a.get_slice("=", 1))
@@ -194,8 +235,23 @@ func _run() -> void:
 			var yaw := deg_to_rad(yaw_deg)
 			var dir := car.global_basis * Vector3(sin(yaw), 0.0, cos(yaw))
 			dir = Vector3(dir.x, 0.0, dir.z).normalized()
-			cam.global_position = car.global_position + dir * dist + Vector3.UP * (0.3 if low else hs.y * 2.0 + 0.6)
-			cam.look_at(car.global_position + Vector3.UP * 0.15, Vector3.UP)
+			var cam_y := 0.3 if low else hs.y * 2.0 + 0.6
+			var look_y := 0.15
+			for a: String in args:
+				if a.begins_with("--camy="):   # the camera's height over the car's origin (m)
+					cam_y = float(a.get_slice("=", 1))
+				elif a.begins_with("--looky="):   # the height it looks at
+					look_y = float(a.get_slice("=", 1))
+				elif a.begins_with("--fov="):
+					cam.fov = float(a.get_slice("=", 1))
+			cam.global_position = car.global_position + dir * dist + Vector3.UP * cam_y
+			cam.look_at(car.global_position + Vector3.UP * look_y, Vector3.UP)
+			for a: String in args:
+				if a.begins_with("--eye="):   # --eye=x,y,z:tx,ty,tz in the car's own frame (+z ahead, +x left)
+					var ab := a.get_slice("=", 1).split(":")
+					var e := ab[0].split_floats(","); var t := ab[1].split_floats(",")
+					cam.global_position = car.global_transform * Vector3(e[0], e[1], e[2])
+					cam.look_at(car.global_transform * Vector3(t[0], t[1], t[2]), Vector3.UP)
 			for mode in ([Viewport.DEBUG_DRAW_DISABLED, Viewport.DEBUG_DRAW_WIREFRAME] if wire else [Viewport.DEBUG_DRAW_DISABLED]):
 				get_viewport().debug_draw = mode
 				for k in 4:

@@ -15,6 +15,10 @@ uniform vec4 paint : source_color = vec4(0.5, 0.5, 0.5, 1.0);
 uniform float steer_angle = 0.0;
 uniform vec3 steer_pivot = vec3(0.0);
 uniform vec3 steer_axis = vec3(0.0, 0.0, 1.0);
+// Porsche Unleashed's in-car view: the driver's head (UV2.x -1) folded to a point, out of the
+// way of the eye that sits in it, and his forearms (-1 too) with it; his arms for that view
+// (-2: sleeves from over his shoulders, made for the eye) are folded away outside it.
+uniform bool hide_head = false;
 
 void vertex() {
 	if (UV2.x > 0.5 && steer_angle != 0.0) {
@@ -29,6 +33,9 @@ void vertex() {
 	if (UV2.y != 0.0 && PROJECTION_MATRIX[3][3] == 0.0) {
 		vec3 eye = (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz;
 		VERTEX += (eye - VERTEX) * UV2.y;
+	}
+	if (hide_head ? UV2.x < -0.5 && UV2.x > -1.5 : UV2.x < -1.5) {
+		VERTEX = vec3(0.0);
 	}
 }
 

@@ -37,6 +37,7 @@ var _static_key := []          # what the static layer was drawn for; redrawn wh
 var _tach_segs: Array[PackedVector2Array] = []   # the tach's segments as polygons, at _tach_c
 var _tach_c := Vector2.INF
 var _mirror: TextureRect
+var _mirror_on := true   # the rear-view mirror is wanted (M): this one, or in the in-car view the car's own
 var _mirror_vp: SubViewport
 var _mirror_cam: Camera3D
 var _loading: LoadingScreen
@@ -108,7 +109,8 @@ func _ready() -> void:
 	_root.add_child(_settings)
 	_apply_hud()
 	# It's a second view of the whole scene: on Low it starts off (M turns it on).
-	_mirror.visible = Game.hud_shows("mirror") and Game.quality != Game.Quality.LOW
+	_mirror_on = Game.hud_shows("mirror") and Game.quality != Game.Quality.LOW
+	_mirror.visible = _mirror_on
 
 
 ## The HUD's parts as the settings have them now.
@@ -131,7 +133,8 @@ func _apply_hud() -> void:
 		np.reset_place()
 		if _classic and _classic.visible and _classic.placement == ClassicGauges.Placement.TOP:
 			np.top = ClassicGauges.dial_height(_root.size.y if _root.size.y > 0 else 720.0) + 30.0
-	_mirror.visible = Game.hud_shows("mirror")
+	_mirror_on = Game.hud_shows("mirror")
+	_mirror.visible = _mirror_on
 
 
 func mirror_viewport() -> SubViewport:
@@ -145,6 +148,7 @@ func _setup_mirror() -> void:
 	add_child(_mirror_vp)
 	_mirror_cam = Camera3D.new()
 	_mirror_cam.fov = 40
+	_mirror_cam.cull_mask &= ~Car.OWN_VIEW_LAYER
 	_mirror_cam.far = 250 if Game.quality == Game.Quality.LOW else 500
 	_mirror_vp.add_child(_mirror_cam)
 	_mirror = TextureRect.new()
@@ -264,6 +268,7 @@ func show_results(title: String, rows: Array, extra: String, actions: Array = []
 	_results_list.modulate.a = 0.0
 	create_tween().tween_property(_results_list, "modulate:a", 1.0, 0.3).set_delay(0.6)
 	_set_mouse_look(false)
+	_mirror_on = false
 	_mirror.visible = false
 	# The results title says it all; don't let a lingering banner overlap it.
 	_msg_t = 0.0
@@ -325,7 +330,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			_set_mouse_look(false)
 		get_viewport().set_input_as_handled()
 	elif e.is_action_pressed("mirror") and _results == null and not get_tree().paused and Game.hud_on:
-		_mirror.visible = not _mirror.visible
+		_mirror_on = not _mirror_on
 
 
 ## The settings over the paused race (the pause menu out of the way, so the HUD's changes show).
@@ -374,6 +379,9 @@ func _process(dt: float) -> void:
 		_results.get_child(1).queue_redraw()
 	if _pause.visible:
 		_pause.get_child(1).queue_redraw()
+	# In the in-car view the car's own rear-view mirror, where it sits, stands in for this one.
+	Car.rear_mirror_wanted = _mirror_on
+	_mirror.visible = _mirror_on and not is_instance_valid(Car.in_car_view)
 	# A hidden mirror must stop rendering too: it's a whole second view of the scene.
 	_mirror_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _mirror.visible else SubViewport.UPDATE_DISABLED
 	if player and is_instance_valid(player) and _mirror.visible:

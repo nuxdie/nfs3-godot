@@ -103,18 +103,16 @@ func _run() -> void:
 	get_tree().quit()
 
 
-## Per side (0 left, 1 right), per node: the wall's (bottom, top) y there, from the Walls body.
+## Per side (0 left, 1 right), per node: the wall's (bottom, top) y there (its foot less
+## WALL_DEPTH, plus WALL_HEIGHT; the cuts under overpasses aside).
 func _wall_spans() -> Array:
 	var out := [[], []]
-	var body := w.root.get_node("Walls")
-	var n := w.path.size()
+	var p := w.path
 	for side in 2:
-		var f: PackedVector3Array = body.get_child(side).shape.get_faces()
-		for i in n:
-			var k: int = mini(i, (f.size() / 6) - 1 if w.path.closed else n - 2) * 6
-			var bottom: float = f[k].y if i == k / 6 else f[k + 1].y
-			var top: float = f[k + 5].y if i == k / 6 else f[k + 2].y
-			out[side].append(Vector2(bottom, top))
+		for i in p.size():
+			var wd: float = p.right_width[i] if side == 1 else p.left_width[i]
+			var y: float = (p.points[i] + p.rights[i] * wd * (1.0 if side == 1 else -1.0)).y
+			out[side].append(Vector2(y - Nfs3TrackBuilder.WALL_DEPTH, y + Nfs3TrackBuilder.WALL_HEIGHT))
 	return out
 
 

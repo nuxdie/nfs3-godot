@@ -225,19 +225,7 @@ func mirror_world() -> void:
 	for x in col_objects:
 		_mirror_object(x)
 	for vr in vroad:
-		vr.pos = _flip(vr.pos)
-		vr.normal = _flip(vr.normal)
-		vr.forward = _flip(vr.forward)
-		vr.right = -_flip(vr.right)
-		var w := vr.left_wall
-		vr.left_wall = vr.right_wall
-		vr.right_wall = w
-		var l := vr.lanes_left
-		vr.lanes_left = vr.lanes_right
-		vr.lanes_right = l
-		w = vr.lane_w_left
-		vr.lane_w_left = vr.lane_w_right
-		vr.lane_w_right = w
+		mirror_vroad(vr)
 	for k in 2:
 		var line: PackedFloat32Array = racing_line[k]
 		for i in line.size():
@@ -300,6 +288,23 @@ static func mirrored_copies(names: PackedStringArray, imgs: Array[Image], tags: 
 		out.append([run[pick], i])
 		run.remove_at(pick)
 	return out
+
+
+## A virtual road slice mirrored in X: its left and right swap sides.
+static func mirror_vroad(vr: VRoad) -> void:
+	vr.pos = _flip(vr.pos)
+	vr.normal = _flip(vr.normal)
+	vr.forward = _flip(vr.forward)
+	vr.right = -_flip(vr.right)
+	var w := vr.left_wall
+	vr.left_wall = vr.right_wall
+	vr.right_wall = w
+	var l := vr.lanes_left
+	vr.lanes_left = vr.lanes_right
+	vr.lanes_right = l
+	w = vr.lane_w_left
+	vr.lane_w_left = vr.lane_w_right
+	vr.lane_w_right = w
 
 
 static func _flip(v: Vector3) -> Vector3:

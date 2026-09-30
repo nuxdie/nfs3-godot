@@ -97,6 +97,10 @@ func setup(h: Nfs3Horizon, p_path: TrackPath, env: Environment, track_mat: Shade
 	_build_audio(kind == Nfs3Horizon.Precip.SNOW)
 
 
+func _exit_tree() -> void:
+	Car.precipitation = 0.0
+
+
 ## How wet the road looks, 0 dry - 1 soaked (snow isn't wet).
 func road_wetness() -> float:
 	return 0.0 if _snow or _mat == null else _wet
@@ -238,12 +242,12 @@ func _build_audio(snow: bool) -> void:
 		_rain_audio.stream = game_rain if game_rain else _rain_loop()
 		_rain_gain = 4.0 if game_rain else 1.0
 		_rain_audio.volume_db = -80.0
-		_rain_audio.bus = Game.BUS_SFX
+		_rain_audio.bus = Game.BUS_AMBIENCE
 		add_child(_rain_audio)
 		_rain_audio.play()
 	if _lightning:
 		_thunder_audio = AudioStreamPlayer.new()
-		_thunder_audio.bus = Game.BUS_SFX
+		_thunder_audio.bus = Game.BUS_AMBIENCE
 		var claps := AudioStreamRandomizer.new()
 		if rain:
 			for patch: int in GameSounds.THUNDER:
@@ -300,6 +304,7 @@ func _update_precip(dt: float, eye: Vector3) -> void:
 	_t += dt
 	var target := _cycle_amount(_t) * _region_amount(_node)
 	_amount = move_toward(_amount, target, dt * 0.5)
+	Car.precipitation = _amount   # the wipers and fog lamps
 	var cam := get_viewport().get_camera_3d() as ChaseCamera
 	if cam and cam.target:
 		# The car's motion, not the camera's: orbiting with the mouse swings the camera round

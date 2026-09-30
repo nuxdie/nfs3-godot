@@ -83,17 +83,20 @@ var units_kmh := true
 var night := false
 var weather := false      # the track's rain or snow
 var damage := true        # crashes dent the cars and cost power (not in the original)
-var tops_down := true     # Porsche Unleashed's cabriolets with the hood folded (Nfs5Car.hood_down)
+var manual_gears := false # the player shifts by hand (shift_up / shift_down) on the car's manual gearing
+var tops_down := true     # Porsche Unleashed's cabriolets start a race with the hood folded (T raises it)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
 var fullscreen := false
 var vsync := true
 var volume := 8           # master volume in tenths, 0..10
 var music_volume := 6     # the music's, 0..10 (0 turns it off)
-var sfx_volume := 10      # engines, crashes, weather and menu clicks, 0..10
+var sfx_volume := 10      # engines, tyres, crashes, sirens and menu clicks, 0..10
+var ambience_volume := 10 # the world around the track: rain, thunder, 0..10
 var voice_volume := 10    # the countdown, lap calls and the police, 0..10
 const BUS_MUSIC := &"Music"   # the audio buses the dials set, all sending to Master
 const BUS_SFX := &"SFX"
+const BUS_AMBIENCE := &"Ambience"
 const BUS_VOICE := &"Voice"
 var music: MusicPlayer    # plays across scenes: the track's song in a race, else the menu music
 var render_scale := 0.0   # where DynamicResolution left the 3D resolution: the next race starts there
@@ -434,17 +437,6 @@ func _sorted_dirs(path: String) -> PackedStringArray:
 	return out
 
 
-## Porsche Unleashed's cabriolets with their tops down or up: the loaded ones are read again.
-func set_tops_down(down: bool) -> void:
-	if down == tops_down:
-		return
-	tops_down = down
-	Nfs5Car.hood_down = down
-	for key: String in _car_cache.keys():
-		if is_pu_path(key):
-			_car_cache.erase(key)
-
-
 ## Loaded car data (cached). `path` == "" means a procedural car preset.
 func load_car(path: String, preset := 0) -> Object:
 	var key := path if path != "" else "preset%d" % preset
@@ -698,6 +690,7 @@ func save_settings() -> void:
 	cf.set_value("game", "night", night)
 	cf.set_value("game", "weather", weather)
 	cf.set_value("game", "damage", damage)
+	cf.set_value("game", "manual_gears", manual_gears)
 	cf.set_value("game", "tops_down", tops_down)
 	cf.set_value("game", "quality", quality)
 	cf.set_value("game", "camera", camera_mode)
@@ -706,6 +699,7 @@ func save_settings() -> void:
 	cf.set_value("game", "volume", volume)
 	cf.set_value("game", "music_volume", music_volume)
 	cf.set_value("game", "sfx_volume", sfx_volume)
+	cf.set_value("game", "ambience_volume", ambience_volume)
 	cf.set_value("game", "voice_volume", voice_volume)
 	cf.save(SETTINGS_PATH)
 	if not circuit.is_empty():
@@ -769,8 +763,8 @@ func _load_settings() -> void:
 	night = _bool(cf, "night", night)
 	weather = _bool(cf, "weather", weather)
 	damage = _bool(cf, "damage", damage)
+	manual_gears = _bool(cf, "manual_gears", manual_gears)
 	tops_down = _bool(cf, "tops_down", tops_down)
-	Nfs5Car.hood_down = tops_down
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 	camera_mode = clampi(_int(cf, "camera", camera_mode), 0, ChaseCamera.MODES.size() - 1)
 	fullscreen = _bool(cf, "fullscreen", fullscreen)
@@ -778,6 +772,7 @@ func _load_settings() -> void:
 	volume = clampi(_int(cf, "volume", volume), 0, 10)
 	music_volume = clampi(_int(cf, "music_volume", music_volume), 0, 10)
 	sfx_volume = clampi(_int(cf, "sfx_volume", sfx_volume), 0, 10)
+	ambience_volume = clampi(_int(cf, "ambience_volume", sfx_volume), 0, 10)
 	voice_volume = clampi(_int(cf, "voice_volume", voice_volume), 0, 10)
 
 
@@ -804,7 +799,7 @@ func _on_scene_changed() -> void:
 ## Window mode, v-sync and the volumes, from the settings.
 func apply_display() -> void:
 	AudioServer.set_bus_volume_linear(0, volume / 10.0)
-	for b: Array in [[BUS_MUSIC, music_volume], [BUS_SFX, sfx_volume], [BUS_VOICE, voice_volume]]:
+	for b: Array in [[BUS_MUSIC, music_volume], [BUS_SFX, sfx_volume], [BUS_AMBIENCE, ambience_volume], [BUS_VOICE, voice_volume]]:
 		AudioServer.set_bus_volume_linear(_bus(b[0]), b[1] / 10.0)
 	if DisplayServer.get_name() == "headless":
 		return
@@ -898,6 +893,8 @@ func _setup_input() -> void:
 	_bind("steer_left", [KEY_LEFT, KEY_A], [JOY_BUTTON_DPAD_LEFT])
 	_bind("steer_right", [KEY_RIGHT, KEY_D], [JOY_BUTTON_DPAD_RIGHT])
 	_bind("handbrake", [KEY_SPACE], [JOY_BUTTON_B])
+	_bind("shift_up", [KEY_SHIFT], [JOY_BUTTON_RIGHT_STICK])
+	_bind("shift_down", [KEY_CTRL], [JOY_BUTTON_LEFT_STICK])
 	_bind("camera", [KEY_C], [JOY_BUTTON_Y])
 	_bind("look_back", [KEY_B], [JOY_BUTTON_LEFT_SHOULDER])
 	_bind("reset_car", [KEY_R], [JOY_BUTTON_BACK])
@@ -905,6 +902,7 @@ func _setup_input() -> void:
 	_bind("mirror", [KEY_M], [])
 	_bind("headlights", [KEY_L], [JOY_BUTTON_DPAD_UP])
 	_bind("high_beam", [KEY_K], [JOY_BUTTON_DPAD_DOWN])
+	_bind("soft_top", [KEY_T], [])
 	_bind("pause", [KEY_ESCAPE, KEY_P], [JOY_BUTTON_START])
 	_bind("handling_feel", [KEY_F6], [])
 	_bind("toggle_hud", [KEY_F1], [])

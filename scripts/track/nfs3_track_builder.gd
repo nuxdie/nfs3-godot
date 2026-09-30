@@ -18,6 +18,9 @@ const SCENERY_LAYER := 4
 ## Physics layer of the water surfaces (streams, lakes): nothing collides with them, the
 ## race looks for them to tell a car that has gone in.
 const WATER_LAYER := 16
+## Walls only the AI's cars run into: across the mouths of the side roads the player's walls
+## leave open (Porsche Unleashed's shortcuts), so a car running wide doesn't wander off.
+const AI_WALL_LAYER := 32
 ## How far out (m) from the road's edge water opens its wall: enough for a bank down to a
 ## stream, short of letting cars out across open country.
 const WATER_REACH := 30.0
@@ -1456,8 +1459,10 @@ static func _edge_cell(p: Vector3) -> Vector2i:
 	return Vector2i(floori(p.x / _EDGE_CELL), floori(p.z / _EDGE_CELL))
 
 
-## Invisible walls along both sides of the path (the procedural track's fence).
-static func make_walls(path: TrackPath) -> StaticBody3D:
+## Invisible walls along both sides of the path (the procedural track's fence). `open`, if
+## given: per side (0 left, 1 right) a PackedByteArray, 1 where the wall from that node to
+## the next is left out (a side road leaves there).
+static func make_walls(path: TrackPath, open: Array = []) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.name = "Walls"
 	body.collision_layer = 1
@@ -1468,12 +1473,13 @@ static func make_walls(path: TrackPath) -> StaticBody3D:
 		var foot := PackedVector3Array()
 		var extent := PackedVector2Array()   # (down, up) per node
 		for i in n:
-			var w: float = path.right_width[i] if side > 0 else path.left_width[i]
-			var p: Vector3 = path.points[i] + path.rights[i] * w * side
+			var p: Vector3 = path.points[i] + path.rights[i] * path.wall_width(i, side) * side
 			foot.append(p)
 			extent.append(_wall_extent(path, grid, i, p))
 		var faces := PackedVector3Array()
 		for i in n if path.closed else n - 1:
+			if not open.is_empty() and open[int(side > 0.0)][i]:
+				continue
 			var j := (i + 1) % n
 			var a := foot[i]
 			var b := foot[j]
@@ -1482,8 +1488,8 @@ static func make_walls(path: TrackPath) -> StaticBody3D:
 		# An open road is walled off across both ends too.
 		if not path.closed and side > 0.0:
 			for i in [0, n - 1]:
-				var a: Vector3 = path.points[i] - path.rights[i] * path.left_width[i]
-				var b: Vector3 = path.points[i] + path.rights[i] * path.right_width[i]
+				var a: Vector3 = path.points[i] - path.rights[i] * path.wall_width(i, -1.0)
+				var b: Vector3 = path.points[i] + path.rights[i] * path.wall_width(i, 1.0)
 				faces.append_array([a + Vector3.DOWN * WALL_DEPTH, b + Vector3.DOWN * WALL_DEPTH, b + Vector3.UP * WALL_HEIGHT,
 					a + Vector3.DOWN * WALL_DEPTH, b + Vector3.UP * WALL_HEIGHT, a + Vector3.UP * WALL_HEIGHT])
 		var shape := ConcavePolygonShape3D.new()

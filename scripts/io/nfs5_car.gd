@@ -35,18 +35,74 @@ const PEOPLE_LEVELS := [0x81, 0x89]
 const DRIVER_SLOT := 9
 ## The arms' and hands' first frames: the steering sweep, from full lock one way to the other.
 const STEER_FRAMES := 10
+## The driver's body (DriverBodyN) leans into the bend with them: its first frames, full lock
+## one way to the other, the middle one straight ahead. (Its "rest" frame, byte 9, has the
+## head turned well aside; the frames after the lean lean forward and look round.)
+const BODY_FRAMES := 5
+const BODY_SIDE := 2   # _Mesh.side of the body's vertices: it follows the arms' sweep
 const LIMBS_SLOT := 43
 const SUITED_DRIVERS := [1, 6]
+## The in-car view sits at the driver's eyes, inside the model's own cabin, with his head
+## (the body's vertices this far below its top, helmet and all) taken away: UV2.x HEAD_MARK,
+## which car_driver.gdshader folds away with `hide_head`. The eye: this far below the top
+## of the head, over its middle (not out at the eyes: the steeply raked windscreens, the
+## 944's, would have it looking out from under the glass, the roof behind it).
+const HEAD_DEPTH := 0.25
+const HEAD_MARK := -1.0
+## The driver's two pairs of arms. Seen from outside, his body's own upper arms and the limbs
+## slot's forearms and fists (LeftArmN, RightArmN), which meet them at the elbow; in the
+## in-car view, the hands slot's sleeves, made for the eye: from over and behind his
+## shoulders, which they'd stand out of seen from outside. The forearms take HEAD_MARK
+## (gone in the in-car view with the head), the sleeves IN_CAR_MARK (there only).
+const IN_CAR_MARK := -2.0
+const EYE_BELOW_TOP := 0.12
 ## The Carreras' rear spoiler (geometry slot 42): the style picks it lowered (an odd
 ## variant); the next variant is it raised, which the car shows at speed.
 const SPOILER_SLOT := 42
+## ... and its way up: "SpoilerW" (level 0x12, the style's variant of slot 6), the lowered
+## spoiler's mesh in frames from down to up, the car's blend shapes (spoiler "moving").
+const SPOILER_MOVE_LEVEL := 0x12
+## The wipers: "WiperNa" the arm, "WiperNb" its blade, N one wiper or the other (slot 0,
+## no "tr"). A few cars (the 993, the GT2, the 356 No. 1) have a single wiper in frames from
+## parked to the top of its sweep; the rest are drawn parked, and turn here about the arm's
+## far end, in the glass's plane, by WIPER_SWEEP in WIPER_FRAMES steps, riding on the glass.
+const WIPER_SWEEP := 1.55
+const WIPER_FRAMES := 8
+## What opens (base info byte 7, the part's group): the doors, left and right (the outside,
+## the inside, the window, handle, mirror and decals), the bonnet and the boot lid (engine
+## lid on the rear-engined cars), each with its underside (level 0x1E). Every part of a
+## group has its hinge as its "tr" origin: a door's front edge, a lid's edge by the glass.
+## The files don't say how far: Car opens them by LID_OPEN (radians), doors about the
+## upright, lids about the car's width, the free edge going out or up.
+const DOOR_LEFT := 6
+const DOOR_RIGHT := 7
+const BONNET := 8
+const BOOT := 9
+const LID_GROUPS := [DOOR_LEFT, DOOR_RIGHT, BONNET, BOOT]
+const LID_OPEN := {DOOR_LEFT: 1.15, DOOR_RIGHT: 1.15, BONNET: 0.95, BOOT: 0.85}
+## The engine bay and the luggage space (level 0x1D, no group): shown while the lid over
+## them (the one at their end of the car) is open.
+const BAY_LEVEL := 0x1D
+const LID_INSIDE_LEVEL := 0x1E
+## The door windows (slot 35) wind down into the doors, this share of their height.
+const WINDOW_SLOT := 35
+const WINDOW_DROP := 0.92
+## A material's finish, near its record's end: how much it mirrors the surroundings (0 matte:
+## wheel wells, trim, decals; 0.5 the paint and lamp lenses; 1 chrome: the 356s' bumpers,
+## the 550's pipes, badges), and its kind (2 a lamp's lens). Each vertex carries them as
+## COLOR (r the mirroring, g 1 on a lens, b 0 marking the data present) for car.gdshader.
+const MAT_ENV_FROM_END := 28
+const MAT_KIND_FROM_END := 4
+const LENS_KIND := 2
+## A glare effect of this kind (byte 84) is a glint, not a lamp; its normal (at byte 56) points
+## back at where it's seen from.
+const GLINT_KIND := 4
 ## Level 0x1E's parts that are outside: a cabriolet's soft top (slot 37) and the hood's
 ## frame and rear window, or the hood folded (41), each shown when its style picks it.
 const CABRIO_TOP_SLOT := 37
 const HOOD_SLOT := 41
 const CABRIO_SLOTS := [CABRIO_TOP_SLOT, HOOD_SLOT]
-## The cabriolets race with their tops down (Game's setting; the styles have them up).
-static var hood_down := true
+
 ## Base info byte 6, signed: how far the game biases a part's depth (the decals, badges and
 ## lamp lenses -3 and the door handles -10 lie on the bodywork; the interior +3 behind
 ## it). car.gdshader moves each vertex toward the eye by this share of its distance per
@@ -58,6 +114,29 @@ const INTERIOR_LEVELS := [0x19, 0x1B, 0x49, 0x81, 0x89]
 ## Wheel types 0..3 (base info byte 4): front left, front right, rear left, rear right; the
 ## wheels' shadows and treads have geometry types from here on.
 const WHEEL_SHADOW_GEOM := 18
+## A glare effect's article ("ef") comes once per level of detail, its level at this byte of
+## the Base entry; only the first level's carries the "tr" of the moving part it rides on
+## (base info byte 7 the part's group: POPUP_GROUP the pop-up headlamps, 9 the boot lid).
+const EF_LEVEL_AT := 108
+const POPUP_GROUP := 0x11
+## The dials' needles (geometry slot 30): base info byte 7 says which moves, SPEEDO_NEEDLE
+## with the speed and TACH_NEEDLE the revs (the others, fuel and oil, are modelled in place).
+## Each is modelled pointing up its own Y from its "tr" origin, the dial's hub, lying in the
+## dial's face; the car turns it about the face's normal. Where it's modelled pointing isn't
+## its zero (the 356's point there, the 996's straight up), and the files don't say where
+## the dials start: they start at NEEDLE_ZERO turns clockwise from straight up, as most do.
+const NEEDLE_SLOT := 30
+## The side mirrors (geometry slot 39), an article per side, base info byte 7 MIRROR_LEFT or
+## the right one: their glass is the triangles facing back (the in-car view's mirrors).
+const MIRROR_SLOT := 39
+const MIRROR_LEFT := 6
+const MIRROR_RIGHT := 7
+const NEEDLE_ZERO := 0.625
+## The windows' inner panes: InteriorDoorGlass, InteriorGlass (the windscreen) and
+## InteriorRoofGlass.
+const INNER_GLASS_SLOTS := [47, 48, 54]
+const SPEEDO_NEEDLE := 12
+const TACH_NEEDLE := 11
 ## The exterior's paint: the game paints by alpha, 204 the body colour and 77, 153, 166,
 ## 179 and 230 the stripes and trims of its paint schemes (the .clr's other colours); here
 ## they all take the body colour. 255 is unpainted (lamps, badges), 0 cut out.
@@ -66,6 +145,14 @@ const PAINT_ALPHA := Vector2i(70, 240)
 const WINDOW_RIM_ALPHA := Vector2i(180, 230)
 const WINDOW_PANE_ALPHA := Vector2i(90, 170)
 const ATLAS_WIDTH := 512
+## The cabin's pages: texels at INTERIOR_ALPHA take the interior colour (the .clr's colour
+## 4 for each paint, trim and leather), those at the paint's alpha the body colour (the door
+## tops). The interior's are marked CABIN_ALPHA in the skin, which car.gdshader tints with
+## `interior_paint` (no paint alpha is left there once the pages are painted).
+const INTERIOR_FILES := ["interior.fsh", "extint.fsh"]
+const INTERIOR_ALPHA := Vector2i(40, 60)
+const CABIN_ALPHA := 224
+const STOCK_INTERIOR := Color8(98, 99, 100)
 ## Paints for the cars without a .clr (the traffic): plain period colours.
 const STOCK_PAINTS := [Color8(200, 200, 196), Color8(40, 44, 52), Color8(150, 30, 28), Color8(30, 60, 120),
 	Color8(40, 90, 60), Color8(200, 190, 150), Color8(110, 110, 115), Color8(230, 230, 225)]
@@ -76,7 +163,37 @@ var style := 0         # its .tpg style index
 var sim := ""          # the .sim's name
 var _geometry := {}    # geometry slot -> the variant its style shows (0 when it doesn't say)
 var _textures := {}    # texture slot -> the variant of its images its style shows
+var _hood_folded := 0    # a cabriolet's folded hood: its variant of HOOD_SLOT, or 0
+var interior_colours: Array[Color] = []   # each paint's interior (colour 4), at double strength as they are
+var _intglass_pages := {}   # pages of intglass.fsh, the windows' inner panes
+## The glare effects that aren't lamps (kind GLINT_KIND): the sun's glint off the chrome
+## (rims, bumpers, handles, badges, mirrors, pipes): [{pos, facing, lid}] (car space, the
+## group it rides on); and the tail pipes' ends, where the exhaust comes out.
+var glints: Array[Dictionary] = []
+var exhausts: Array[Vector3] = []
 var _window_pages := {}   # page -> its image as the game has it (before _paint_page), for the window pages
+
+
+## Porsche Unleashed's own effect sprites (GameData/Render): "GLNT" the chrome's glint, "GLAR"
+## a lamp's glare (common.fsh), "SMX1" the tail pipe smoke (particle.fsh, the car's "Tail pipe
+## smoke" system in carpart.ini); null without the game.
+static var _fx := {}
+
+
+static func fx(sprite: String) -> Texture2D:
+	if not _fx.has(sprite):
+		_fx[sprite] = null
+		var render := DataPath.find_ci(Game.pu_root, "Render") if Game.pu_root != "" else ""
+		for file in ["common.fsh", "particle.fsh"]:
+			var path := DataPath.find_ci(render, file) if render != "" else ""
+			if path == "" or not FileAccess.file_exists(path):
+				continue
+			var img: Image = Fsh.load_file(path).by_name.get(sprite)
+			if img:
+				img.generate_mipmaps()
+				_fx[sprite] = ImageTexture.create_from_image(img)
+				break
+	return _fx[sprite]
 
 
 ## FeData/Data/nfs5.car: [{index, name, model, sim, style, locale, price, showroom}], the
@@ -360,14 +477,11 @@ func _read_style(tpg: Dictionary) -> void:
 	# the hood's frame and rear window (odd) and the hood folded behind the seats (the
 	# next, even). The styles mix them (the 964's top up over a folded hood, a gap behind
 	# it; the Boxster's none): up, the top and the pair's odd one; down, the folded one alone.
+	# Both are built (hood_up_parts / the folded one), for the car to raise and lower.
 	if _geometry.get(CABRIO_TOP_SLOT, 0) != 0:
-		var hood: int = _geometry.get(HOOD_SLOT, 0)
-		var pair := maxi((hood + 1) / 2, 1)
-		if hood_down:
-			_geometry[CABRIO_TOP_SLOT] = 0
-			_geometry[HOOD_SLOT] = pair * 2
-		else:
-			_geometry[HOOD_SLOT] = pair * 2 - 1
+		var pair := maxi((int(_geometry.get(HOOD_SLOT, 0)) + 1) / 2, 1)
+		_geometry[HOOD_SLOT] = pair * 2 - 1
+		_hood_folded = pair * 2
 
 
 ## Who sits in the car where its style doesn't say (DRIVER_SLOT): the suited driver, with
@@ -443,16 +557,37 @@ func _pages(crp: Crp, tpg: Dictionary, cdir: String) -> Array[Rect2]:
 			bytes = crp.data.slice(sf[fi].offset, sf[fi].offset + sf[fi].length)
 		if bytes.is_empty():
 			continue
-		_fill_page(images[page], Qfs.decompress(bytes), Vector2i(int(det.get("offsetx", "0")), int(det.get("offsety", "0"))),
+		var placed := _fill_page(images[page], Qfs.decompress(bytes), Vector2i(int(det.get("offsetx", "0")), int(det.get("offsety", "0"))),
 			_image_wanted.bind(tpg, fi))
+		# The licence plate ("lice", marked license=1) is blank: the game letters it.
+		for name: String in placed:
+			if tpg.get("file%d.%s" % [fi + 1, name.strip_edges().to_lower()], {}).get("license", "0") == "1":
+				Plates.letter_pu(images[page], placed[name], Plates.random_text_pu(), cdir.get_base_dir())
+		var file_name := str(tpg.header.get("file%d" % (fi + 1), "")).to_lower()
 		if fi == 0:
 			_paint_page(images[page])
+		elif file_name == "intglass.fsh":
+			_intglass_pages[page] = true
+		elif file_name in INTERIOR_FILES:
+			_paint_page(images[page])
+			_mark_cabin(images[page])
 	# The windows' page: the pane (alpha 128) round which runs the black seal (255) and a
 	# rim painted the body colour (204), which the window triangles along the roof show.
 	for p in n_pages:
 		if tpg.get("tpage%d.details" % (p + 1), {}).get("window", "0") == "1":
 			_window_pages[p] = images[p].duplicate()
 			_paint_page(images[p], WINDOW_RIM_ALPHA)
+	# The soft tops' rear window (cabrio.fsh's "sgla", clear plastic at alpha 128) is glass too.
+	for fi in n_files:
+		if str(tpg.header.get("file%d" % (fi + 1), "")).to_lower() == "cabrio.fsh":
+			var cp := int(tpg.get("file%d.details" % (fi + 1), {}).get("tpage", "0")) - 1
+			if cp >= 0 and cp < images.size() and not _window_pages.has(cp):
+				_window_pages[cp] = images[cp].duplicate()
+	# The cut-out texels (round the door handles, fuel caps, badges, the driver) hold a
+	# near-white or black the filtering smears onto the visible edges as a rim: give them
+	# their visible neighbours' colour, page by page so that no page bleeds into the next.
+	for p in n_pages:
+		Nfs3Car._bleed_cutout(images[p], false)
 	# Copied pages ("sourcetpage"): the other side of the car, mirrored by its UVs.
 	for p in n_pages:
 		var det: Dictionary = tpg.get("tpage%d.details" % (p + 1), {})
@@ -507,6 +642,7 @@ func _damage_atlas(tpg: Dictionary, cdir: String, pages: Array[Image], at: Dicti
 		return null
 	var mirror := int(tpg.get("tpage%d.details" % (ext + 1), {}).get("mirrortpage", "0")) - 1
 	var atlas := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+	atlas.fill(Color8(DAMAGE_NEUTRAL, DAMAGE_NEUTRAL, DAMAGE_NEUTRAL, 0))
 	var seen := {}
 	for i in fsh.images.size():
 		var off := d.decode_s32(20 + i * 8)
@@ -516,22 +652,40 @@ func _damage_atlas(tpg: Dictionary, cdir: String, pages: Array[Image], at: Dicti
 		seen[p] = true
 		if page < 0 or page >= pages.size() or not at.has(page):
 			continue
+		img = img.duplicate()
 		if img.get_format() != Image.FORMAT_RGBA8:
-			img = img.duplicate()
 			img.convert(Image.FORMAT_RGBA8)
+		_neutral_cutout(img)
 		var r := Rect2i(Vector2i.ZERO, img.get_size()).intersection(Rect2i(-p, pages[page].get_size()))
 		atlas.blit_rect(img, r, at[page] + p + r.position)
 	atlas.generate_mipmaps()
 	return ImageTexture.create_from_image(atlas)
 
 
+## The damage images' cut-out texels (and the atlas round them) in the grey that leaves the
+## paint as it is (car.gdshader scales it by 2.6 in linear light: sRGB 167), so that the
+## filtering fades a crease's edge out rather than drawing it as a dark or light rim.
+const DAMAGE_NEUTRAL := 167
+
+static func _neutral_cutout(img: Image) -> void:
+	var d := img.get_data()
+	for k in range(0, d.size(), 4):
+		if d[k + 3] == 0:
+			d[k] = DAMAGE_NEUTRAL
+			d[k + 1] = DAMAGE_NEUTRAL
+			d[k + 2] = DAMAGE_NEUTRAL
+	img.set_data(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8, d)
+
+
 ## Draws an FSH's images onto `page` where their headers place them (bytes 12, 14 of the
 ## image header: x, y), those `wanted` (name) -> bool. Variants of one image share a place
 ## ("det", "det1"... the badges, of different widths): the first drawn of those stays.
-static func _fill_page(page: Image, d: PackedByteArray, offset: Vector2i, wanted: Callable) -> void:
+## Returns where each drawn image went on the page, by name.
+static func _fill_page(page: Image, d: PackedByteArray, offset: Vector2i, wanted: Callable) -> Dictionary:
+	var placed := {}
 	var fsh := Fsh.from_bytes(d)
 	if fsh == null:
-		return
+		return placed
 	var pos := {}
 	for i in d.decode_s32(8):
 		var name := d.slice(16 + i * 8, 20 + i * 8).get_string_from_ascii()
@@ -551,6 +705,8 @@ static func _fill_page(page: Image, d: PackedByteArray, offset: Vector2i, wanted
 			img = img.duplicate()
 			img.convert(Image.FORMAT_RGBA8)
 		page.blit_rect(img, Rect2i(Vector2i.ZERO, img.get_size()), p)
+		placed[fsh.names[i]] = Rect2i(p, img.get_size())
+	return placed
 
 
 ## The exterior page to the car shader's convention (NFS3's skins): the paint is mid-grey
@@ -566,6 +722,17 @@ static func _paint_page(img: Image, paint := PAINT_ALPHA) -> void:
 	img.set_data(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8, d)
 
 
+## A cabin page's INTERIOR_ALPHA texels (the leather, carpet and trim, drawn grey) marked
+## CABIN_ALPHA, for car.gdshader to tint with the interior colour.
+static func _mark_cabin(img: Image) -> void:
+	var d := img.get_data()
+	for k in range(0, d.size(), 4):
+		var a := d[k + 3]
+		if a >= INTERIOR_ALPHA.x and a <= INTERIOR_ALPHA.y:
+			d[k + 3] = CABIN_ALPHA
+	img.set_data(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8, d)
+
+
 # ---------------------------------------------------------------- model
 
 ## The parts of the car's style at full detail: the body and glass as one mesh each (car
@@ -574,27 +741,63 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	var want := _geometry
 	# Glass: the window material, and anything on a page the .tpg marks "window" (the
 	# inner panes of the windows use the interior's material on it).
-	var mats := {}   # material -> [page, glass]
+	var mats := {}   # material -> [page, glass, finish (vertex COLOR)]
 	for e in crp.misc_of("mt"):
 		if e.length >= 44:
 			var rm := crp.data.slice(e.offset + 16, e.offset + 32).get_string_from_ascii()
 			var page := crp.data.decode_s32(e.offset + 40)
 			var window: bool = tpg.get("tpage%d.details" % (page + 1), {}).get("window", "0") == "1"
-			mats[e.index] = [page, rm == "CarWindow" or window]
+			var finish := Color(0.5, 0.0, 0.0, 1.0)
+			if e.length >= 64:
+				var env := clampf(crp.data.decode_float(e.offset + e.length - MAT_ENV_FROM_END), 0.0, 1.0)
+				var lens := crp.data.decode_s32(e.offset + e.length - MAT_KIND_FROM_END) == LENS_KIND
+				finish = Color(env, 1.0 if lens else 0.0, 0.0, 1.0)
+			mats[e.index] = [page, rm == "CarWindow" or window or _window_pages.has(page), finish]
 	var body := _Mesh.new()
 	var glass := _Mesh.new()
 	var people := _Mesh.new()   # the driver and passenger
-	# Pop-up headlamps: the "HeadLight" part. The 914's and 944's are modelled down in the
-	# body and rise by the .tpg's headlightextent (m) while the lights are on; the 928's
-	# (a negative extent) are modelled up, and fold back flat about their hinge (the part's
-	# origin), lenses to the sky, while they're off.
+	var driver_body := PackedInt32Array()   # people's vertices on the driver's body (head included)
+	# Pop-up headlamps: the "HeadLight" part, modelled down. The 914's and 944's rise by the
+	# .tpg's headlightextent (m) while the lights are on; the 928's (a negative extent) lie
+	# flat in the wings, lenses to the sky, and swing up about their front edge (the part's
+	# origin, its hinge) until their back is that far up, lenses ahead.
 	var popup_rise := float(tpg.get("header", {}).get("headlightextent", "0"))
 	var popup := _Mesh.new()
 	var popup_hinge := Vector3.ZERO
+	var popup_lamps: Array[int] = []   # the lights on them, turned up with them once they're read
 	var spoiler_down := _Mesh.new()
 	var spoiler_up := _Mesh.new()
+	var spoiler_moving := _Mesh.new()   # SpoilerW, its frames the blend shapes
+	var wipers := {}       # wiper number -> its arm and blade (_Mesh), in their frames if they have them
+	# What opens: group -> its bodywork, its glass (_Mesh) and hinge (car space); the windows
+	# by door; the bays by the lid over them. pane_of: a part's mesh -> the mesh its glass goes to.
+	var lids := {}
+	var lid_hinge := {}
+	var windows := {}
+	var insides := {}   # a lid's underside: shown only while it's open (it shows through it shut)
+	var bays := {}
+	var pane_of := {body: glass}
+	var spoiler_group := 0   # the spoiler rides on this lid (the boot), or 0
+	var pipe_verts := PackedVector3Array()   # the exhaust parts' corners (car space)
+	var wiper_arms := {}   # wiper number -> its arm's vertices (car space)
+	# A cabriolet's hood, up (the top, its frame and rear window, that window's glass) and
+	# folded: shown one or the other ("hood" up / down).
+	var hood_up := _Mesh.new()
+	var hood_glass := _Mesh.new()
+	var hood_folded := _Mesh.new()
+	var hood_top := _Mesh.new()          # the soft top itself, folding (blend shapes)
+	var hood_top_glass := _Mesh.new()    # its rear window's pane
 	var wheel_meshes: Array = [null, null, null, null]
+	var needles := {}   # SPEEDO_NEEDLE / TACH_NEEDLE -> [its _Mesh, hub, the dial's normal] (car space)
+	var mirrors := {}   # MIRROR_LEFT / MIRROR_RIGHT -> its glass (_Mesh); the first article each side
 	var wheel_hubs: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
+	var full_arms := false   # the style's hands slot has a variant in the model
+	for art in crp.articles:
+		var base := crp.sub(art, "Base")
+		if base != null and crp.data[base.offset + 68] == HANDS_SLOT \
+				and crp.data[base.offset + 69] == want.get(HANDS_SLOT, 0):
+			full_arms = true
+			break
 	for art in crp.articles:
 		var base := crp.sub(art, "Base")
 		if base == null:
@@ -602,16 +805,34 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		var bi := crp.data.slice(base.offset + 68, base.offset + 84)
 		var ef := crp.sub(art, "ef")
 		if ef != null:
-			_add_light(crp, ef, art.name, _transform(crp, crp.sub(art, "tr")).origin)
+			# Like the parts, a style shows its slot's variant of the lamps (the 356 A coupé's
+			# and cabriolet's brake lamps, the 996 Turbo's). The 914's and 944's pop-ups are
+			# modelled down: their lamps shine from where they rise to.
+			var level := crp.data[base.offset + EF_LEVEL_AT] if base.length > EF_LEVEL_AT else PART_LEVEL
+			if level == PART_LEVEL and bi[1] == want.get(bi[0], 0):
+				var rise := Vector3(0.0, popup_rise, 0.0) if bi[7] == POPUP_GROUP and popup_rise > 0.0 else Vector3.ZERO
+				var first := lights.size()
+				_add_light(crp, ef, art.name, _transform(crp, crp.sub(art, "tr", PART_LEVEL)).origin + rise, false, bi[7])
+				if bi[7] == POPUP_GROUP and popup_rise < 0.0:
+					popup_lamps.append_array(range(first, lights.size()))
 			continue
 		var lvl := bi[10]
-		if lvl not in SHOWN_LEVELS and not (lvl == 0x1E and bi[0] in CABRIO_SLOTS):
+		var spoiler_moves: bool = lvl == SPOILER_MOVE_LEVEL and art.name.begins_with("SpoilerW") \
+				and want.get(SPOILER_SLOT, 0) % 2 == 1 and bi[8] > 1
+		var lid_inside: bool = lvl == LID_INSIDE_LEVEL and bi[7] in [BONNET, BOOT]
+		if lvl not in SHOWN_LEVELS and not (lvl == 0x1E and bi[0] in CABRIO_SLOTS) and not spoiler_moves \
+				and not lid_inside and lvl != BAY_LEVEL:
+			continue
+		# Each driver comes once more at lower detail, and drawn with him it would give him a
+		# second pair of hands: his stand-in (LODDriverN: body, arms and hands in one, unposed).
+		if lvl in PEOPLE_LEVELS and art.name.to_lower().begins_with("lod"):
 			continue
 		var slot := bi[0]
 		var variant := bi[1]
 		var raised: bool = slot == SPOILER_SLOT and want.get(slot, 0) % 2 == 1 and variant == want.get(slot, 0) + 1
+		var folded: bool = slot == HOOD_SLOT and _hood_folded != 0 and variant == _hood_folded
 		# Slot 0 is the parts every version has (doors, mirrors, wipers): their variant 0.
-		if variant != want.get(slot, 0) and not raised:
+		if variant != want.get(slot, 0) and not raised and not folded:
 			continue
 		var wheel := bi[4] if bi[4] < 4 else -1
 		if wheel >= 0 and bi[7] >= WHEEL_SHADOW_GEOM:
@@ -623,6 +844,27 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		var frame := PART_LEVEL
 		if lvl in PEOPLE_LEVELS and bi[8] > 1 and crp.sub(art, "vt", PART_LEVEL | bi[9] << 4) != null:
 			frame = PART_LEVEL | bi[9] << 4
+		var leans := lvl == PEOPLE_LEVELS[0] and slot == DRIVER_SLOT and bi[8] >= BODY_FRAMES
+		if leans:
+			frame = PART_LEVEL | BODY_FRAMES / 2 << 4
+		# A cabriolet's soft top folds the same way: frames from raised (byte 9, at rest) to
+		# folded behind the seats (the last), the car's blend shapes (hood "top").
+		# The moving spoiler and the wipers with frames have theirs from the first.
+		var top_frames: Array[PackedVector3Array] = []
+		var top_frames_n: Array[PackedVector3Array] = []
+		var wiper := int(art.name[5]) if art.name.begins_with("Wiper") and art.name.length() > 5 else -1
+		var framed := spoiler_moves or wiper >= 0 and bi[8] > 1
+		if _hood_folded != 0 and slot == CABRIO_TOP_SLOT and bi[8] > 1 or framed:
+			for f in range(0 if framed else bi[9], bi[8]):
+				top_frames.append(crp.vec3s(crp.sub(art, "vt", PART_LEVEL | f << 4)))
+				top_frames_n.append(crp.vec3s(crp.sub(art, "nm", PART_LEVEL | f << 4)))
+			if top_frames.any(func(fv: PackedVector3Array) -> bool: return fv.size() != top_frames[0].size()) \
+					or top_frames[0].is_empty():
+				top_frames.clear()
+				if spoiler_moves:
+					continue
+			elif not framed:
+				frame = PART_LEVEL | bi[9] << 4
 		var vt := crp.sub(art, "vt", frame)
 		if vt == null:
 			continue
@@ -644,7 +886,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		var bias := -z_bias * (DEPTH_BIAS_STEP if z_bias < 0 else DEPTH_BIAS_STEP_BACK)
 		var into: _Mesh = people if lvl in PEOPLE_LEVELS else body
 		# An arm or hand's steering sweep (people.sweep): its side, and its frames with
-		# their normals. The body, legs and passenger stay as they are.
+		# their normals; the driver's body leans with them. The legs and passenger stay as they are.
 		var side := -1
 		var sweep: Array[PackedVector3Array] = []
 		var sweep_n: Array[PackedVector3Array] = []
@@ -658,10 +900,87 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			if not sweep.is_empty():
 				side = 0 if art.name.begins_with("Left") else 1
 				people.side_rest[side] = bi[9]
+		# The body's lean, stretched over the arms' frames (theirs at full lock, its too), the
+		# other way round: its first frame leans with their last (the shoulder up on the side
+		# whose hand is at the top of the wheel), else their sleeves come off the shoulders.
+		if into == people and leans:
+			var lean: Array[PackedVector3Array] = []
+			var lean_n: Array[PackedVector3Array] = []
+			for f in BODY_FRAMES:
+				lean.append(crp.vec3s(crp.sub(art, "vt", PART_LEVEL | f << 4)))
+				lean_n.append(crp.vec3s(crp.sub(art, "nm", PART_LEVEL | f << 4)))
+				if lean[f].size() != verts.size() or lean_n[f].size() != verts.size():
+					lean.clear()
+					break
+			if not lean.is_empty():
+				side = BODY_SIDE
+				for f in STEER_FRAMES:
+					var t := float(STEER_FRAMES - 1 - f) * (BODY_FRAMES - 1) / (STEER_FRAMES - 1)
+					var k := mini(int(t), BODY_FRAMES - 2)
+					var p := PackedVector3Array()
+					var n := PackedVector3Array()
+					p.resize(verts.size())
+					n.resize(verts.size())
+					for i in verts.size():
+						p[i] = lean[k][i].lerp(lean[k + 1][i], t - k)
+						n[i] = lean_n[k][i].lerp(lean_n[k + 1][i], t - k)
+					sweep.append(p)
+					sweep_n.append(n)
 		# (Hands with a sweep follow the wheel by it, not by turning with it.)
 		var steers := 1.0 if lvl == STEER_LEVEL else 0.75 if slot == HANDS_SLOT and side < 0 else 0.0
+		# Where he has both pairs of arms (IN_CAR_MARK), each is drawn in its own view.
+		if full_arms and side in [0, 1]:
+			steers = IN_CAR_MARK if slot == HANDS_SLOT else HEAD_MARK
 		if slot == SPOILER_SLOT and want.get(slot, 0) % 2 == 1:
 			into = spoiler_up if raised else spoiler_down
+		if _hood_folded != 0 and slot in CABRIO_SLOTS:
+			into = hood_folded if folded else hood_top if slot == CABRIO_TOP_SLOT else hood_up
+		if spoiler_moves:
+			into = spoiler_moving
+		var wiper_key := -1
+		if wiper >= 0:
+			# (One in frames on its own: the others' frames are made after.)
+			wiper_key = wiper + (100 if not top_frames.is_empty() else 0)
+			if not wipers.has(wiper_key):
+				wipers[wiper_key] = _Mesh.new()
+				wiper_arms[wiper_key] = PackedVector3Array()
+			into = wipers[wiper_key]
+		if slot == NEEDLE_SLOT and bi[7] in [SPEEDO_NEEDLE, TACH_NEEDLE] and xf.origin != Vector3.ZERO \
+				and not needles.has(bi[7]):
+			# The face's normal, forward (away from the driver): the needle turns clockwise
+			# as he sees it by a positive angle about it.
+			var normal := _to_car(xf.basis.z).normalized()
+			needles[bi[7]] = [_Mesh.new(), _to_car(xf.origin), normal if normal.z >= 0.0 else -normal]
+			into = needles[bi[7]][0]
+		# The opening parts: their own meshes, about their group's hinge; the windows within
+		# their doors; the bays under the lids.
+		var group: int = bi[7] if bi[7] in LID_GROUPS else 0
+		if art.name.begins_with("Exhaust"):
+			for v in verts:
+				pipe_verts.append(_to_car(xf * Vector3(-v.x, v.y, v.z)))
+		if group != 0 and not lid_hinge.has(group) and crp.sub(art, "tr", PART_LEVEL) != null:
+			lid_hinge[group] = _to_car(xf.origin)
+		if lvl == BAY_LEVEL:
+			var z := 0.0
+			for v in verts:
+				z += v.z
+			var under := BONNET if z < 0.0 else BOOT   # (the files' front is -Z)
+			if not bays.has(under):
+				bays[under] = _Mesh.new()
+			into = bays[under]
+		elif group != 0 and into == body:
+			var parts: Dictionary = windows if slot == WINDOW_SLOT and group in [DOOR_LEFT, DOOR_RIGHT] \
+					else insides if lid_inside else lids
+			if not parts.has(group):
+				parts[group] = [_Mesh.new(), _Mesh.new()]
+				pane_of[parts[group][0]] = parts[group][1]
+			into = parts[group][0]
+		elif group == BOOT and (into == spoiler_up or into == spoiler_down or into == spoiler_moving):
+			spoiler_group = BOOT
+		var mirror: _Mesh = null
+		if slot == MIRROR_SLOT and bi[7] in [MIRROR_LEFT, MIRROR_RIGHT] and not mirrors.has(bi[7]):
+			mirror = _Mesh.new()
+			mirrors[bi[7]] = mirror
 		if popup_rise != 0.0 and art.name == "HeadLight":
 			into = popup
 			popup_hinge = _to_car(xf.origin)
@@ -676,17 +995,37 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			var pe := crp.sub(art, "pr", PART_LEVEL << 12 | k)
 			if pe == null:
 				break
-			var p := crp.part(pe)
+			var p := crp.part(pe, slot == NEEDLE_SLOT)   # (the needles' corners come in order)
 			var m: Array = mats.get(p.material, [0, false])
-			if m[1] and lvl in INTERIOR_LEVELS:
-				continue   # the windows from inside: the outside's glass is see-through already
+			# The windows from inside: the outside's glass is see-through already. (Some
+			# cabins' panes are a translucent tint on intglass.fsh that would draw solid;
+			# the needles share that page.)
+			if (m[1] or slot in INNER_GLASS_SLOTS and _intglass_pages.has(m[0])) and lvl in INTERIOR_LEVELS:
+				continue
 			var rect: Rect2 = pages[m[0]] if m[0] >= 0 and m[0] < pages.size() else Rect2(0, 0, 0, 0)
 			var vi: PackedInt32Array = p.vertex
 			var ui: PackedInt32Array = p.uv
 			for t3 in range(0, vi.size() - 2, 3):
 				var dst: _Mesh = into
 				if m[1] and wheel < 0:
-					dst = glass if _on_pane(m[0], uvs, ui, t3) else body
+					var pane := _on_pane(m[0], uvs, ui, t3)
+					if into == hood_up:
+						dst = hood_glass if pane else hood_up
+					elif into == hood_top:
+						dst = hood_top_glass if pane else hood_top
+					elif into == hood_folded:
+						dst = into
+					elif pane_of.has(into):
+						dst = pane_of[into] if pane else into
+					else:
+						dst = glass if pane else body
+				if mirror != null and not m[1]:
+					# (Its normal in the game's own space, unmirrored: +Z is back.)
+					var a := xf * (verts[vi[t3]] if vi[t3] < verts.size() else Vector3.ZERO)
+					var b := xf * (verts[vi[t3 + 1]] if vi[t3 + 1] < verts.size() else Vector3.ZERO)
+					var c3 := xf * (verts[vi[t3 + 2]] if vi[t3 + 2] < verts.size() else Vector3.ZERO)
+					if (b - a).cross(c3 - a).normalized().z > 0.7:
+						dst = mirror
 				for c in [0, 2, 1]:
 					var v := verts[vi[t3 + c]] if vi[t3 + c] < verts.size() else Vector3.ZERO
 					var dv := dented[vi[t3 + c]] if vi[t3 + c] < dented.size() else v
@@ -700,7 +1039,21 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 					var uv := uvs[ui[t3 + c]] if ui.size() > t3 + c and ui[t3 + c] < uvs.size() else Vector2.ZERO
 					dst.uv.append(rect.position + uv.clamp(Vector2.ZERO, Vector2.ONE) * rect.size)
 					dst.bias.append(bias)
+					dst.col.append(m[2] if m.size() > 2 else Color(0.5, 0.0, 0.0, 1.0))
 					dst.steer.append(steers)
+					if wiper_key >= 0 and art.name.ends_with("a"):
+						wiper_arms[wiper_key].append(dst.pos[dst.pos.size() - 1])
+					if (dst == hood_top or dst == hood_top_glass or framed and dst == into) and not top_frames.is_empty():
+						if dst.shapes.is_empty():
+							for f in top_frames.size():
+								dst.shapes.append(PackedVector3Array())
+								dst.shape_nrm.append(PackedVector3Array())
+						var at := vi[t3 + c]
+						for f in mini(top_frames.size(), dst.shapes.size()):
+							var fv := top_frames[f][at] if at < top_frames[f].size() else v
+							var fn := top_frames_n[f][at] if at < top_frames_n[f].size() else Vector3.ZERO
+							dst.shapes[f].append(_to_car(xf * Vector3(-fv.x, fv.y, fv.z)))
+							dst.shape_nrm[f].append(_to_car(xf.basis * Vector3(-fn.x, fn.y, fn.z)).normalized())
 					if dst == people:
 						var at := vi[t3 + c]
 						for f in STEER_FRAMES:
@@ -710,6 +1063,8 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 							people.frame_nrm[f].append(_to_car(xf.basis * Vector3(-fn.x, fn.y, fn.z)).normalized())
 						people.side.append(side)
 						people.hand.append(1 if slot == HANDS_SLOT else 0)
+						if slot == DRIVER_SLOT and lvl == PEOPLE_LEVELS[0]:
+							driver_body.append(people.pos.size() - 1)
 	# Centre the model on its body, as the FCE models are.
 	var box := body.box()
 	var mid := box.get_center()
@@ -733,13 +1088,121 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		if not spoiler_up.pos.is_empty():
 			part.spoiler = sp[1]
 		body_parts.append(part)
+	# ... and on its way between them. (It doesn't dent: its frames are the blend shapes.)
+	if not spoiler_moving.pos.is_empty() and not spoiler_up.pos.is_empty() and not spoiler_down.pos.is_empty():
+		spoiler_moving.face_shape_normals()
+		body_parts.append({"name": "spoiler_moving", "mesh": spoiler_moving.commit(-mid), "center": Vector3.ZERO,
+			"spoiler": "moving", "spoiler_frames": spoiler_moving.shapes.size()})
+	# The wipers, from parked (blend shape 0) to the top of their sweep (the last).
+	for key: int in wipers:
+		var wm: _Mesh = wipers[key]
+		if wm.pos.is_empty():
+			continue
+		if wm.shapes.is_empty():
+			_sweep_wiper(wm, wiper_arms[key], glass)
+		wm.face_shape_normals()
+		body_parts.append({"name": "wiper%d" % key, "mesh": wm.commit(-mid), "center": Vector3.ZERO,
+			"wiper_frames": wm.shapes.size()})
+	# What opens: each door and lid about its hinge (see LID_OPEN), turned the way that takes
+	# its free edge out from the body or up; the windows down into their doors; the bays.
+	var lid_motion := {}
+	for group: int in lids:
+		if not lid_hinge.has(group):
+			continue
+		var lm: _Mesh = lids[group][0]
+		var hinge: Vector3 = lid_hinge[group]
+		var door := group in [DOOR_LEFT, DOOR_RIGHT]
+		var axis := Vector3.UP if door else Vector3.RIGHT
+		var c := lm.box().get_center() if not lm.pos.is_empty() else hinge
+		var out := Vector3(signf(c.x), 0.0, 0.0) if door else Vector3.UP
+		var turn: float = LID_OPEN[group]
+		if (Basis(axis, turn) * (c - hinge) - (c - hinge)).dot(out) < 0.0:
+			turn = -turn
+		lid_motion[group] = {"lid": group, "hinge": hinge - mid, "axis": axis, "open": turn}
+		for k in 2:
+			var part_mesh: _Mesh = lids[group][k]
+			if part_mesh.pos.is_empty():
+				continue
+			part_mesh.panelise(box)
+			var part := {"name": "lid%d%s" % [group, "_glass" if k == 1 else ""], "mesh": part_mesh.commit(-mid),
+				"center": Vector3.ZERO, "damaged": part_mesh.damaged(-mid)}.merged(lid_motion[group])
+			if k == 1:
+				part.glass = true
+			body_parts.append(part)
+	for group: int in windows:
+		var wbox := AABB()
+		var first := true
+		for k in 2:
+			for v in (windows[group][k] as _Mesh).pos:
+				wbox = AABB(v, Vector3.ZERO) if first else wbox.expand(v)
+				first = false
+		for k in 2:
+			var wm: _Mesh = windows[group][k]
+			if wm.pos.is_empty():
+				continue
+			var part := {"name": "window%d%s" % [group, "_glass" if k == 1 else ""], "mesh": wm.commit(-mid),
+				"center": Vector3.ZERO, "window": group, "drop": Vector3(0.0, -wbox.size.y * WINDOW_DROP, 0.0)}
+			if lid_motion.has(group):
+				part.merge(lid_motion[group])
+			if k == 1:
+				part.glass = true
+			body_parts.append(part)
+	for group: int in insides:
+		for k in 2:
+			var im: _Mesh = insides[group][k]
+			if im.pos.is_empty() or not lid_motion.has(group):
+				continue
+			var part := {"name": "lid%d_inside%s" % [group, "_glass" if k == 1 else ""], "mesh": im.commit(-mid),
+				"center": Vector3.ZERO, "bay": group}.merged(lid_motion[group])
+			if k == 1:
+				part.glass = true
+			body_parts.append(part)
+	for under: int in bays:
+		var bm: _Mesh = bays[under]
+		if not bm.pos.is_empty():
+			body_parts.append({"name": "bay%d" % under, "mesh": bm.commit(-mid), "center": Vector3.ZERO, "bay": under})
+	# The spoiler on the engine lid, and the mirrors' glass on the doors, go with them.
+	for p in body_parts:
+		if p.has("spoiler") and spoiler_group != 0 and lid_motion.has(spoiler_group):
+			p.merge(lid_motion[spoiler_group])
+	for hp: Array in [[hood_up, "up", false], [hood_glass, "up", true], [hood_folded, "down", false],
+			[hood_top, "top", false], [hood_top_glass, "top", true]]:
+		var hm: _Mesh = hp[0]
+		if hm.pos.is_empty():
+			continue
+		hm.panelise(box)
+		hm.face_shape_normals()
+		var part := {"name": "hood_" + hp[1], "mesh": hm.commit(-mid), "center": Vector3.ZERO, "hood": hp[1]}
+		# (A folding top doesn't dent: its frames are the blend shapes.)
+		if hm.shapes.is_empty():
+			part.damaged = hm.damaged(-mid)
+		else:
+			part.hood_frames = hm.shapes.size()
+		if hp[2]:
+			part.glass = true
+		body_parts.append(part)
 	if not popup.pos.is_empty():
-		var down := popup if popup_rise > 0.0 else popup.turned(Basis(Vector3.RIGHT, -PI / 2.0), popup_hinge)
-		var up_at := Vector3(0.0, popup_rise, 0.0) if popup_rise > 0.0 else Vector3.ZERO
-		down.panelise(box)
-		body_parts.append({"name": "popup_closed", "mesh": down.commit(-mid), "center": Vector3.ZERO,
-			"popup_closed": true, "damaged": down.damaged(-mid)})
-		popup_lights.append({"name": "popup", "mesh": popup.commit(-mid), "center": up_at})
+		var up := popup
+		var up_at := Vector3.ZERO
+		# How they go down again (Car animates them): straight down, or turned back about the hinge.
+		var motion := {}
+		if popup_rise > 0.0:
+			up_at = Vector3(0.0, popup_rise, 0.0)
+			motion = {"sink": popup_rise}
+		else:
+			var reach := maxf(popup_hinge.z - popup.box().position.z, -popup_rise)
+			var turn := Basis(Vector3.RIGHT, asin(-popup_rise / reach))   # lifts the back (-Z)
+			up = popup.turned(turn, popup_hinge)
+			for i in popup_lamps:
+				lights[i].pos = popup_hinge + turn * (lights[i].pos - popup_hinge)
+			motion = {"hinge": popup_hinge - mid, "fold": -turn.get_euler().x}
+		popup.panelise(box)
+		body_parts.append({"name": "popup_closed", "mesh": popup.commit(-mid), "center": Vector3.ZERO,
+			"popup_closed": true, "damaged": popup.damaged(-mid)})
+		popup_lights.append({"name": "popup", "mesh": up.commit(-mid), "center": up_at}.merged(motion))
+	var eye := _mark_head(people, driver_body)
+	if eye != Vector3.INF:
+		dash = {"eye": eye - mid, "own_cabin": true}
 	if not people.pos.is_empty():
 		# They don't dent: no "damaged". Their arms and hands follow the wheel by blend
 		# shapes, one per angle in "steer_shapes" (car.gdshader's steer_angle); without a
@@ -750,6 +1213,44 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		if not steer_angles.is_empty():
 			dp.steer_shapes = steer_angles
 		body_parts.append(dp)
+	for side: int in mirrors:
+		var gm: _Mesh = mirrors[side]
+		if gm.pos.is_empty():
+			continue
+		# A point on the glass and its normal (the glass is near enough flat): each triangle's
+		# face normal by its area, turned back (the glass faces the driver's way back).
+		var point := Vector3.ZERO
+		var normal := Vector3.ZERO
+		var area := 0.0
+		for i in range(0, gm.pos.size() - 2, 3):
+			var n := (gm.pos[i + 2] - gm.pos[i]).cross(gm.pos[i + 1] - gm.pos[i])
+			var w := n.length()
+			point += (gm.pos[i] + gm.pos[i + 1] + gm.pos[i + 2]) / 3.0 * w
+			normal += n if n.z <= 0.0 else -n
+			area += w
+		if area <= 0.0:
+			continue
+		body_parts.append({"name": "mirror_glass_%s" % ("left" if side == MIRROR_LEFT else "right"),
+			"mesh": gm.commit(-mid), "center": Vector3.ZERO,
+			"mirror_glass": {"point": point / area - mid, "normal": normal.normalized()}}.merged(lid_motion.get(side, {})))
+	for kind: int in needles:
+		var nm: _Mesh = needles[kind][0]
+		if nm.pos.is_empty():
+			continue
+		var hub: Vector3 = needles[kind][1]
+		var axis: Vector3 = needles[kind][2]
+		# Where it points as modelled: its tip (the corner farthest from the hub), flat on the
+		# dial, from straight up on the dial, clockwise as the driver sees it.
+		var tip := Vector3.ZERO
+		for v in nm.pos:
+			if v.distance_squared_to(hub) > tip.length_squared():
+				tip = v - hub
+		tip -= axis * axis.dot(tip)
+		var up := Vector3.UP - axis * axis.y
+		var modelled := atan2(axis.dot(up.cross(tip)), up.dot(tip))
+		body_parts.append({"name": "needle_rpm" if kind == TACH_NEEDLE else "needle_speed",
+			"mesh": nm.commit(-hub), "center": hub - mid, "needle": "rpm" if kind == TACH_NEEDLE else "speed",
+			"axis": axis, "zero": NEEDLE_ZERO * TAU - modelled})
 	if not glass.pos.is_empty():
 		body_parts.append({"name": "glass", "mesh": glass.commit(-mid), "center": Vector3.ZERO, "glass": true,
 			"damaged": glass.damaged(-mid)})
@@ -758,6 +1259,112 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			wheels.append({"name": "wheel%d" % w, "mesh": wheel_meshes[w].commit(Vector3.ZERO), "center": wheel_hubs[w] - mid})
 	for l in lights:
 		l.pos -= mid
+	for gl in glints:
+		gl.pos -= mid
+	for i in exhausts.size():
+		exhausts[i] -= mid
+	# Without a glint marking them, the pipes' ends: each Exhaust part's rearmost corners.
+	if exhausts.is_empty():
+		exhausts = _pipe_ends(pipe_verts, mid)
+
+
+## A parked wiper's sweep, as its blend shapes (see WIPER_SWEEP): turned about the arm's far
+## end (the wiper's end away from its middle) in the plane it lies in, the blade's tip going
+## up the glass; each vertex over the glass kept as far off it as it's parked (or, parked
+## on the scuttle, just clear of it), the glass curving away from that plane.
+static func _sweep_wiper(wm: _Mesh, arm: PackedVector3Array, glass: _Mesh) -> void:
+	var centre := Vector3.ZERO
+	for p in wm.pos:
+		centre += p
+	centre /= wm.pos.size()
+	var pivot := centre
+	for p in (arm if not arm.is_empty() else wm.pos):
+		if p.distance_squared_to(centre) > pivot.distance_squared_to(centre):
+			pivot = p
+	var tip := pivot
+	for p in wm.pos:
+		if p.distance_squared_to(pivot) > tip.distance_squared_to(pivot):
+			tip = p
+	var reach := tip.distance_to(pivot) + 0.1
+	var panes := PackedVector3Array()
+	for i in range(0, glass.pos.size() - 2, 3):
+		if glass.pos[i].distance_to(pivot) < reach + 0.6:
+			panes.append_array([glass.pos[i], glass.pos[i + 1], glass.pos[i + 2]])
+	# The plane it sweeps in: the windscreen's round it (its triangles facing forward, by
+	# area), else the wiper's own (its blade's rubber stands up off the glass).
+	var axis := Vector3.ZERO
+	for i in range(0, panes.size() - 2, 3):
+		var fn := (panes[i + 2] - panes[i]).cross(panes[i + 1] - panes[i])
+		fn = fn if fn.y >= 0.0 else -fn
+		if fn.normalized().z > 0.3:
+			axis += fn
+	if axis.length_squared() < 1e-12:
+		for i in range(0, wm.pos.size() - 2, 3):
+			var fn := (wm.pos[i + 2] - wm.pos[i]).cross(wm.pos[i + 1] - wm.pos[i])
+			axis += fn if fn.y >= 0.0 else -fn
+	if axis.length_squared() < 1e-12:
+		return
+	axis = axis.normalized()
+	# Up the glass: its slope, rising towards the back (a raked screen's plane is nearly level).
+	var slope := (Vector3.UP - axis * axis.y).normalized()
+	var turn := 1.0 if (Basis(axis, 0.1) * (tip - pivot) - (tip - pivot)).dot(slope) > 0.0 else -1.0
+	# How far off the glass each vertex rides.
+	var low := INF
+	for p in wm.pos:
+		low = minf(low, (p - pivot).dot(axis))
+	var lift := PackedFloat32Array()
+	for p in wm.pos:
+		var h := _glass_under(p, axis, panes)
+		var off := (p - h).dot(axis) if h != Vector3.INF else INF
+		lift.append(off if off > 0.0 and off < 0.08 else 0.012 + (p - pivot).dot(axis) - low)
+	for f in WIPER_FRAMES:
+		var b := Basis(axis, turn * WIPER_SWEEP * f / (WIPER_FRAMES - 1))
+		var sp := PackedVector3Array()
+		var sn := PackedVector3Array()
+		for i in wm.pos.size():
+			var q := pivot + b * (wm.pos[i] - pivot)
+			if f > 0:
+				var h := _glass_under(q, axis, panes)
+				if h != Vector3.INF:
+					q += axis * clampf(lift[i] - (q - h).dot(axis), -0.04, 0.04)
+			sp.append(q)
+			sn.append(b * wm.nrm[i])
+		wm.shapes.append(sp)
+		wm.shape_nrm.append(sn)
+
+
+## The tail pipes' ends from the exhaust parts' corners: on each side, the middle of those
+## within 4 cm of the rearmost (less `mid`).
+static func _pipe_ends(verts: PackedVector3Array, mid: Vector3) -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for side in [1.0, -1.0]:
+		var back := INF
+		for v in verts:
+			if signf(v.x) == side or v.x == 0.0 and side > 0.0:
+				back = minf(back, v.z)
+		if back == INF:
+			continue
+		var sum := Vector3.ZERO
+		var n := 0
+		for v in verts:
+			if (signf(v.x) == side or v.x == 0.0 and side > 0.0) and v.z < back + 0.04:
+				sum += v
+				n += 1
+		out.append(sum / n - mid)
+	return out
+
+
+## The glass (triangles, three corners each) under `p` along -`axis`, the nearest within
+## 15 cm either side, or INF.
+static func _glass_under(p: Vector3, axis: Vector3, panes: PackedVector3Array) -> Vector3:
+	var best := Vector3.INF
+	var from := p + axis * 0.15
+	for i in range(0, panes.size() - 2, 3):
+		var hit: Variant = Geometry3D.ray_intersects_triangle(from, -axis, panes[i], panes[i + 1], panes[i + 2])
+		if hit != null and (hit as Vector3).distance_to(from) < 0.3 \
+				and (best == Vector3.INF or (hit as Vector3).distance_to(p) < best.distance_to(p)):
+			best = hit
+	return best
 
 
 ## Whether the triangle at `t3` of a window material's part lies on the see-through pane
@@ -773,6 +1380,32 @@ func _on_pane(page: int, uvs: PackedVector2Array, ui: PackedInt32Array, t3: int)
 	c = (c / 3.0).clamp(Vector2.ZERO, Vector2.ONE) * Vector2(img.get_size() - Vector2i.ONE)
 	var a := int(img.get_pixel(int(c.x), int(c.y)).a8)
 	return a >= WINDOW_PANE_ALPHA.x and a <= WINDOW_PANE_ALPHA.y
+
+
+## Marks the driver's head (the triangles of `body`, his body's vertices in `people`, that
+## reach within HEAD_DEPTH of its top) with HEAD_MARK, and returns where his eyes are (car
+## space, uncentred), or Vector3.INF without a driver.
+static func _mark_head(people: _Mesh, body: PackedInt32Array) -> Vector3:
+	if body.is_empty():
+		return Vector3.INF
+	var top := -INF
+	for i in body:
+		top = maxf(top, people.pos[i].y)
+	var mid := Vector3.ZERO
+	var n := 0
+	for i in body:
+		if people.pos[i].y > top - HEAD_DEPTH:
+			mid += people.pos[i]
+			n += 1
+	# The triangles are stored a vertex each, three in a row: a triangle with a corner on the
+	# head goes with it, so the neck's edge doesn't leave slivers behind.
+	for i in body:
+		if people.pos[i].y > top - HEAD_DEPTH:
+			var t := i - i % 3
+			for k in 3:
+				people.steer[t + k] = HEAD_MARK
+	mid /= n
+	return Vector3(mid.x, top - EYE_BELOW_TOP, mid.z)
 
 
 ## Porsche Unleashed's car space (left-handed, front towards -Z) to ours: facing +Z, its
@@ -792,8 +1425,8 @@ func _transform(crp: Crp, e: Crp.Entry) -> Transform3D:
 
 
 ## A glare effect as an NFS3 light dummy: headlights white, brake and tail lights red,
-## reverse lights white at the back; mirrored ones on both sides.
-func _add_light(crp: Crp, e: Crp.Entry, name: String, offset: Vector3) -> void:
+## reversing lamps (kind 2) white at the back; mirrored ones on both sides.
+func _add_light(crp: Crp, e: Crp.Entry, name: String, offset: Vector3, as_brake := false, group := 0) -> void:
 	var d := crp.data
 	var o := e.offset
 	if o + 0x58 > d.size():
@@ -801,15 +1434,42 @@ func _add_light(crp: Crp, e: Crp.Entry, name: String, offset: Vector3) -> void:
 	var pos := _to_car(offset + Vector3(d.decode_float(o + 8), d.decode_float(o + 12), d.decode_float(o + 16)))
 	var kind := d[o + 84]
 	var head := d[o + 87] == 1
+	if kind == GLINT_KIND:
+		var facing := _to_car(-Vector3(d.decode_float(o + 56), d.decode_float(o + 60), d.decode_float(o + 64))).normalized()
+		for side in ([1.0, -1.0] if d.decode_u32(o + 80) != 0 else [1.0]):
+			var p := Vector3(pos.x * side, pos.y, pos.z)
+			if name.to_lower().contains("exhaust"):
+				exhausts.append(p)
+			else:
+				glints.append({"pos": p, "facing": Vector3(facing.x * side, facing.y, facing.z),
+					"lid": group if group in LID_GROUPS else 0})
+		return
 	var n := name.to_lower()
+	# Its colour (B, G, R): amber, red or white.
+	var red := d[o + 74] > 200 and d[o + 73] < 60 and d[o + 72] < 60
+	var amber := d[o + 74] > 200 and d[o + 73] > 60 and d[o + 73] < 200 and d[o + 72] < 60
 	var dname := ""
 	if n.contains("siren"):
 		# The light bar: red on the left, blue on the right, flashing in turn (Car's sirens).
 		dname = "SML" if pos.x >= 0.0 else "SMR"
 	elif head or n.contains("headlight"):
 		dname = "HFLN"
+	elif not as_brake and (kind in [3, 5] or n.contains("signal")):
+		# The indicators (kind 3; the 935's 5), amber or (the 356s' at the back) red: Car
+		# flashes a side's (I). The 356 A's and 550's red ones are their brake lamps too.
+		dname = "IRYN" if red else "IOYN"
+		if red and n.contains("brake"):
+			_add_light(crp, e, name, offset, true)
+	elif n.contains("fog"):
+		dname = "FWYN"   # fog lamps, with the headlights in rain and snow (F)
+	elif kind == 0 and n.contains("sidelight"):
+		dname = "POYN2" if amber else "PWYN2"   # the 928's side markers, with the headlights
 	elif kind == 1 or n.contains("brake"):
 		dname = "TRLN"
+	elif kind == 2 or n.contains("reverse"):
+		dname = "RWYN3"
+	elif kind == 0 and red:
+		dname = "TRLN"   # the 935's tail lamps
 	else:
 		return
 	var mirrored := d.decode_u32(o + 80) != 0
@@ -852,9 +1512,14 @@ func _read_colours(path: String) -> void:
 				int(sec.get("color1.v", "0")) / 255.0) if sec.has("color1.h") \
 				else Color8(int(sec["color1.r"]), int(sec["color1.g"]), int(sec["color1.b"]))
 			colours.append(Color(c.r * 2.0, c.g * 2.0, c.b * 2.0))
+			# (Its HSV: some sections' RGB is left at zero.)
+			var i := Color.from_hsv(int(sec["color4.h"]) / 255.0, int(sec.get("color4.s", "0")) / 255.0,
+				int(sec.get("color4.v", "0")) / 255.0) if sec.has("color4.h") else STOCK_INTERIOR
+			interior_colours.append(Color(i.r * 2.0, i.g * 2.0, i.b * 2.0))
 	if colours.is_empty():
 		for c: Color in STOCK_PAINTS:
 			colours.append(Color(c.r * 2.0, c.g * 2.0, c.b * 2.0))
+			interior_colours.append(Color(STOCK_INTERIOR.r * 2.0, STOCK_INTERIOR.g * 2.0, STOCK_INTERIOR.b * 2.0))
 	info.colours = []
 	for i in colours.size():
 		info.colours.append("Colour %d" % (i + 1))
@@ -867,8 +1532,9 @@ class _Mesh:
 	var nrm := PackedVector3Array()      # the model's normal, or zero for the face's
 	var steer := PackedFloat32Array()    # UV2.x: 1 the steering wheel, 0.75 the hands on it (both turn), 0
 	var dent := PackedVector3Array()     # each vertex in the damaged copy
+	var col := PackedColorArray()        # its material's finish (see MAT_ENV_FROM_END)
 	# The people's steering sweep: each vertex in each of the arms' and hands' frames (where
-	# it is at rest on the parts that don't move), the side (0 left, 1 right, -1 none) and
+	# it is at rest on the parts that don't move), the side (0 left, 1 right, BODY_SIDE, -1 none) and
 	# whether it's a hand; each side's rest frame. sweep() makes blend shapes of them.
 	var frames: Array[PackedVector3Array] = []
 	var frame_nrm: Array[PackedVector3Array] = []
@@ -921,10 +1587,24 @@ class _Mesh:
 			return {}
 		return {"pivot": b.get_center(), "axis": n.normalized()}
 
+	## Each blend shape's normals turned to the side its triangle faces in that shape, as
+	## _normals() does the rest pose's.
+	func face_shape_normals() -> void:
+		for f in shapes.size():
+			var sp := shapes[f]
+			if sp.size() != pos.size() or shape_nrm[f].size() != pos.size():
+				continue
+			for i in range(0, sp.size() - 2, 3):
+				var fn := _face(sp, i)
+				for k in 3:
+					var n := shape_nrm[f][i + k]
+					shape_nrm[f][i + k] = fn if n == Vector3.ZERO else (n if n.dot(fn) >= 0.0 else -n)
+
 	## A copy turned by `basis` about `pivot` (car space), its damaged copy with it.
 	func turned(basis: Basis, pivot: Vector3) -> _Mesh:
 		var m := _Mesh.new()
 		m.uv = uv
+		m.col = col
 		m.bias = bias
 		m.steer = steer
 		for i in pos.size():
@@ -996,6 +1676,8 @@ class _Mesh:
 			n.resize(pos.size())
 			for i in pos.size():
 				var s := side[i]
+				if s == BODY_SIDE:
+					s = angles.keys()[0]
 				if not angles.has(s):
 					p[i] = pos[i]
 					n[i] = nrm[i]
@@ -1058,6 +1740,8 @@ class _Mesh:
 		for i in pos.size():
 			st.set_uv(uv[i])
 			st.set_uv2(Vector2(steer[i], bias[i]))
+			if col.size() == pos.size():
+				st.set_color(col[i])
 			st.set_normal(normals[i])
 			st.add_vertex(pos[i] + offset)
 		if shapes.is_empty():

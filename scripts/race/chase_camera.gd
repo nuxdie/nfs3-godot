@@ -1,15 +1,15 @@
 class_name ChaseCamera
 extends Camera3D
 ## Follows a car. Modes cycle with the "camera" action: near chase, far chase,
-## bumper, and in-car where the car has a dashboard (High Stakes cars). Hold "look_back" to
-## look behind. The mouse orbits the chase views and turns the head
+## bumper, and in-car where the car has a cabin (High Stakes and Porsche Unleashed cars).
+## Hold "look_back" to look behind. The mouse orbits the chase views and turns the head
 ## in the bumper view; the view drifts back behind the car once the mouse is left alone.
 
 const MODES := [
 	{"name": "Chase", "dist": 6.2, "height": 1.9, "look": 1.0, "fov": 68.0},
 	{"name": "Far", "dist": 10.5, "height": 3.2, "look": 1.2, "fov": 64.0},
 	{"name": "Bumper", "dist": -0.4, "height": 0.75, "look": 0.7, "fov": 75.0},
-	{"name": "In-car", "dist": -0.4, "height": 0.75, "look": 0.7, "fov": 72.0, "inside": true},
+	{"name": "In-car", "dist": -0.4, "height": 0.75, "look": 0.7, "fov": 78.0, "inside": true},
 	{"name": "TV", "dist": 10.5, "height": 3.2, "look": 1.2, "fov": 64.0, "tv": true},
 ]
 const TV_REACH := 160.0       # m: NFS3's cameras (no road stretch of their own) watch cars this near
@@ -37,6 +37,7 @@ var _tv_node := -1
 
 func _ready() -> void:
 	mode = Game.camera_mode
+	cull_mask &= ~Car.OWN_VIEW_LAYER   # the car it sits in, only its side mirrors draw
 	set_mouse_look(true)
 
 
@@ -128,6 +129,7 @@ func _physics_process(dt: float) -> void:
 		if blocked:
 			desired = hit.position + (from - desired).normalized() * 0.4
 		_pos = desired if _pos == Vector3.ZERO else _pos.lerp(desired, 1.0 - exp(-dt * (40.0 if blocked or mouse_active else 14.0)))
+		_pos = _out_of_cars(_pos)
 	global_position = _pos
 	var look_at_pt: Vector3 = target.global_position + view * 6.0 * m.look + up * 0.8
 	if m.dist < 0.0:
@@ -166,6 +168,47 @@ func _update_tv(dt: float) -> bool:
 	fov = clampf(rad_to_deg(2.0 * atan(6.0 / maxf(d, 1.0))), 8.0, 70.0)
 	_pos = global_position
 	return true
+
+
+## `p` moved out of any other car's body box it's in (or grazing): over the roof or out the
+## nearest side, whichever is the shorter way, so the chase views never look out from inside one.
+func _out_of_cars(p: Vector3) -> Vector3:
+	const R := 0.3   # m of clearance from the bodywork (the near plane and some)
+	var q := PhysicsShapeQueryParameters3D.new()
+	var ball := SphereShape3D.new()
+	ball.radius = R
+	q.shape = ball
+	q.collision_mask = 2   # cars
+	q.exclude = [target.get_rid()]
+	var space := get_world_3d().direct_space_state
+	for _pass in 2:   # a second in case the first push lands in a car alongside
+		q.transform = Transform3D(Basis(), p)
+		var hits := space.intersect_shape(q, 4)
+		if hits.is_empty():
+			break
+		for h in hits:
+			var body := h.collider as CollisionObject3D
+			if body == null:
+				continue
+			var cs := body.shape_owner_get_owner(body.shape_find_owner(h.shape)) as CollisionShape3D
+			if cs == null or not cs.shape is BoxShape3D:
+				continue
+			var xf := cs.global_transform
+			var l := xf.affine_inverse() * p
+			var ext: Vector3 = (cs.shape as BoxShape3D).size * 0.5 + Vector3.ONE * R
+			var dx := ext.x - absf(l.x)
+			var dy := ext.y - l.y          # only ever up, never under the car
+			var dz := ext.z - absf(l.z)
+			if dx <= 0.0 or dz <= 0.0 or absf(l.y) >= ext.y:
+				continue
+			if dy <= dx and dy <= dz:
+				l.y = ext.y
+			elif dx <= dz:
+				l.x = signf(l.x if l.x != 0.0 else 1.0) * ext.x
+			else:
+				l.z = signf(l.z if l.z != 0.0 else 1.0) * ext.z
+			p = xf * l
+	return p
 
 
 func mode_name() -> String:

@@ -152,6 +152,8 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 	# Lamps the files mark breakable go out in a hit hard enough to bend them.
 	if s >= LAMP_BREAK:
 		_car.break_lamps(p, radius)
+	# ... and doors and lids spring open (Porsche Unleashed's).
+	_car.latch_hit(p, s)
 	for n in _car.fittings():
 		var f := 1.0 - n.position.distance_to(p) / radius
 		if f > 0.0:
@@ -333,7 +335,7 @@ static func _bend_panels(sf: Dictionary, lp: Vector3, radius: float, depth: floa
 			continue
 		verts[i] = rest[i].lerp(dpos[i], w)
 		normals[i] = orig[i].lerp(dnorm[i], w).normalized()
-		colours[i] = Color(1.0, 1.0, 1.0, 1.0 - w)
+		colours[i].a = 1.0 - w   # (rgb: Porsche Unleashed's finishes, see Nfs5Car.MAT_ENV_FROM_END)
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_COLOR] = colours

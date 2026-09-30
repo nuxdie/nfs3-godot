@@ -21,13 +21,31 @@ uniform bool wheel = false;
 // sees neither the sky nor the reflection probe's open road, so it takes no clearcoat and
 // only a faint sheen instead of mirroring them as a blue-grey film.
 uniform bool interior = false;
+// Porsche Unleashed's cabin trim and leather: skin texels at alpha 224 (Nfs5Car.CABIN_ALPHA)
+// take this colour, at double strength as the paint does. Transparent (other cars): unused.
+uniform vec4 interior_paint = vec4(0.0);
 // High Stakes' driver: the vertices marked in UV2.x (steering wheel and hands) turn by
 // `steer_angle` about the column through `steer_pivot`, mesh-local.
 uniform float steer_angle = 0.0;
 uniform vec3 steer_pivot = vec3(0.0);
 uniform vec3 steer_axis = vec3(0.0, 0.0, 1.0);
+// Porsche Unleashed's finishes, per vertex from its material (Nfs5Car.MAT_ENV_FROM_END):
+// COLOR.b 0 marks them there (the other cars' meshes have no colours: white), COLOR.r how
+// much it mirrors (0 matte, 0.5 gloss, 1 chrome), COLOR.g 1 on a lamp's lens. The lenses
+// light with their lamps (Car sets these): the front ones' clear glass with the headlights,
+// the back ones' red with the tail lamps and brakes, the white with reversing, the amber
+// with the indicators on their side (+X the left).
+uniform float head_lit = 0.0;
+uniform float tail_lit = 0.0;
+uniform float brake_lit = 0.0;
+uniform float reverse_lit = 0.0;
+uniform float indicator_left = 0.0;
+uniform float indicator_right = 0.0;
+
+varying vec3 model_pos;
 
 void vertex() {
+	model_pos = VERTEX;
 	if (UV2.x > 0.5 && steer_angle != 0.0) {
 		// Rodrigues: the same turn as Basis(steer_axis, steer_angle).
 		float c = cos(steer_angle);
@@ -52,16 +70,25 @@ void fragment() {
 	// Cut out on the full-size skin's alpha, like the original's colour key. Traffic bodies
 	// are big panels reaching down to the road whose lower edge and wheel arches are cut out
 	// of the skin; the averaged alpha of the small mip levels shows those as strips on the road.
-	if (textureLod(albedo_tex, UV, 0.0).a < 0.08) {
+	// Porsche Unleashed's cut-outs (the wheel arches, round handles and flaps) are a hard step
+	// from 0 to the paint's alpha (0.46) at a couple of cm a texel: cut halfway up the
+	// filtered step, where its contour runs round the texels' corners instead of hugging them.
+	if (textureLod(albedo_tex, UV, 0.0).a < (COLOR.b < 0.5 ? 0.23 : 0.08)) {
 		discard;
 	}
 	float paint_area = 1.0 - smoothstep(0.7, 0.85, c.a);
 	// Linear luminance; glass is ~0.1 in sRGB (0.01 linear), paint mostly above 0.3.
 	float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
-	float glass = paint_area * (1.0 - smoothstep(0.012, 0.05, luma));
+	// (Porsche Unleashed's windows are parts of their own: its dark paint texels are the
+	// panels' shut lines and the shadows drawn round handles and flaps, and stay paint.)
+	float glass = paint_area * (1.0 - smoothstep(0.012, 0.05, luma)) * step(0.5, COLOR.b);
 	float painted = paint_area - glass;
 	vec3 body = min(c.rgb * paint.rgb, vec3(1.0));
 	ALBEDO = mix(c.rgb, body, painted);
+	if (interior_paint.a > 0.0) {
+		float cabin = 1.0 - smoothstep(0.012, 0.03, abs(textureLod(albedo_tex, UV, 0.0).a - 224.0 / 255.0));
+		ALBEDO = mix(ALBEDO, min(c.rgb * interior_paint.rgb, vec3(1.0)), cabin);
+	}
 	vec4 crumple = texture(damage_tex, UV);
 	float bent = crumple.a * clamp((1.0 - COLOR.a) * 1.5, 0.0, 1.0);
 	// The creases are grey about a third of the way up: darker than that shades, lighter lifts.
@@ -105,6 +132,41 @@ void fragment() {
 #ifndef LOW_QUALITY
 		CLEARCOAT = 0.0;
 #endif
+	}
+	if (COLOR.b < 0.5 && !wheel) {
+		float env = COLOR.r;
+		float unpainted = 1.0 - paint_area;
+		// Chrome: a mirror of its surroundings, tinted by the skin's drawn highlights.
+		// (Not the flat near-white round a badge, drawn to pass for the paint.)
+		float flat_white = smoothstep(0.55, 0.75, luma) * (1.0 - smoothstep(0.03, 0.08, max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b)));
+		float chrome = smoothstep(0.75, 0.95, env) * unpainted * (1.0 - flat_white);
+		ALBEDO = mix(ALBEDO, clamp(c.rgb * 1.35 + 0.08, 0.0, 1.0), chrome);
+		METALLIC = mix(METALLIC, 0.95, chrome);
+		ROUGHNESS = mix(ROUGHNESS, 0.1, chrome);
+		// Matte: rubber, black trim, wheel wells, the underside.
+		float matte = 1.0 - smoothstep(0.1, 0.3, env);
+		ROUGHNESS = mix(ROUGHNESS, max(ROUGHNESS, 0.62), matte * unpainted);
+		SPECULAR *= mix(1.0, 0.55, matte * unpainted);
+#ifndef LOW_QUALITY
+		CLEARCOAT *= mix(1.0, 0.45, matte);
+#endif
+		// A lamp's lens: clear, glossy glass over its reflector, lit with its lamp.
+		float lens = COLOR.g * unpainted;
+		ROUGHNESS = mix(ROUGHNESS, 0.05, lens);
+		SPECULAR = mix(SPECULAR, 0.75, lens);
+		if (lens > 0.0) {
+			float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+			float red = smoothstep(0.12, 0.3, c.r - max(c.g, c.b) * 1.1) * (1.0 - smoothstep(0.35, 0.6, c.g));
+			float amber = step(0.4, c.r) * smoothstep(0.18, 0.3, c.g) * (1.0 - smoothstep(0.7, 0.85, c.g / max(c.r, 0.01))) * (1.0 - smoothstep(0.25, 0.4, c.b / max(c.r, 0.01)));
+			float clear = (1.0 - smoothstep(0.12, 0.25, sat)) * smoothstep(0.3, 0.65, luma);
+			float front = step(0.0, model_pos.z);
+			float ind = model_pos.x >= 0.0 ? indicator_left : indicator_right;
+			vec3 glow = c.rgb * (front * clear * head_lit * 1.6
+					+ (1.0 - front) * red * (tail_lit * 0.8 + brake_lit * 2.4)
+					+ (1.0 - front) * clear * reverse_lit * 1.6
+					+ amber * ind * 2.6);
+			EMISSION = glow * lens;
+		}
 	}
 	if (interior) {
 		ROUGHNESS = max(ROUGHNESS, 0.7);

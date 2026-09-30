@@ -115,6 +115,11 @@ parts (body, mirrors, T-top, cockpit, driver) are merged into one mesh and the w
 second. Crashes bend the body toward the damaged copy every FCE4 carries, vertex for vertex,
 rather than NFS3 cars' made-up crumple. The dials' scales aren't in `dash.fce`: the speedo
 needle reads to a little past the car's top speed, the rev counter to a quarter past redline.
+Its side mirrors ("driver mirror", "passenger mirror") mark their glass with triangle flags
+`0x0A` (the bonus cars' copies `0x01`); in the in-car view each glass shows the scene from the
+driver's eye reflected in it, drawn as if convex (2.5 times as wide as a flat glass would
+show) and set level with a sliver of the car's own flank at the inner edge. The car's outside,
+hidden from the in-car view, is drawn for the mirrors alone.
 Crashes bend a panel at a time (the triangles' flags from bit 11 up name the panel), the
 damaged copy's normals coming with it.
 
@@ -227,8 +232,13 @@ and face the car's style picks; the steering wheel (level 0x49) and the hands on
 turn with the steering, about the column through the wheel's middle. Cabriolets (level
 0x1E; the insides of the lids there stay hidden) have a soft top (slot 37) and slot 41's
 pairs of variants, the hood's frame and rear window (odd) and the hood folded (even); the
-styles mix them, so up (the setting's "Top up") is the top and the odd one, down (the
-default) the folded one alone. The Targas' glass roof is slot 8. The 914's and 944's pop-up lamps (the `HeadLight`
+styles mix them, so up is the top and the odd one, down the folded one alone. Both are
+built: **T** raises or lowers the hood in a race, and the Cabriolets setting says how they
+start (top down by default). The top folds as the game animates it: its frames (vertices at
+the level + frame << 4, base info byte 8 counting them, byte 9 the raised one) are blend
+shapes the car plays through in 2.5 s, the hood's frame swapped for the folded hood at the
+end. Its rear window (`cabrio.fsh`'s `sgla`, alpha 128) is glass. The 944's raised hood maps onto the painted part of its roof
+texture, so it comes out in the body colour, as in the files. The Targas' glass roof is slot 8. The 914's and 944's pop-up lamps (the `HeadLight`
 part) rise by the `.tpg`'s `headlightextent` with the lights on; the 928's (negative) are
 modelled up and fold back flat about their hinge while off. The Carreras' rear spoiler (slot
 42: the style's odd variant lowered, the next one raised) rises above 80 km/h and drops
@@ -254,14 +264,19 @@ Factory Driver's missions, `_st*.scn`), the second and third paint colours (stri
 - **Single Race** – up to 7 AI opponents, 1–8 laps.
 - **Hot Pursuit** – up to seven rivals plus police: three cruisers parked on
   the verge and one on patrol (one more parked for every two rivals past the
-  first). Speed past one (> ~120 km/h) and it gives chase with
-  lights and siren – after you or the rival, whoever it saw. The first cop on a
-  car rams it (or spins it out from alongside); the second overtakes and
-  blocks. Stop with a cop on you and you're busted: two tickets, the third is
+  first). Speed past one (> ~120 km/h) where it can see you, or ram one, and it gives chase
+  with lights and siren – after you or the rival, whoever it was. The chasers drive as
+  High Stakes' do: each takes a place round its car – the one furthest up the road dead
+  ahead to block, one ahead on the left, one alongside on the right, the rest behind –
+  and once it has held it a moment it rams (a brake check from in front, a side-swipe,
+  a shove from behind), now and then cutting across the car's nose; the higher the heat,
+  the closer they sit and the longer they ram. A car that stops, or comes at a cop
+  head-on, is met and boxed in. Stop with a cop on you and you're busted: two tickets, the third is
   an arrest (a busted rival just loses a few seconds). The heat rises every 20 s
   of chase: backup units join from behind, heat 2 brings roadblocks and heat 3
   lays a spike strip across the gap (flat tyres: half the grip and top speed
-  for 14 s, or until a reset). Get > 380 m away to evade; cops then drive back to their post.
+  for 14 s, or until a reset); once you're through, the roadblock's cruisers pull out
+  and join the chase. Get > 380 m away to evade; cops then drive back to their post.
   With High Stakes data, its helicopter joins the chase from heat 2 (searchlight on you by
   night), and its cruisers' officers walk up to write the ticket while the cruiser waits.
 - **Traffic** (every mode but Time Trial) follows High Stakes' own rules: it keeps to the
@@ -286,7 +301,7 @@ Factory Driver's missions, `_st*.scn`), the second and third paint colours (stri
 | Accelerate / brake-reverse | ↑ / ↓ (W / S) | RT / LT |
 | Steer | ← → (A D) | Left stick |
 | Handbrake | Space | B |
-| Camera (chase / far / bumper / in-car on High Stakes cars / TV) | C | Y |
+| Camera (chase / far / bumper / in-car on High Stakes and Porsche Unleashed cars / TV) | C | Y |
 | Look back | B | LB |
 | Reset car to road | R | Back |
 | Toggle rear-view mirror | M | |
@@ -369,8 +384,8 @@ night, rain or not, including a Hot Pursuit at heat 3. On Low:
 - the procedural track's road, land, cars and buildings use cheaper shader variants (fewer
   texture samples, no clearcoat); its land and road are merged into a few big meshes, and
   scenery is drawn out to 60% of its usual distance, cars to 250 m;
-- brake, reversing and siren lamps glow but don't light their surroundings, and the rear-view
-  mirror starts off (M turns it on).
+- brake, reversing and siren lamps glow but don't light their surroundings, the rear-view
+  mirror starts off (M turns it on), and the in-car view's side mirrors show no reflection.
 
 Whatever the quality, far-off traffic glides along its lane rather than being simulated,
 cars out of sight skip their wheel, body and tyre effects, and AI cars held still (parked
@@ -405,7 +420,8 @@ scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, wal
                    track_path.gd (virtual road), keyframe_mover.gd
 scripts/vehicle/   car.gd (raycast suspension, tyre friction circle, auto gearbox),
                    player_controller.gd, ai_controller.gd (racer / traffic / cop), procedural_car.gd,
-                   car_damage.gd (dents and wear from crashes; NFS3 had none, Settings → Car damage)
+                   car_damage.gd (dents and wear from crashes; NFS3 had none, Settings → Car damage),
+                   car_mirrors.gd (the in-car view's side mirrors)
 scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_strip.gd, chase_camera.gd,
                    officer.gd and helicopter.gd (High Stakes' busting officer and police helicopter),
                    track_world.gd (the track plus its sun, sky, fog and ambient for the conditions),
@@ -428,7 +444,7 @@ scripts/audio/     car_audio.gd (engine, tyres, scrapes, crashes, horn, siren: t
                    (queued voice lines, decoded off-thread), menu_sounds.gd (menu clicks)
 shaders/           track.gdshader (unshaded, vertex-lit like the original; wet road), track_additive.gdshader
                    (glows, fire, light shafts), car.gdshader (paint mask), car_glass.gdshader (High Stakes'
-                   see-through windows), precipitation.gdshader
+                   see-through windows), car_mirror.gdshader (the in-car side mirrors), precipitation.gdshader
                    (rain/snow wrapped around the camera on the GPU), proc_road.gdshader and
                    proc_ground.gdshader (the procedural track's asphalt and land)
 tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk000|procedural|menu> [mode] [car] [--duration=S]
@@ -450,7 +466,8 @@ tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk00
                    and the cost of a crash's dent)
                    (--stoplog prints where any car stops dead and what solid is around it;
                    --traffictest each traffic car's lane, speed, giving way and horn every 2 s)
-                   (--camera=N starts in that camera mode, 3 the in-car view, 4 TV; --surrender=S pulls
+                   (--camera=N starts in that camera mode, 3 the in-car view, 4 TV; --look=DEG holds
+                   the head turned, + left, e.g. -55 to the right mirror; --surrender=S pulls
                    over S s into a chase to get busted; --rbcam watches the roadblock once one is up)
                    (--shots=S,S,... screenshot times; --seed=N the same rivals every run; --layout=N,
                    --upgrade=N, --intro, --classic-hud; --no-ai-tables / --no-ai-speeds race without

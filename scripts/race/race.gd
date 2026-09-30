@@ -13,6 +13,8 @@ const ESCAPE_DISTANCE := 380.0
 const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
 const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
+const SHORTCUT_BACK := 30         # nodes behind and ahead of its last a car off on a shortcut
+const SHORTCUT_AHEAD := 250       # is looked for along the lap (_update_progress)
 const RADIO_DB := -3.0   # the police radio, a little under the voices on the spot
 const DROWN_DEPTH := 0.3          # m under a stream or lake surface that counts as in the water
 const DROWN_TIME := 1.5           # s in the water before the car is put back on the road
@@ -538,6 +540,7 @@ func _make_cop(i: int) -> Car:
 	var au := CarAudio.new()
 	au.volume_db = -2.0   # with CarAudio.OTHERS_DB, 6 dB under the player
 	cop.add_child(au)
+	cop.body_entered.connect(_on_cop_hit.bind(cop))
 	return cop
 
 
@@ -693,11 +696,62 @@ func _unhandled_input(e: InputEvent) -> void:
 		player.set_headlights(not player.headlights_on)
 	elif e.is_action_pressed("high_beam") and player:
 		player.set_high_beam(not player.high_beam)
+	elif e.is_action_pressed("soft_top") and player and player.has_soft_top():
+		player.set_top_down(not player.top_down)
+		hud.flash("Top down" if player.top_down else "Top up", 1.0)
 	elif e.is_action_pressed("handling_feel"):
 		# A/B the body sway and progressive grip against the plain NFS3 handling (all cars).
 		Car.body_sway = not Car.body_sway
 		Car.progressive_grip = Car.body_sway
 		hud.flash("Handling: " + ("sway + progressive grip" if Car.body_sway else "classic"), 1.5)
+
+
+func _input(e: InputEvent) -> void:
+	# Ahead of the GUI, which could otherwise swallow it.
+	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_F4:
+		_probe_view()
+
+
+## Debug (F4): prints what's drawn near the camera, bar the opaque track scenery, and saves the
+## frame, to catch a rare visual glitch in the act.
+func _probe_view() -> void:
+	var cam3d := get_viewport().get_camera_3d()
+	if cam3d == null:
+		return
+	var eye := cam3d.global_position
+	var rows: Array = []
+	for n: Node in get_tree().root.find_children("*", "GeometryInstance3D", true, false):
+		var g := n as GeometryInstance3D
+		if not g.is_visible_in_tree() or (_track_mat and g.material_override == _track_mat):
+			continue
+		var box := g.global_transform * g.get_aabb()
+		var d := (eye.clamp(box.position, box.end) - eye).length()
+		if d > 40.0:
+			continue
+		var mat: Material = g.material_override
+		if mat == null and g is MeshInstance3D and (g as MeshInstance3D).mesh:
+			var m := (g as MeshInstance3D).mesh
+			mat = m.surface_get_material(0) if m.get_surface_count() > 0 else null
+		var what := "-"
+		if mat is ShaderMaterial and (mat as ShaderMaterial).shader:
+			what = (mat as ShaderMaterial).shader.resource_path.get_file()
+		elif mat:
+			what = mat.get_class()
+		rows.append([d, "%6.1f m  size %s  %s  layers %d  %s" % [d, box.size.snapped(Vector3.ONE * 0.1),
+			what, g.layers, g.get_path()]])
+	rows.sort_custom(func(a, b): return a[0] < b[0])
+	var lines := PackedStringArray(["--- F4 probe at %s, looking %s" % [eye.snapped(Vector3.ONE * 0.1),
+		(-cam3d.global_basis.z).snapped(Vector3.ONE * 0.01)]])
+	for r in rows:
+		lines.append(r[1])
+	var path := "user://probe_%d" % Time.get_unix_time_from_system()
+	get_viewport().get_texture().get_image().save_png(path + ".png")
+	lines.append("--- saved " + ProjectSettings.globalize_path(path) + ".png/.txt")
+	var f := FileAccess.open(path + ".txt", FileAccess.WRITE)
+	if f:
+		f.store_string("\n".join(lines) + "\n")
+	print("\n".join(lines))
+	hud.flash("Probe saved", 1.5)
 
 
 ## Hands the track shader the drop shadows of the MAX_SHADOWS cars nearest the camera.
@@ -794,6 +848,10 @@ func _update_progress() -> void:
 	for r in racers:
 		var car: Car = r.car
 		var n := path.closest(car.global_position, r.node)
+		# Away from the lap's road on a side road (a shortcut): where along the lap it's got to.
+		if not path.side_roads.is_empty() and r.node >= 0 \
+				and absf(path.lateral(car.global_position, n)) > maxf(path.wall_width(n, -1.0), path.wall_width(n, 1.0)) + 2.0:
+			n = path.closest_along(car.global_position, r.node, SHORTCUT_BACK, SHORTCUT_AHEAD)
 		var prog := path.progress_at(car.global_position, n)
 		if not path.closed:
 			# A point-to-point run: the start line, then the finish line, each crossed once.
@@ -1203,10 +1261,18 @@ func _update_pursuit(dt: float) -> void:
 			_spawn_backup()
 			_backup_t = 8.0
 		_block_t -= dt
-		if heat >= 2 and roadblock.is_empty() and _block_t <= 0.0:
+		if heat >= 2 and _rb.is_empty() and _block_t <= 0.0:
 			_spawn_roadblock(heat >= 3)
 		if heat >= 2 and _heli == null:
 			_call_helicopter()
+
+	# Each chase's cruisers keep their places round their car, closer and rougher as the heat rises.
+	for r in racers:
+		var cs := _chasers(r.car)
+		if not cs.is_empty():
+			_assign_slots(r.car, cs)
+			for cop in cs:
+				_controller(cop).aggression = clampi(heat - 1, 0, 2) if r.car == player else 0
 
 	# Busted: stopped with a cop right on you. Rivals get held up; the player gets a ticket.
 	for r in racers:
@@ -1236,11 +1302,50 @@ func _speeder_near(cop: Car) -> Car:
 		var c: Car = r.car
 		if r.finished or r.cool > 0.0 or c.speed < COP_SPEED_TRIGGER:
 			continue
-		if cop.global_position.distance_to(c.global_position) < COP_SIGHT:
+		if cop.global_position.distance_to(c.global_position) < COP_SIGHT and _in_sight(cop, c):
 			if c == player:
 				return c
 			found = c if found == null else found
 	return found
+
+
+## Whether `cop` can see `c`: nothing solid (a building, the brow of a hill) between them.
+func _in_sight(cop: Car, c: Car) -> bool:
+	var up := Vector3.UP * 1.2
+	var q := PhysicsRayQueryParameters3D.create(cop.global_position + up, c.global_position + up,
+		1 | Nfs3TrackBuilder.SCENERY_LAYER)
+	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+
+
+## The chasers' places round `target` (AIHigh_BasicPerp::CheckChaserPosition): a newcomer
+## joins at the back, and any cruiser more than 12 m further up the road than the one a place
+## before it swaps with it, so the one furthest on takes the block in front.
+func _assign_slots(target: Car, cs: Array[Car]) -> void:
+	cs.sort_custom(func(a: Car, b: Car) -> bool: return _controller(a).chase_slot < _controller(b).chase_slot)
+	var fwd := target.linear_velocity.normalized() if target.linear_velocity.length() > 3.0 else target.forward_dir()
+	for i in range(1, cs.size()):
+		var k := i
+		while k > 0 and (cs[k].global_position - cs[k - 1].global_position).dot(fwd) > 12.0:
+			var tmp := cs[k]
+			cs[k] = cs[k - 1]
+			cs[k - 1] = tmp
+			k -= 1
+	for i in cs.size():
+		_controller(cs[i]).chase_slot = i
+
+
+## A racer that rams a cruiser not already on a chase has one on its hands.
+func _on_cop_hit(other: Node, cop: Car) -> void:
+	if state != State.RACING or not other is Car or not cops.has(cop) or _controller(cop).chasing:
+		return
+	var c := other as Car
+	var r: Dictionary = {}
+	for rr in racers:
+		if rr.car == c:
+			r = rr
+	if r.is_empty() or r.finished or r.cool > 0.0 or (c.linear_velocity - cop.linear_velocity).length() < 6.0:
+		return
+	_start_chase(cop, c)
 
 
 func _chasers(target: Car) -> Array[Car]:
@@ -1254,9 +1359,9 @@ func _chasers(target: Car) -> Array[Car]:
 
 func _start_chase(cop: Car, target: Car) -> void:
 	var ai := _controller(cop)
-	# Every second cop on the same car goes round it to block instead of ramming.
-	ai.chase_slot = _chasers(target).size() % 2
-	if target == player and ai.chase_slot == 0 and _chasers(target).is_empty():
+	# In at the back; _assign_slots moves it up as it gets further up the road than the others.
+	ai.chase_slot = 99
+	if target == player and _chasers(target).is_empty():
 		hud.flash("PURSUIT!", 1.5, "alert")
 		speech.say("copspch", range(10))
 		_radio_call(cop, _speed_call())
@@ -1415,15 +1520,15 @@ func _add_obstacles(cars: Array) -> void:
 
 
 ## Two cruisers parked across the road a little way ahead of the player, with a gap on one
-## side to squeeze through. At top heat a spike strip lies across the gap.
+## side to squeeze through. At top heat a spike strip lies across the gap. Once the player is
+## through (or has stopped short of it), they pull out and join the chase.
 func _spawn_roadblock(with_spikes: bool) -> void:
 	var pr := player_racer()
 	var n := path.idx(pr.node + 70)
 	var w := minf(path.left_width[n], path.right_width[n])
 	var gap_side := -1.0 if randf() < 0.5 else 1.0
 	for k in 2:
-		var cop := _make_car(_cop_data(k))
-		cop.is_cop = true
+		var cop := _make_cop(k)
 		var off := (-0.55 + 0.6 * k) * w * gap_side
 		var xf := path.transform_at(n, off, 0.0).rotated_local(Vector3.UP, PI * 0.5)
 		cop.reset_to(xf)
@@ -1440,7 +1545,7 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 	# until the outer one does. Measured on the ground, as the walls can sit far out.
 	var reach_gap := absf(_ground_offset(n, w * gap_side))
 	var reach_far := absf(_ground_offset(n, -w * gap_side))
-	_rb = {"node": n, "side": gap_side, "w": w, "shift": 0.0, "vel": 0.0,
+	_rb = {"node": n, "side": gap_side, "approach": signf((player.global_position - path.points[n]).dot(path.forward(n))), "w": w, "shift": 0.0, "vel": 0.0,
 		"gap_edge": reach_gap, "far_edge": reach_far,
 		"max": maxf(reach_gap - 0.05 * w - RB_HALF, 0.0), "min": minf(-(reach_far - 0.55 * w - RB_HALF), 0.0)}
 	# Racers head for the gap: just past the inner cruiser (parked sideways, ~2.4 m either side of
@@ -1492,6 +1597,11 @@ func _update_roadblock(dt: float) -> void:
 	var w: float = _rb.w
 	var fwd := path.forward(n)
 	var origin: Vector3 = path.points[n]
+	# The player through it (on the far side from where it came), or pulled up in front of it.
+	var p_along := (player.global_position - origin).dot(fwd)
+	if (p_along * _rb.approach < 0.0 and absf(p_along) > 8.0) or (absf(p_along) < 25.0 and player.linear_velocity.length() < 4.0):
+		_release_roadblock()
+		return
 	# The racer closing fastest on the block, and how far off it is.
 	var threat: Dictionary = {}
 	var near := INF
@@ -1546,11 +1656,30 @@ func _update_roadblock(dt: float) -> void:
 		_controller(cop).gap = _gap
 
 
+## The roadblock's cruisers pull out and join the chase (AIHigh_Cop's blockade release);
+## the cones, flares and spikes stay until the player is well past.
+func _release_roadblock() -> void:
+	for cop in roadblock:
+		cop.resume(Vector3.ZERO)
+		cop.set_meta("backup", true)   # sent home out of sight once the chase is over
+		var ai := _controller(cop)
+		ai.enabled = true
+		ai.others = racers.map(func(r): return r.car) + traffic_cars + cops + roadblock
+		cops.append(cop)
+		if heat > 0:
+			_start_chase(cop, player)
+	roadblock.clear()
+	# Nothing left across the road to thread.
+	_gap = Vector3.INF
+	for cop in cops:
+		_controller(cop).gap = _gap
+
+
 ## Takes the roadblock down once it's well behind the player.
 func _clear_roadblock() -> void:
-	if roadblock.is_empty():
+	if _rb.is_empty():
 		return
-	var rb_node: int = roadblock[0].get_meta("node")
+	var rb_node: int = _rb.node
 	var pr := player_racer()
 	# Signed distance past the roadblock, wrapped so a block just after the start line works.
 	var behind := fposmod(path.cumulative[pr.node] - path.cumulative[rb_node] + path.length * 0.5, path.length) - path.length * 0.5
@@ -1602,8 +1731,10 @@ func _check_resets(dt: float) -> void:
 		# A shortcut can run further out than the virtual road's walls, so only off the
 		# drivable surface. In free roam the player may wander off: the reset key brings them back.
 		# Heading down a bank to the water isn't lost: the water deals with it.
-		var lost: bool = off > maxf(path.left_width[n], path.right_width[n]) + path.lost_margin and not _on_road(c) \
-			and not (c == player and Game.mode == Game.Mode.FREE_ROAM) and not _near_water(c)
+		# Nor is a car on a side road the walls leave open (a shortcut).
+		var lost: bool = off > maxf(path.wall_width(n, -1.0), path.wall_width(n, 1.0)) + path.lost_margin and not _on_road(c) \
+			and not (c == player and Game.mode == Game.Mode.FREE_ROAM) and not _near_water(c) \
+			and not path.on_side_road(c.global_position)
 		# In a stream or a lake: it wades (Car.water_depth), then gets fished out.
 		c.water_depth = _water_depth(c)
 		var drowned := false

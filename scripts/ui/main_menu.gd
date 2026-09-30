@@ -43,6 +43,7 @@ const FOOT := 72.0            # the footer: hints and the main button
 const ROW_H := 34.0
 const HEAD_H := 30.0
 const CAR_PREVIEW_DELAY := 0.14   # s a browsed car must keep focus before its model loads
+const QUIT_ARM_MS := 2500         # how long a first Esc keeps the quit armed
 
 var _screen := Screen.RACE
 var _mode := 0
@@ -108,7 +109,7 @@ var _photos := {}                # track id -> Texture2D (or null)
 var _postcards: TrackPostcards   # rendered stills of the tracks, filled in in the background
 var _outlines := {}              # track id -> PackedVector3Array
 var _time := 0.0
-var _confirm: ConfirmDialog     # a question up over the menu (quitting)
+var _quit_armed_until := 0      # ticks (ms): a second Esc (or click on Quit) before this quits
 var _starting := false
 var _toast := ""
 var _toast_t := 0.0
@@ -154,6 +155,7 @@ func _ready() -> void:
 		Game.music.now_playing.top = 37.0
 	_set_track(_track_i)
 	_set_car(_car_i)
+	_car_conditions()
 	_show_car_now(_car_i)
 	_go(Screen.RACE, false)
 	# Back from a tournament's last race: on the tournaments.
@@ -237,10 +239,10 @@ func _build_hub() -> void:
 	_layout_row.index = Game.layout
 	_time_row = OptionRow.new("Time", PackedStringArray(["Day", "Night"]))
 	_time_row.index = int(Game.night)
-	_time_row.changed.connect(func(_i): _show_backdrop(true); _tracks.night = _time_row.index == 1; _refresh_track_card())
+	_time_row.changed.connect(func(_i): _show_backdrop(true); _tracks.night = _time_row.index == 1; _refresh_track_card(); _car_conditions())
 	_weather = OptionRow.new("Weather", PackedStringArray(["Clear", "Rain"]))
 	_weather.index = int(Game.weather)
-	_weather.changed.connect(func(_i): _tint_backdrop())
+	_weather.changed.connect(func(_i): _tint_backdrop(); _car_conditions())
 	_opp_value = Game.opponents
 	_laps = OptionRow.new("Laps", nums.call(1, 8))
 	_laps.index = Game.laps - 1
@@ -1041,6 +1043,11 @@ func _upgrade_shown(i: int) -> int:
 	return Game.garage_upgrade(i) if _screen == Screen.GARAGE else Game.upgrade_of(i)
 
 
+## The showroom's car lit for the time of day and wiping the rain chosen.
+func _car_conditions() -> void:
+	_showroom.set_conditions(_time_row.index == 1, _weather.index == 1)
+
+
 func _show_car_now(i: int) -> void:
 	_car_shown = i
 	_car_pending = -1
@@ -1202,20 +1209,25 @@ func _say(text: String, col := UiKit.ACCENT) -> void:
 	_overlay.queue_redraw()
 
 
-## For tools/: whether the quit question is up.
+## Whether a first Esc has armed the quit (for tools/ too).
 func _quit_armed() -> bool:
-	return _confirm != null and is_instance_valid(_confirm)
+	return Time.get_ticks_msec() < _quit_armed_until
 
 
-## Asks before quitting: Esc then Enter quits, a second Esc stays.
+## Esc twice quits: the first arms it for a moment (the toast and the Quit button say so),
+## the second, while armed, quits. Settings and the career are saved as they change.
 func _request_quit() -> void:
 	if _quit_armed():
+		get_tree().quit()
 		return
-	var note := "Your settings are saved."
-	if Game.career_data():
-		note = "Your settings and your career are saved."
-	_confirm = ConfirmDialog.ask(self, "NFS Revival", "Quit to the desktop?", note, "Quit", "Stay",
-		func(): get_tree().quit(), true)
+	_quit_armed_until = Time.get_ticks_msec() + QUIT_ARM_MS
+	_say("Press Esc again to quit", UiKit.COP_RED)
+	_show_quit_armed(true)
+
+
+func _show_quit_armed(armed: bool) -> void:
+	_quit_btn.set_hints([["", "PRESS AGAIN TO QUIT" if armed else "QUIT", _request_quit]])
+	_layout()
 
 
 func _unhandled_input(e: InputEvent) -> void:
@@ -1292,7 +1304,7 @@ func _gui_input(e: InputEvent) -> void:
 
 func _process(dt: float) -> void:
 	_time += dt
-	if _car_pending >= 0:
+	if _car_pending >= 0 and not _starting:
 		_car_pending_t -= dt
 		if _car_pending_t <= 0.0:
 			_show_car_now(_car_pending)
@@ -1303,6 +1315,9 @@ func _process(dt: float) -> void:
 	if _toast_t > 0.0:
 		_toast_t -= dt
 		_overlay.queue_redraw()
+	if _quit_armed_until > 0 and not _quit_armed():
+		_quit_armed_until = 0
+		_show_quit_armed(false)
 
 
 func _start() -> void:
@@ -1335,18 +1350,17 @@ func _enter_circuit() -> void:
 	_launch()
 
 
-## The race scene, after the car rolls off and the loading caption fades in.
+## The race scene, after the car's engine is revved and the loading screen fades in.
 func _launch() -> void:
 	_next_btn.flash()
-	_showroom.freeze_for_start()
+	var rev := _showroom.rev()
 	# The race's loading screen fades in over the menu; the race scene opens on the same one.
 	var loading := LoadingScreen.new()
 	loading.stage("Getting ready", 0.0, 0.03)
 	loading.modulate.a = 0.0
 	add_child(loading)
-	var tw := create_tween().set_parallel()
-	tw.tween_property(loading, "modulate:a", 1.0, 0.35).set_delay(0.1)
-	tw.tween_property(_showroom, "sliding", -9.0, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	var tw := create_tween()
+	tw.tween_property(loading, "modulate:a", 1.0, 0.4).set_delay(maxf(rev - 0.45, 0.0))
 	await tw.finished
 	loading.hand_over()
 	# Let it reach the screen before the scene change (which blocks while it loads).
