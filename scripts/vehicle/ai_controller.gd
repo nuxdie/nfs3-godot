@@ -114,6 +114,7 @@ func _ready() -> void:
 	_ghost_check = randf() * 0.25
 	if role == Role.TRAFFIC:
 		car.set_meta("traffic", true)
+		car.fit_for_traffic()
 
 
 func _physics_process(dt: float) -> void:

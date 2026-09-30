@@ -19,6 +19,8 @@ const SIMD_SIZE := 80
 ## Slices per chunk: the articles are named for the slice their chunk starts at, in steps
 ## of 8 ("CNK0016L", "RD1136C").
 const SLICES_PER_CHUNK := 8
+## A UV-animated material's speed unit (texture units a second): see _uv_scroll.
+const UV_SCROLL_UNIT := 0.01
 ## An article's base flags: ground the car can be on (the "secondary" terrain: verges,
 ## fields, cliffs); with ROAD also, the road itself ("primary"). 0x8000 marks the objects a
 ## car knocks over (cones, crates, signs), 0x2000 the far scenery (mountains, the sea).
@@ -75,6 +77,8 @@ class Piece:
 	var uv := PackedVector2Array()
 	var colour := PackedColorArray()
 	var tex := PackedInt32Array()
+	## Per triangle: how fast its UVs scroll (texture units a second; _uv_scroll).
+	var scroll := PackedVector2Array()
 
 
 ## Per chunk: {center, pieces: [Piece ROAD, Piece GROUND, Piece SCENERY]}.
@@ -95,6 +99,7 @@ var side_roads: Array = []
 ## past the verges, where the slices' own wall distances are their lanes' edges.
 var fences: Array[PackedFloat32Array] = []
 var _spare: Array[Vector2i] = []   # the segments the lap doesn't take: first, last slice
+var _seg_starts := {}   # slice -> true where a segment (SimT) starts
 
 
 static func is_track_file(path: String) -> bool:
@@ -117,6 +122,7 @@ static func load_file(path: String, _night := false) -> Nfs5Track:
 		t.error = "missing texture archive"
 		return t
 	t.images = fsh.images
+	t.image_names = fsh.names
 	_solid_water(fsh)
 	var simd := _read_simd(crp)
 	if simd.is_empty():
@@ -201,6 +207,8 @@ func _route(crp: Crp, simd: Array[Dictionary]) -> PackedInt32Array:
 				at += n
 	if segs.is_empty():
 		segs.append(Vector2i(0, simd.size() - 1))
+	for sg in segs:
+		_seg_starts[sg.x] = true
 	var used := [0]
 	closed = false
 	var cur := 0
@@ -348,18 +356,28 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 	for i in fsh.names.size():
 		layer[fsh.names[i]] = i
 	var tex_of := {}  # material -> images index (-1: none)
+	var scroll_of := {}  # material -> its UVs' scroll (_uv_scroll)
 	for e in crp.misc_of("mt"):
 		tex_of[e.index] = layer.get(crp.data.slice(e.offset + 40, e.offset + 44).get_string_from_ascii(), -1) \
 			if e.length >= 44 else -1
-	var n_chunks := (simd.size() + SLICES_PER_CHUNK - 1) / SLICES_PER_CHUNK
-	for c in n_chunks:
-		var pieces := []
-		for k in 3:
-			var pc := Piece.new()
-			pc.kind = k
-			pieces.append(pc)
-		var mid: int = mini(c * SLICES_PER_CHUNK + SLICES_PER_CHUNK / 2, simd.size() - 1)
-		chunks.append({"center": simd[mid].pos, "pieces": pieces})
+		scroll_of[e.index] = _uv_scroll(crp, e)
+	# A chunk per SLICES_PER_CHUNK slices, but split where a segment starts inside it: the
+	# slices either side are different roads, maybe km apart, and a chunk spanning both
+	# would be drawn by its middle (visibility range), which is near neither.
+	var chunk_of := PackedInt32Array()
+	chunk_of.resize(simd.size())
+	var first := 0
+	for i in simd.size() + 1:
+		if i == simd.size() or i > first and (i % SLICES_PER_CHUNK == 0 or _seg_starts.has(i)):
+			var pieces := []
+			for k in 3:
+				var pc := Piece.new()
+				pc.kind = k
+				pieces.append(pc)
+			chunks.append({"center": simd[(first + i - 1) / 2].pos, "pieces": pieces})
+			first = i
+		if i < simd.size():
+			chunk_of[i] = chunks.size()
 	for k in 3:
 		var pc := Piece.new()
 		pc.kind = k
@@ -386,6 +404,7 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 		var flags := crp.data.decode_u32(base.offset)
 		if flags & BASE_SMACKABLE:
 			continue
+		var animated: bool = art.subs.has("Anim:0")
 		var kind := Kind.SCENERY
 		if flags & BASE_GROUND:
 			kind = Kind.ROAD if flags & BASE_ROAD else Kind.GROUND
@@ -401,7 +420,7 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 		var slice := int(m.get_string(1)) if m else -1
 		if slice < 0 or slice >= simd.size() or simd[slice].pos.distance_to(box.get_center()) > NAMED_REACH + box.size.length() * 0.5:
 			slice = _nearest_slice(simd, box.get_center())
-		var chunk: int = slice / SLICES_PER_CHUNK
+		var chunk: int = chunk_of[slice]
 		var reach: float = box.get_center().distance_to(simd[slice].pos) + box.size.length() * 0.5
 		var into: Piece = backdrop[kind] if kind != Kind.ROAD and reach > BACKDROP_REACH \
 			else chunks[chunk].pieces[kind]
@@ -409,7 +428,11 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 			var pe := crp.sub(art, "pr", k)
 			if pe == null:
 				break
-			var p := crp.part(pe)
+			# Parts without index rows run their corners in order (Schwarzwald's covered
+			# bridges, waterfalls, the sea's and the harbours' scrolling layers), but not
+			# the animated props' ("Anim": people, trains, the helicopter, loaders),
+			# modelled at the origin for the game to place.
+			var p := crp.part(pe, not animated)
 			var tex: int = tex_of.get(p.material, -1)
 			if tex < 0:
 				continue
@@ -429,6 +452,37 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 					var col: int = ci[t3 + c] if ci.size() > t3 + c else -1
 					dest.colour.append(cols[col] if col >= 0 and col < cols.size() else Color(0.5, 0.5, 0.5))
 				dest.tex.append(tex)
+				dest.scroll.append(scroll_of.get(p.material, Vector2.ZERO))
+
+
+## A material's UV animation (render methods "UVAnimate", "FA_UVAnim", "FA_UVAnMatState";
+## the water, waterfalls, Zone Industrielle's conveyor treads) as texture units a second.
+## Past its 76 bytes a material holds state blocks, [axis, 0, size, 0, then size bytes]:
+## the axis 5 scrolls V, 6 U; the first word of the block 0 has the speed next, 1 (the
+## "FA_" ones) further on, in a word framed 0xFF..FF (its middle 16 bits, signed). The speed
+## is taken as UV_SCROLL_UNIT a second: it gives a waterfall 10-17 m/s, a river 3, a tread 2.
+static func _uv_scroll(crp: Crp, e: Crp.Entry) -> Vector2:
+	var d := crp.data
+	if e.length < 100 or not "UV" in d.slice(e.offset + 16, e.offset + 32).get_string_from_ascii():
+		return Vector2.ZERO
+	var axis := d.decode_s32(e.offset + 76)
+	var speed := 0
+	match d.decode_s32(e.offset + 92):
+		0:
+			speed = d.decode_s32(e.offset + 96)
+		1:
+			for o in range(112, e.length - 3, 4):
+				var w := d.decode_u32(e.offset + o)
+				if w & 0xFF == 0xFF and w >> 24 == 0xFF:
+					speed = (w >> 8) & 0xFFFF
+					speed -= 0x10000 if speed >= 0x8000 else 0
+					break
+	match axis:
+		5:
+			return Vector2(0.0, speed * UV_SCROLL_UNIT)
+		6:
+			return Vector2(speed * UV_SCROLL_UNIT, 0.0)
+	return Vector2.ZERO
 
 
 ## Puts each virtual road slice down on the road under it. Mostly it is, but through the set

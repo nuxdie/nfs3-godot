@@ -18,8 +18,11 @@ const FAR := [0.0, 250.0, 400.0]
 const TINT := Color(0.82, 0.84, 0.86)
 ## How much wider a mirror shows than a flat glass would.
 const WIDEN := 2.5
-## How far below level a mirror looks, radians.
+## How far below level a side mirror looks, radians.
 const AIM_DOWN := 0.05
+## The most the rear-view mirror looks down (see setup), radians: its view is barely 8 degrees
+## tall, and much lower its bottom is the cabin's own rear seats.
+const REAR_AIM_DOWN_MAX := 0.12
 ## Where the car's rear corner sits across a mirror, from its inner edge: set as a driver
 ## would, a sliver of the car's own flank in it.
 const FLANK := 0.15
@@ -77,7 +80,7 @@ func setup(car: Car, glass: Array[Dictionary], eye: Vector3, half_size: Vector3)
 		var size := Vector2i(long_side, maxi(int(long_side / aspect), 16)) if aspect >= 1.0 \
 			else Vector2i(maxi(int(long_side * aspect), 16), long_side)
 		aspect = float(size.x) / float(size.y)
-		# What it shows: WIDEN times as wide, level (a touch down), and turned so the car's
+		# What it shows: WIDEN times as wide, level (a side mirror a touch down), and turned so the car's
 		# rear corner on that side sits FLANK in from the inner edge.
 		var widen := REAR_WIDEN if rear else WIDEN
 		var half_h := atan((hi.x - lo.x) * widen * 0.5)
@@ -87,9 +90,15 @@ func setup(car: Car, glass: Array[Dictionary], eye: Vector3, half_size: Vector3)
 		var level := corner.normalized().rotated(turn)
 		if side * level.x < side * corner.normalized().rotated(-turn).x:
 			level = corner.normalized().rotated(-turn)
+		var down := AIM_DOWN
 		if rear:
+			# Set as a driver would, through the rear window: on the car's tail halfway between
+			# the eye's height and its image's. (The image sits up by the header: looking level
+			# from there, a roof sloping down behind the seats filled the middle of the view with
+			# its lining; down to the eye's height, it showed only road.)
 			level = Vector2(0.0, -1.0)
-		var ahead := Vector3(level.x, 0.0, level.y) * cos(AIM_DOWN) + Vector3.DOWN * sin(AIM_DOWN)
+			down = clampf(atan2((eye_image.y - eye.y) * 0.5, eye_image.z + half_size.z), 0.0, REAR_AIM_DOWN_MAX)
+		var ahead := Vector3(level.x, 0.0, level.y) * cos(down) + Vector3.DOWN * sin(down)
 		var local := Transform3D(Basis.looking_at(ahead, Vector3.UP), eye_image)
 		# Its near plane just past the glass: what lies between the image and the glass (the
 		# mirror's own housing) mustn't show.

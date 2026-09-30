@@ -29,9 +29,9 @@ const HANDS_SLOT := 56
 const PEOPLE_LEVELS := [0x81, 0x89]
 ## Who drives: geometry slot 9 picks one of ten (1 and 6 in race suit and helmet, the others
 ## in their own clothes, their faces and outfits from head.fsh and suit.fsh), slot 43 the
-## arms and legs, slot 56 the hands (1 gloved, 2 bare). The game picks them itself where a
-## style doesn't say (most don't: the seat would be empty); the styles that do pair driver 1
-## with arms 1 and gloves, driver 3 with bare hands.
+## arms and legs (each body's own: _fit_limbs), slot 56 the hands (1 gloved, 2 bare). The
+## game picks them itself where a style doesn't say (most don't: the seat would be empty);
+## the styles that do pair driver 1 with arms 1 and gloves, driver 3 with bare hands.
 const DRIVER_SLOT := 9
 ## The arms' and hands' first frames: the steering sweep, from full lock one way to the other.
 const STEER_FRAMES := 10
@@ -40,6 +40,18 @@ const STEER_FRAMES := 10
 ## head turned well aside; the frames after the lean lean forward and look round.)
 const BODY_FRAMES := 5
 const BODY_SIDE := 2   # _Mesh.side of the body's vertices: it follows the arms' sweep
+## A lean frame's vertex further than this (m) from the middle frame is broken: in some
+## models (the 993's, Boxster's, 550's, GT2's drivers 8-10) the last lean frame has the head
+## and shoulders folded away, a third of the body half a metre off. The real lean is ~0.1.
+const LEAN_BROKEN := 0.2
+## A limb's seam with the body: its nearest vertex pairs, and the most (m) it's moved to close it.
+const LIMB_SEAM := 4
+const LIMB_SNAP := 0.1
+## The limbs each driver wears (by driver, LIMBS_SLOT's variant): 1 driver 1's race suit, 2
+## drivers 2-5's jackets, 3 driver 6's suit, 4 drivers 7-10's. And how near (m) the forearms'
+## ends must come to the body's for another model's own limbs to be taken instead.
+const LIMBS_OF := [0, 1, 2, 2, 2, 2, 3, 4, 4, 4, 4]
+const LIMBS_EXACT := 0.002
 const LIMBS_SLOT := 43
 const SUITED_DRIVERS := [1, 6]
 ## The in-car view sits at the driver's eyes, inside the model's own cabin, with his head
@@ -98,12 +110,16 @@ const LID_INSIDE_LEVEL := 0x1E
 ## above in specks; and from below the skin would, so it comes forward (LID_INSIDE_BIAS).
 const ONE_SIDED_MARK := -3.0
 const LID_INSIDE_BIAS := 0.002
-## The door windows (slot 35) wind down into the doors, this share of their height.
+## The door windows (slot 35) wind down into the doors, this share of their height, sliding
+## in their own plane (in at the top). The files have no way down for them (the game never
+## lowers them: one frame, no variants), and no well in the door: its skin and trim meet at
+## the pane's foot, the belt line, and the pane's rear top corner reaches past the door's
+## back edge. So what goes below the belt is cut away (the parts' "belt", car.gdshader and
+## car_glass.gdshader), and all the way down the pane is gone.
 const WINDOW_SLOT := 35
-const WINDOW_DROP := 0.92
-## ... and out, this share of the way their lean (in at the top) would take them: dropped plumb,
-## their foot comes through the door's trim into the cabin; all the way, out through its skin.
-const WINDOW_LEAN := 0.55
+const WINDOW_DROP := 1.0
+## The belt line: fitted through the pane's vertices this close to its lowest (m).
+const WINDOW_BELT_BAND := 0.04
 ## A material's finish, near its record's end: how much it mirrors the surroundings (0 matte:
 ## wheel wells, trim, decals; 0.5 the paint and lamp lenses; 1 chrome: the 356s' bumpers,
 ## the 550's pipes, badges), and its kind (2 a lamp's lens). Each vertex carries them as
@@ -137,6 +153,14 @@ const WHEEL_SHADOW_GEOM := 18
 ## backs don't show through, and seen through the arches they still hide the cabin behind
 ## them (a depth bias behind the interior's let its footwells show through the arches).
 const WHEEL_WELL_SLOT := 12
+## The belly pan (geometry slot 11) lies a few cm under the cabin's floor: drawn two-sided,
+## its top showed through the footwells from above, the interior's bias putting the carpet
+## behind it from a few metres off. It faces down, so it's drawn one-sided as the wells are.
+const BOTTOM_SLOT := 11
+## The wheels (bias 0 in the files) tuck up under the rear shelf and seats, a few cm behind
+## the cabin's walls: behind by the interior's own bias, they'd show through them from above
+## in specks. They go back as far as the interior, so there the real depths decide.
+const WHEEL_BIAS := 3
 ## A glare effect's article ("ef") comes once per level of detail, its level at this byte of
 ## the Base entry; only the first level's carries the "tr" of the moving part it rides on
 ## (base info byte 7 the part's group: POPUP_GROUP the pop-up headlamps, 9 the boot lid).
@@ -512,7 +536,7 @@ func _read_style(tpg: Dictionary) -> void:
 ## Who sits in the car where its style doesn't say (DRIVER_SLOT): the suited driver, with
 ## his arms and gloves. Only on models with the ten drivers; the traffic's one driver is
 ## variant 0 of the slot, and the police have none. `chosen` (the player's pick, 0 for none)
-## overrides the style, his hands with him.
+## overrides the style, his hands with him; his limbs are always the ones made for his body.
 func _pick_people(crp: Crp, chosen := 0) -> void:
 	for art in crp.articles:
 		var base := crp.sub(art, "Base")
@@ -525,10 +549,70 @@ func _pick_people(crp: Crp, chosen := 0) -> void:
 		driver = chosen
 		_geometry.erase(HANDS_SLOT)
 	_geometry[DRIVER_SLOT] = driver
-	if not _geometry.has(LIMBS_SLOT):
-		_geometry[LIMBS_SLOT] = 1
+	# (Even where the style says: the 550's pairs driver 2 with driver 1's suit sleeves.)
+	_geometry[LIMBS_SLOT] = _fit_limbs(crp, driver)
 	if not _geometry.has(HANDS_SLOT):
 		_geometry[HANDS_SLOT] = 1 if driver in SUITED_DRIVERS else 2
+
+
+## Mends the body's lean frames (`lean`, their normals `lean_n`, BODY_FRAMES of them, the
+## middle one straight): a vertex LEAN_BROKEN from the middle takes its next frame in's
+## place, carried on as far again (the lean goes on the same way, a frame at a time).
+static func _mend_lean(lean: Array[PackedVector3Array], lean_n: Array[PackedVector3Array]) -> void:
+	var mid := BODY_FRAMES / 2
+	for f in [mid - 1, mid + 1] + range(mid - 2, -1, -1) + range(mid + 2, BODY_FRAMES):
+		var step := 1 if f < mid else -1   # (toward the middle)
+		var near: int = f + step
+		var nearer: int = near + step if near != mid else mid
+		for i in lean[f].size():
+			if lean[f][i].distance_to(lean[mid][i]) > LEAN_BROKEN:
+				lean[f][i] = lean[near][i] * 2.0 - lean[nearer][i]
+				lean_n[f][i] = lean_n[near][i]
+
+
+## The limbs (LIMBS_SLOT's variant) made for driver `driver`'s body: each body has its own
+## (LIMBS_OF), its forearms and legs meeting the body's sleeves and hem. The one whose
+## forearms' ends sit on the body's vertices, in their rest frames; LIMBS_OF's where none
+## does (within LIMBS_EXACT), else the nearest; 1 if none is found.
+func _fit_limbs(crp: Crp, driver: int) -> int:
+	var body := PackedVector3Array()
+	var arms := {}   # variant -> the LeftArm's and RightArm's rest vertices
+	for art in crp.articles:
+		var base := crp.sub(art, "Base")
+		if base == null or crp.data[base.offset + 78] != PEOPLE_LEVELS[0]:
+			continue
+		var slot := crp.data[base.offset + 68]
+		var variant := crp.data[base.offset + 69]
+		var rest := crp.data[base.offset + 77]
+		var name: String = art.name
+		if slot == DRIVER_SLOT and variant == driver and not name.to_lower().begins_with("lod"):
+			var f := BODY_FRAMES / 2 if crp.data[base.offset + 76] >= BODY_FRAMES else rest
+			body = crp.vec3s(crp.sub(art, "vt", PART_LEVEL | f << 4))
+		elif slot == LIMBS_SLOT and (name.begins_with("Left") or name.begins_with("Right")):
+			var vt := crp.sub(art, "vt", PART_LEVEL | rest << 4)
+			if vt != null:
+				arms[variant] = arms.get(variant, PackedVector3Array()) + crp.vec3s(vt)
+	var best := 1
+	var best_gap := INF
+	for v: int in arms:
+		# (The few vertices nearest the body: the sleeves' ends; the rest are free.)
+		var gaps: Array[float] = []
+		for p: Vector3 in arms[v]:
+			var g := INF
+			for q in body:
+				g = minf(g, p.distance_squared_to(q))
+			gaps.append(g)
+		gaps.sort()
+		var gap := 0.0
+		for i in mini(4, gaps.size()):
+			gap += gaps[i]
+		if gap < best_gap:
+			best_gap = gap
+			best = v
+	# (Where none meets it, the 935's, the usual pairing: the one in his clothes' colours.)
+	if best_gap > LIMBS_EXACT * LIMBS_EXACT * 4 and driver < LIMBS_OF.size() and arms.has(LIMBS_OF[driver]):
+		return LIMBS_OF[driver]
+	return best
 
 
 ## Whether the race draws texture file `fi`'s image `name`. Its [fileN.name] section, if
@@ -784,6 +868,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	var glass := _Mesh.new()
 	var people := _Mesh.new()   # the driver and passenger
 	var driver_body := PackedInt32Array()   # people's vertices on the driver's body (head included)
+	var driver_limbs := {}   # ... and on each of his limbs (name -> PackedInt32Array)
 	# Pop-up headlamps: the "HeadLight" part, modelled down. The 914's and 944's rise by the
 	# .tpg's headlightextent (m) while the lights are on; the 928's (a negative extent) lie
 	# flat in the wings, lenses to the sky, and swing up about their front edge (the part's
@@ -912,6 +997,8 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		if normals.size() != verts.size():
 			normals = PackedVector3Array()
 		var z_bias := (bi[6] ^ 0x80) - 0x80
+		if wheel >= 0:
+			z_bias = WHEEL_BIAS
 		var bias := -z_bias * (DEPTH_BIAS_STEP if z_bias < 0 else DEPTH_BIAS_STEP_BACK)
 		var into: _Mesh = people if lvl in PEOPLE_LEVELS else body
 		# An arm or hand's steering sweep (people.sweep): its side, and its frames with
@@ -942,6 +1029,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 					lean.clear()
 					break
 			if not lean.is_empty():
+				_mend_lean(lean, lean_n)
 				side = BODY_SIDE
 				for f in STEER_FRAMES:
 					var t := float(STEER_FRAMES - 1 - f) * (BODY_FRAMES - 1) / (STEER_FRAMES - 1)
@@ -960,7 +1048,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		# Where he has both pairs of arms (IN_CAR_MARK), each is drawn in its own view.
 		if full_arms and side in [0, 1]:
 			steers = IN_CAR_MARK if slot == HANDS_SLOT else HEAD_MARK
-		if slot == WHEEL_WELL_SLOT:
+		if slot == WHEEL_WELL_SLOT or slot == BOTTOM_SLOT:
 			steers = ONE_SIDED_MARK
 		if lid_inside:
 			# (Drawn only from below, it can come forward like a decal over the skin's back.)
@@ -1124,8 +1212,13 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 								people.frame_nrm[f].append(_to_car(xf.basis * Vector3(-fn.x, fn.y, fn.z)).normalized())
 							people.side.append(side)
 							people.hand.append(1 if slot == HANDS_SLOT else 0)
+							people.part_names.append(art.name)  # DRVDBG
 							if slot == DRIVER_SLOT and lvl == PEOPLE_LEVELS[0]:
 								driver_body.append(people.pos.size() - 1)
+							elif slot == LIMBS_SLOT and lvl == PEOPLE_LEVELS[0]:
+								if not driver_limbs.has(art.name):
+									driver_limbs[art.name] = PackedInt32Array()
+								driver_limbs[art.name].append(people.pos.size() - 1)
 	# Centre the model on its body, as the FCE models are.
 	var box := body.box()
 	# (The skirts and spoiler are the body too, for its size.)
@@ -1138,6 +1231,8 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	half_size = box.size * 0.5
 	var hb := {"name": ":hb", "mesh": body.commit(-mid), "center": Vector3.ZERO, "damaged": body.damaged(-mid)}
 	var column := body.steering_column()
+	for limb: PackedInt32Array in driver_limbs.values():
+		people.seat_limb(limb, driver_body)
 	var steer_angles := people.sweep(column)
 	if not column.is_empty():
 		column.pivot -= mid
@@ -1173,6 +1268,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	# ... and on its way between them. (It doesn't dent: its frames are the blend shapes.)
 	if not spoiler_moving.pos.is_empty() and not spoiler_up.pos.is_empty() and not spoiler_down.pos.is_empty():
 		spoiler_moving.face_shape_normals()
+		spoiler_moving.clear_under_wing(texture.get_image() if texture != null else null)
 		body_parts.append({"name": "spoiler_moving", "mesh": spoiler_moving.commit(-mid), "center": Vector3.ZERO,
 			"spoiler": "moving", "spoiler_frames": spoiler_moving.shapes.size(), "loose": SPOILER})
 	# The wipers, from parked (blend shape 0) to the top of their sweep (the last).
@@ -1218,7 +1314,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			for v in (windows[group][k] as _Mesh).pos:
 				wbox = AABB(v, Vector3.ZERO) if first else wbox.expand(v)
 				first = false
-		# The lean: the window's x against its height, fitted (see WINDOW_LEAN).
+		# The lean: the window's x against its height, fitted (see WINDOW_DROP).
 		var n := 0.0
 		var sy := 0.0
 		var sx := 0.0
@@ -1235,13 +1331,37 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		var vy := syy - sy * sy / n
 		if vy > 1e-6:
 			lean = (sxy - sx * sy / n) / vy   # dx per dy
-		var drop := Vector3(-lean * WINDOW_LEAN, -1.0, 0.0) * wbox.size.y * WINDOW_DROP
+		var drop := Vector3(-lean, -1.0, 0.0) * wbox.size.y * WINDOW_DROP
+		# The belt: y = a + b z (door frame, less `mid`) along the pane's foot, just under
+		# its lowest vertices, so the pane wound up is whole.
+		var foot := PackedVector3Array()
+		for k in 2:
+			for v in (windows[group][k] as _Mesh).pos:
+				if v.y < wbox.position.y + WINDOW_BELT_BAND:
+					foot.append(v - mid)
+		var fz := 0.0
+		var fy := 0.0
+		for v in foot:
+			fz += v.z
+			fy += v.y
+		fz /= foot.size()
+		fy /= foot.size()
+		var szz := 0.0
+		var szy := 0.0
+		for v in foot:
+			szz += (v.z - fz) * (v.z - fz)
+			szy += (v.z - fz) * (v.y - fy)
+		var slope := szy / szz if szz > 1e-4 else 0.0
+		var belt_a := INF
+		for v in foot:
+			belt_a = minf(belt_a, v.y - slope * v.z)
+		var belt := Vector2(belt_a - 0.002, slope)
 		for k in 2:
 			var wm: _Mesh = windows[group][k]
 			if wm.pos.is_empty():
 				continue
 			var part := {"name": "window%d%s" % [group, "_glass" if k == 1 else ""], "mesh": wm.commit(-mid),
-				"center": Vector3.ZERO, "window": group, "drop": drop}
+				"center": Vector3.ZERO, "window": group, "drop": drop, "belt": belt}
 			if lid_motion.has(group):
 				part.merge(lid_motion[group])
 			if k == 1:
@@ -1312,6 +1432,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			dp.steering = hb.steering
 		if not steer_angles.is_empty():
 			dp.steer_shapes = steer_angles
+			dp.part_names = people.part_names  # DRVDBG
 		body_parts.append(dp)
 	for side: int in mirrors:
 		var gm: _Mesh = mirrors[side]
@@ -1640,6 +1761,7 @@ class _Mesh:
 	var frame_nrm: Array[PackedVector3Array] = []
 	var side := PackedInt32Array()
 	var hand := PackedByteArray()
+	var part_names := PackedStringArray()  # DRVDBG
 	var side_rest := {}
 	var shapes: Array[PackedVector3Array] = []
 	var shape_nrm: Array[PackedVector3Array] = []
@@ -1684,6 +1806,39 @@ class _Mesh:
 			var c := (pos[i] - box.position) / box.size.max(Vector3.ONE * 0.01)
 			panels[i] = 1 << (clampi(int(c.z * 3.0), 0, 2) * 4 + clampi(int(c.x * 2.0), 0, 1) * 2 + clampi(int(c.y * 2.0), 0, 1))
 
+	## Moves a limb (vertices `limb`: the legs, a forearm) onto the body (`body`) where they
+	## meet, in every frame: in a few models they're off (the 993's legs 2 by 5 cm, placed by
+	## their own "tr"; the 935's forearms by 1-3), a gap at the waist or elbow. The shift that
+	## closes the few nearest pairs at rest, a few times over as the pairs change; none if it
+	## comes to more than LIMB_SNAP.
+	func seat_limb(limb: PackedInt32Array, body: PackedInt32Array) -> void:
+		if limb.is_empty() or body.is_empty():
+			return
+		var shift := Vector3.ZERO
+		for _pass in 4:
+			var pairs: Array = []   # [distance², the limb vertex to its nearest body vertex]
+			for i in limb:
+				var best := INF
+				var to := Vector3.ZERO
+				for j in body:
+					var d := pos[j] - (pos[i] + shift)
+					if d.length_squared() < best:
+						best = d.length_squared()
+						to = d
+				pairs.append([best, to])
+			pairs.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+			var step := Vector3.ZERO
+			for k in mini(LIMB_SEAM, pairs.size()):
+				step += pairs[k][1]
+			shift += step / mini(LIMB_SEAM, pairs.size())
+		if shift.length() > LIMB_SNAP:
+			return
+		for i in limb:
+			pos[i] += shift
+			dent[i] += shift
+			for f in frames.size():
+				frames[f][i] += shift
+
 	## The steering wheel's column, for car.gdshader: {pivot (the wheel's middle), axis
 	## (through its face, pointing forward)}, or {} without one. The axis is the wheel's
 	## triangles' normals summed by area, each turned forward (it's a ring seen from both
@@ -1716,6 +1871,84 @@ class _Mesh:
 				for k in 3:
 					var n := shape_nrm[f][i + k]
 					shape_nrm[f][i + k] = fn if n == Vector3.ZERO else (n if n.dot(fn) >= 0.0 else -n)
+
+	## Under the moving spoiler's wing, once it's up (the 964's and 993's): the plate on the
+	## lid that stays where it is through the frames wears the wing's grille (raised, it
+	## looked lowered), and the legs the wing rises on, the moving faces drawn in a dark
+	## under LEG_DARK, are black slabs; both go, leaving the wing on its end arms over the
+	## lid. Still: moving under STILL_SHARE of the most any face does, on a wing that
+	## rises at least STILL_RISE m. Returns how many faces it drops.
+	const STILL_SHARE := 0.1
+	const STILL_RISE := 0.05
+	const LEG_DARK := 0.3
+	func clear_under_wing(atlas: Image) -> int:
+		if shapes.is_empty() or atlas == null or atlas.is_empty():
+			return 0
+		for sp in shapes:
+			if sp.size() != pos.size():
+				return 0
+		var moves := PackedFloat32Array()
+		var most := 0.0
+		for i in range(0, pos.size() - 2, 3):
+			var m := 0.0
+			for sp in shapes:
+				for k in 3:
+					m = maxf(m, sp[i + k].distance_to(shapes[0][i + k]))
+			moves.append(m)
+			most = maxf(most, m)
+		if most < STILL_RISE:
+			return 0
+		var size := Vector2(atlas.get_size() - Vector2i.ONE)
+		var still := {}
+		var legs := {}
+		for i in range(0, pos.size() - 2, 3):
+			if moves[i / 3] < most * STILL_SHARE:
+				still[i] = true
+				continue
+			var lum := 0.0
+			for k in 3:
+				lum = maxf(lum, atlas.get_pixelv(Vector2i((uv[i + k].clamp(Vector2.ZERO, Vector2.ONE) * size).round())).get_luminance())
+			if lum < LEG_DARK:
+				legs[i] = true
+		# (No plate, no legs: the Boxster's wing is drawn in its dark all over.)
+		if still.is_empty():
+			return 0
+		legs.merge(still)
+		_drop(legs)
+		return legs.size()
+
+	## Without the triangles whose first corners `tris` has, frames and all.
+	func _drop(tris: Dictionary) -> void:
+		if tris.is_empty():
+			return
+		var keep := func(i: int) -> bool: return not tris.has(i - i % 3)
+		pos = _kept(pos, keep)
+		nrm = _kept(nrm, keep)
+		dent = _kept(dent, keep)
+		for f in shapes.size():
+			shapes[f] = _kept(shapes[f], keep)
+			shape_nrm[f] = _kept(shape_nrm[f], keep)
+		var u := PackedVector2Array()
+		var c := PackedColorArray()
+		var b := PackedFloat32Array()
+		var s := PackedFloat32Array()
+		for i in uv.size():
+			if keep.call(i):
+				u.append(uv[i])
+				c.append(col[i])
+				b.append(bias[i])
+				s.append(steer[i])
+		uv = u
+		col = c
+		bias = b
+		steer = s
+
+	static func _kept(a: PackedVector3Array, keep: Callable) -> PackedVector3Array:
+		var out := PackedVector3Array()
+		for i in a.size():
+			if keep.call(i):
+				out.append(a[i])
+		return out
 
 	## A copy turned by `basis` about `pivot` (car space), its damaged copy with it.
 	func turned(basis: Basis, pivot: Vector3) -> _Mesh:
@@ -1825,7 +2058,10 @@ class _Mesh:
 		return d - axis * axis.dot(d)
 
 	## The two frames (x, y) whose angles in `a` bracket `g`, and how far (z) from x to y.
+	## (`g` is held within them: the grid's angles are rounded, and an end one rounded past
+	## the side's last frame would find no pair and fall back to frame 0, the other lock.)
 	static func _between(a: PackedFloat32Array, g: float) -> Vector3:
+		g = clampf(g, Array(a).min(), Array(a).max())
 		var best := Vector3(0, 0, 0)
 		var gap := INF
 		for f in a.size():

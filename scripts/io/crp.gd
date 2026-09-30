@@ -192,27 +192,28 @@ func part(e: Entry, sequential := false) -> Dictionary:
 	var indices_at := at
 	if sequential and n_index == 0 and base.has(INFO_VERTEX):
 		# No index rows: its corners are the vertices (and UVs) in order (the cars' dial
-		# needles; also much of the tracks' water, animated props and people, not drawn yet).
+		# needles; on the tracks some set pieces, like Schwarzwald's covered bridges, and
+		# much of the water, animated props and people).
 		p.vertex.resize(e.count)
 		p.uv.resize(e.count if base.has(INFO_UV) else 0)
 		for k in e.count:
 			p.vertex[k] = k + base[INFO_VERTEX]
 			if base.has(INFO_UV):
 				p.uv[k] = k + base[INFO_UV]
+	elif not rows.has(INDEX_VERTEX) or indices_at + n_index * e.count > d.size():
 		return p
-	if not rows.has(INDEX_VERTEX) or indices_at + n_index * e.count > d.size():
-		return p
-	var vb: int = base.get(INFO_VERTEX, 0)
-	var ub: int = base.get(INFO_UV, 0)
-	var vr: int = rows[INDEX_VERTEX]
-	var ur: int = rows.get(INDEX_UV, -1)
-	p.vertex.resize(e.count)
-	if ur >= 0:
-		p.uv.resize(e.count)
-	for k in e.count:
-		p.vertex[k] = d[indices_at + vr + k] + vb
+	else:
+		var vb: int = base.get(INFO_VERTEX, 0)
+		var ub: int = base.get(INFO_UV, 0)
+		var vr: int = rows[INDEX_VERTEX]
+		var ur: int = rows.get(INDEX_UV, -1)
+		p.vertex.resize(e.count)
 		if ur >= 0:
-			p.uv[k] = d[indices_at + ur + k] + ub
+			p.uv.resize(e.count)
+		for k in e.count:
+			p.vertex[k] = d[indices_at + vr + k] + vb
+			if ur >= 0:
+				p.uv[k] = d[indices_at + ur + k] + ub
 	# Colours ("df") run one per corner, in the parts' order.
 	if base.has(INFO_COLOUR):
 		p.colour.resize(e.count)

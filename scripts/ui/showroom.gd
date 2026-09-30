@@ -15,8 +15,9 @@ extends SubViewportContainer
 ##                 a paint goes on, its lamps light by night, its wipers go in the rain.
 ##                 Dragging turns the camera about what it's looking at; a few seconds after
 ##                 letting go the director carries on.
-##   the mirrors   a Porsche Unleashed car's side mirrors reflect: each glass shows what the
-##                 camera would see in it, from a camera mirrored in the glass's plane
+##   the mirrors   a Porsche Unleashed car's side mirrors (and its cabin's rear-view mirror)
+##                 reflect: each glass shows what the camera would see in it, from a camera
+##                 mirrored in the glass's plane
 ##   the start     rev(): a low wide shot of the nose, headlights on, the engine revved
 ##                 (its own sounds, CarAudio) with the body rocking on its mounts.
 ## The car is the race car itself, parked and dropped onto the floor, so it lands and settles
@@ -29,6 +30,9 @@ const DROP_HEIGHT := 0.6          # tyres this far above the floor when a car is
 const RESUME_S := 4.0             # after a drag, how long before the director takes back over
 const REV_S := 2.0                # rev(): how long before the race can take over
 const GLASS_LAYER := 1 << 19      # the side mirrors' glass: left out of their own views
+const CLICK_SLOP := 6.0           # px the mouse may move between press and release for a click
+const CLICK_HOLD_S := 10.0        # after clicking a part, how long before the director takes back over
+const LAMP_PICK := 0.3            # m from a lamp a click on the body counts as the lamp
 
 ## The shots. `at` (and `to`, where the camera tracks along) is what it looks at, on the car's
 ## box: x -1..1 right to left side, y 0..1 floor to roof, z -1..1 tail to nose. The camera is
@@ -99,6 +103,7 @@ var rain := false                 # the wipers going and the top up (the menu's 
 var _vp: SubViewport
 var _world: Node3D
 var _sky_mat: ShaderMaterial
+var _mirror_env: Environment      # the mirrors' views': the stage's, its studio sky drawn behind
 var _backdrop: Texture2D
 var _backdrop_tw: Tween
 var _rig: Node3D                  # the lights, turned with the camera so the car stays lit the same
@@ -106,7 +111,7 @@ var _cam: Camera3D
 var _shadow: MeshInstance3D
 var _mirror: Node3D               # the reflection: a copy of each of the car's meshes
 var _twins: Array = []            # [source MeshInstance3D, its copy]
-var _glass: Array[Dictionary] = []   # the side mirrors: {node, point, normal (car-local), vp, cam}
+var _glass: Array[Dictionary] = []   # the mirrors: {node, point, normal, verts (the glass's own space), vp, cam, rear}
 var _region := Rect2(0.5, 0.2, 0.4, 0.5)   # where the car goes, as fractions of the view
 var _half := Vector3(0.9, 0.7, 2.2)        # the car's half extents
 var _head := Vector3.INF                   # the driver's head, on the stage (INF: no driver)
@@ -124,8 +129,14 @@ var _time := 0.0
 # rev()
 var _rev_t := -1.0
 var _rev_xf: Transform3D
+var _rev_body: Transform3D        # the body's pose on its springs as the rev began
 var _rev_rock := 0.0
 var _audio: CarAudio
+var _press_at := Vector2.ZERO     # where the left button went down
+var _moved := false               # ... and whether it's been dragged since (a turn, not a click)
+var _hover_at := Vector2.INF      # the mouse over the view, not dragging: picked once a frame
+var _tri_meshes := {}             # Mesh -> its TriangleMesh, for picking parts
+var _parts := {}                  # the car's moving meshes -> [kind, group] (_map_parts)
 
 
 func _init() -> void:
@@ -174,6 +185,8 @@ func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HE
 	for g in _glass:
 		g.vp.queue_free()
 	_glass.clear()
+	_tri_meshes.clear()
+	_parts.clear()
 	var c := Car.new()
 	c.setup(data, tint, upgrade)
 	c.handbrake = true
@@ -251,6 +264,7 @@ func rev() -> float:
 	car.indicate = 0
 	car.set_headlights(true)
 	_rev_xf = car.global_transform
+	_rev_body = car._body_tilt.transform
 	_audio = CarAudio.new()
 	car.add_child(_audio)
 	return REV_S
@@ -327,7 +341,7 @@ func _can_show(name: String) -> bool:
 		"top": return car.has_soft_top()
 		"signals": return not car._signals.is_empty()
 		"wipers": return not car._wipers.is_empty()
-		"mirrors": return not _glass.is_empty()
+		"mirrors": return _glass.any(func(g: Dictionary) -> bool: return not g.rear)
 		"door": return car.can_open(Nfs5Car.DOOR_LEFT)
 		"bonnet": return car.can_open(Nfs5Car.BONNET)
 		"boot": return car.can_open(Nfs5Car.BOOT)
@@ -430,6 +444,10 @@ func _build_studio() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 1.0
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	# The mirrors show the studio behind (the picture round the horizon), not the stage's
+	# see-through backdrop.
+	_mirror_env = env.duplicate()
+	_mirror_env.background_mode = Environment.BG_SKY
 	var we := WorldEnvironment.new()
 	we.environment = env
 	_world.add_child(we)
@@ -512,16 +530,38 @@ func _build_twins() -> void:
 		_twins.append([src, t])
 
 
-## The side mirrors' views: a view each, into this stage's world, shown on its glass.
+## The side mirrors' views: a view each, into this stage's world, shown on its glass. Each
+## glass framed as in the in-car view (Car._bezel_glass): a dark rim, the view on a copy inside it.
 func _build_mirrors() -> void:
+	var all: Array[Dictionary] = []
+	for g in car._cabin_mirror_glass:
+		# Under the glass, placed back at its parent's origin: the frame swings open with its door.
+		var src: MeshInstance3D = g.node
+		var at := Node3D.new()
+		src.add_child(at)
+		at.transform = src.transform.affine_inverse()
+		all.append(car._bezel_glass(g, at))
 	if Game.quality == Game.Quality.LOW:
 		return
-	for g in car._cabin_mirror_glass:
+	# The cabin's rear-view mirror: its glass copied a hair in front of the model's.
+	var rear := car.model_rear_glass()
+	if not rear.is_empty():
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		for v: Vector3 in rear.faces:
+			st.add_vertex(v + (rear.normal as Vector3) * 0.002)
+		var mi := MeshInstance3D.new()
+		mi.mesh = st.commit()
+		var framed := car._bezel_glass({"node": mi, "point": rear.point, "normal": rear.normal}, car._body_tilt)
+		mi.free()
+		framed.rear = true
+		all.append(framed)
+	for g in all:
 		var vp := SubViewport.new()
 		vp.world_3d = _vp.find_world_3d()
-		vp.transparent_bg = true
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		var cam := Camera3D.new()
+		cam.environment = _mirror_env
 		cam.far = 60.0
 		cam.cull_mask &= ~GLASS_LAYER
 		vp.add_child(cam)
@@ -530,23 +570,29 @@ func _build_mirrors() -> void:
 		var m := ShaderMaterial.new()
 		m.shader = _mirror_shader()
 		m.set_shader_parameter("view", vp.get_texture())
-		(g.node as MeshInstance3D).material_override = m
-		(g.node as MeshInstance3D).layers = GLASS_LAYER
-		_glass.append({"node": g.node, "point": g.point, "normal": g.normal, "vp": vp, "cam": cam})
+		var node: MeshInstance3D = g.node
+		node.material_override = m
+		node.layers = GLASS_LAYER
+		# In the glass's own space: it swings open with its door.
+		var to_car := car.global_transform.affine_inverse() * node.global_transform
+		var inv := to_car.affine_inverse()
+		_glass.append({"node": node, "point": inv * (g.point as Vector3), "normal": (inv.basis * (g.normal as Vector3)).normalized(),
+			"verts": node.mesh.get_faces(), "vp": vp, "cam": cam, "rear": g.get("rear", false)})
 
 
 ## Each mirror's camera: the stage's camera reflected in the glass's plane (its x turned
 ## round, so it's a proper camera and its picture comes out flipped across: the glass reads
-## it back flipped), clipped at the glass so what's behind it stays out. Only while the
-## glass is on screen and faces the camera.
+## it back flipped), its near plane just past the whole glass so what's behind it (its own
+## housing, the wing ahead) stays out. Only while the glass is on screen and faces the camera.
 func _update_mirrors() -> void:
 	if _glass.is_empty() or car == null:
 		return
-	var xf := car.get_global_transform_interpolated()
+	var car_xf := car.get_global_transform_interpolated() * car.global_transform.affine_inverse()
 	var o := _cam.global_position
 	var b := _cam.global_basis
 	var px := Vector2i((size if size.x > 0 else Vector2(1280, 720)) * (1.0 if Game.quality == Game.Quality.HIGH else 0.5))
 	for g in _glass:
+		var xf: Transform3D = car_xf * (g.node as Node3D).global_transform
 		var n: Vector3 = (xf.basis * (g.normal as Vector3)).normalized()
 		var p: Vector3 = xf * (g.point as Vector3)
 		var vp: SubViewport = g.vp
@@ -564,7 +610,10 @@ func _update_mirrors() -> void:
 		cam.global_transform = Transform3D(b2, o2)
 		cam.fov = _cam.fov
 		cam.h_offset = -_cam.h_offset
-		cam.near = maxf((p - o2).dot(-b2.z) - 0.08, 0.05)
+		var near := 0.0
+		for v in g.verts:
+			near = maxf(near, (xf * (v as Vector3) - o2).dot(-b2.z))
+		cam.near = maxf(near + 0.005, 0.05)
 
 
 # ------------------------------------------------------------------ input
@@ -575,11 +624,128 @@ func _gui_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
 		_dragging = e.pressed
 		if e.pressed:
-			_manual_t = RESUME_S
-	elif e is InputEventMouseMotion and _dragging:
-		_drag.x -= e.relative.x * 0.3
-		_drag.y = clampf(_drag.y + e.relative.y * 0.2, -30.0, 60.0)
-		_manual_t = RESUME_S
+			_manual_t = maxf(_manual_t, RESUME_S)
+			_press_at = e.position
+			_moved = false
+		elif not _moved:
+			# A click, not a turn: whatever part of the car is under it works.
+			_click(e.position)
+	elif e is InputEventMouseMotion:
+		if _dragging:
+			if e.position.distance_to(_press_at) > CLICK_SLOP:
+				_moved = true
+			_drag.x -= e.relative.x * 0.3
+			_drag.y = clampf(_drag.y + e.relative.y * 0.2, -30.0, 60.0)
+			_manual_t = maxf(_manual_t, RESUME_S)
+		else:
+			_hover_at = e.position
+
+
+## The part of the car at `at` (the view's pixels) toggled: doors, lids and windows open and
+## shut, the top folds, the spoiler rises, the lamps, brakes, hazards and wipers go on and off.
+## The director holds off a while, then its next shot settles the car back as chosen.
+func _click(at: Vector2) -> void:
+	var part := _part_at(at)
+	if part.is_empty():
+		return
+	_manual_t = maxf(_manual_t, CLICK_HOLD_S)
+	match part[0]:
+		"lid":
+			car.set_open(part[1], not car.is_open(part[1]))
+		"window":
+			car.set_window_down(part[1], car._windows[part[1]].goal <= 0.0)
+		"top":
+			car.set_top_down(not car.top_down)
+		"spoiler":
+			car.spoiler_raise = not car.spoiler_raise
+		"wipers":
+			Car.precipitation = 0.0 if Car.precipitation > 0.0 else 0.8
+		"head":
+			car.set_headlights(not car.headlights_on)
+		"brake":
+			car.hold = not car.hold
+			if not car.hold:
+				car.brake = 0.0
+		"signal":
+			car.indicate = 0 if car.indicate != 0 else 2
+
+
+## Which part each of the car's moving meshes is (see _part_at).
+func _map_parts() -> void:
+	_parts[car] = []   # (never looked up: marks the map built)
+	for g: int in car._lids:
+		for q: Array in car._lids[g].parts:
+			_parts[q[0]] = ["lid", g]
+	for side: int in car._windows:
+		for q: Array in car._windows[side].parts:
+			_parts[q[0]] = ["window", side]
+	for mi in car._hood_top + car._hood_up + car._hood_folded:
+		_parts[mi] = ["top", 0]
+	for mi in car._spoiler_up + car._spoiler_down + car._spoiler_moving:
+		_parts[mi] = ["spoiler", 0]
+	for w: Array in car._wipers:
+		_parts[w[0]] = ["wipers", 0]
+	for mi in car._popups + car._popup_covers:
+		_parts[mi] = ["head", 0]
+
+
+## What's under `at`: [kind, group or side] ("lid", "window", "top", "spoiler", "wipers",
+## "head", "brake", "signal"), or [] for nothing that works.
+func _part_at(at: Vector2) -> Array:
+	if car == null or _cam == null:
+		return []
+	var from := _cam.project_ray_origin(at)
+	var dir := _cam.project_ray_normal(at)
+	var best := INF
+	var hit_mi: MeshInstance3D
+	var hit_p := Vector3.ZERO
+	for mi: MeshInstance3D in car.find_children("*", "MeshInstance3D", true, false):
+		# (The lamps' glows are billboards: the lamps are found by where the ray meets the body.)
+		if mi.mesh == null or not mi.is_visible_in_tree() or mi.has_meta("glint"):
+			continue
+		var tm: TriangleMesh = _tri_meshes.get(mi.mesh)
+		if tm == null:
+			tm = mi.mesh.generate_triangle_mesh()
+			_tri_meshes[mi.mesh] = tm
+		if tm == null:
+			continue
+		var inv := mi.global_transform.affine_inverse()
+		var r := tm.intersect_ray(inv * from, (inv.basis * dir).normalized())
+		if r.is_empty():
+			continue
+		var p: Vector3 = mi.global_transform * (r.position as Vector3)
+		var d := from.distance_to(p)
+		if d < best:
+			best = d
+			hit_mi = mi
+			hit_p = p
+	if hit_mi == null:
+		return []
+	# The part the mesh (or one it hangs from) belongs to.
+	if _parts.is_empty():
+		_map_parts()
+	var n: Node = hit_mi
+	while n and n != car:
+		if _parts.has(n):
+			return _parts[n]
+		n = n.get_parent()
+	# Else the lamp nearest where it hit, if it's near enough.
+	var kind := ""
+	var near := LAMP_PICK
+	for g: Node3D in car._head_glows:
+		if g.global_position.distance_to(hit_p) < near:
+			near = g.global_position.distance_to(hit_p)
+			kind = "head"
+	for g: Node3D in car._brake_lights:
+		if g.global_position.distance_to(hit_p) < near:
+			near = g.global_position.distance_to(hit_p)
+			kind = "brake"
+	for s: Array in car._signals:
+		var g: Node3D = s[0]
+		if g.global_position.distance_to(hit_p) < near:
+			near = g.global_position.distance_to(hit_p)
+			kind = "signal"
+	return [kind, 0] if kind != "" else []
 
 
 # ------------------------------------------------------------------ the director
@@ -623,6 +789,11 @@ func _process(dt: float) -> void:
 		car.steer = st[0] * sin(_shot_t * st[1])
 	_frame()
 	_update_mirrors()
+	if _hover_at != Vector2.INF and not loading:
+		# A hand over what can be clicked.
+		var shape := Control.CURSOR_POINTING_HAND if not _part_at(_hover_at).is_empty() else Control.CURSOR_DRAG
+		mouse_default_cursor_shape = shape
+		_hover_at = Vector2.INF
 	if car:
 		var xf := car.get_global_transform_interpolated()
 		_shadow.position = Vector3(xf.origin.x, FLOOR_Y + 0.005, xf.origin.z)
@@ -674,8 +845,9 @@ func _frame() -> void:
 		target = car.global_transform * _head
 	elif sh.get("on_mirror", false) and car:
 		for g in _glass:
-			if signf((g.point as Vector3).x) == _side:
-				target = car.global_transform * (g.point as Vector3)
+			var p: Vector3 = (g.node as Node3D).global_transform * (g.point as Vector3)
+			if not g.rear and signf(car.to_local(p).x) == _side:
+				target = p
 	var yaw := deg_to_rad(lerpf(sh.yaw[0], sh.yaw[1], u) * _side + _drag.x + sin(_time * 0.37) * 0.6)
 	var e := deg_to_rad(clampf(lerpf(sh.elev[0], sh.elev[1], u) + _drag.y + sin(_time * 0.29) * 0.4, -5.0, 85.0))
 	var d: float = lerpf(sh.dist[0], sh.dist[1], u) * k
@@ -745,10 +917,14 @@ func _rev(dt: float) -> void:
 	car.rpm = lerpf(car.rpm, goal, 1.0 - exp(-dt * (14.0 if goal > car.rpm else 5.0)))
 	car.throttle = gas
 	var push := clampf((car.rpm - was) / maxf(dt, 0.001) / R, -3.0, 3.0)
-	_rev_rock = lerpf(_rev_rock, push * 0.012, 1.0 - exp(-dt * 10.0))
-	var shiver := sin(_time * 70.0) * 0.0015 * (0.3 + car.rpm / R)
+	_rev_rock = lerpf(_rev_rock, push * 0.005, 1.0 - exp(-dt * 8.0))
+	var shiver := sin(_time * 70.0) * 0.0006 * (0.3 + car.rpm / R)
+	# The body alone, about its roll centre (the car's frozen, so it leaves the body be):
+	# the wheels stay planted on the floor.
 	var tw := Basis(Vector3.BACK, _rev_rock + shiver) * Basis(Vector3.RIGHT, -absf(_rev_rock) * 0.3)
-	car.global_transform = Transform3D(_rev_xf.basis * tw, _rev_xf.origin)
+	var pivot: Vector3 = car._tilt_pivot
+	car.global_transform = _rev_xf
+	car._body_tilt.transform = Transform3D(tw, pivot - tw * pivot) * _rev_body
 
 
 # ------------------------------------------------------------------ shaders
@@ -826,8 +1002,7 @@ void fragment() {
 
 static var _mirror_sh: Shader
 
-## A side mirror's glass: its view (see _update_mirrors()), read back flipped across, a
-## shade darker; where the view has nothing (the studio's clear backdrop) a dark grey.
+## A mirror's glass: its view (see _update_mirrors()), read back flipped across, a shade darker.
 static func _mirror_shader() -> Shader:
 	if _mirror_sh == null:
 		_mirror_sh = Shader.new()
@@ -836,8 +1011,7 @@ shader_type spatial;
 render_mode unshaded, cull_disabled;
 uniform sampler2D view : source_color, filter_linear;
 void fragment() {
-	vec4 c = texture(view, vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y));
-	ALBEDO = mix(vec3(0.05, 0.055, 0.065), c.rgb * 0.85, c.a);
+	ALBEDO = texture(view, vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y)).rgb * 0.85;
 }
 """
 	return _mirror_sh

@@ -19,6 +19,9 @@ uniform float gloss = 0.4;
 uniform bool wheel = false;
 // Panel shut lines: how deep (model units) the dark lines drawn in the paint are cut.
 uniform float seam_depth = 0.006;
+// SkinHD's upscaled skins: log2 of their scale (0 the game's own). Their cut-outs' contours are
+// smooth already, and the tests on "the skin round a texel" look that many mips further up.
+uniform int skin_lod = 0;
 // High Stakes' cockpit (the in-car view's dash, seats and doors): shut in under the roof, it
 // sees neither the sky nor the reflection probe's open road, so it takes no clearcoat and
 // only a faint sheen instead of mirroring them as a blue-grey film.
@@ -45,6 +48,9 @@ uniform float indicator_left = 0.0;
 uniform float indicator_right = 0.0;
 
 varying vec3 model_pos;
+
+// A Porsche Unleashed door window's belt line (see the fragment): off by default.
+instance uniform vec4 window_belt = vec4(-1e6, 0.0, 0.0, 0.0);
 
 // A Porsche Unleashed window page's see-through pane: its texel's alpha exactly 128 (nearest,
 // as filtering would blend it with the seal's 255 and the rim's paint 117 into its range).
@@ -119,6 +125,11 @@ void vertex() {
 }
 
 void fragment() {
+	// A Porsche Unleashed door window wound down (Car._pose_lid): what's below the door's belt
+	// line, y = x + y z in the door's frame (the pane's own, moved down by zw), is in the door.
+	if (model_pos.y + window_belt.z < window_belt.x + window_belt.y * (model_pos.z + window_belt.w)) {
+		discard;
+	}
 	vec4 c = texture(albedo_tex, UV);
 	// Cut out on the full-size skin's alpha, like the original's colour key. Traffic bodies
 	// are big panels reaching down to the road whose lower edge and wheel arches are cut out
@@ -137,7 +148,7 @@ void fragment() {
 	// a shape, bulging it into its neighbours.
 	float cut = COLOR.b < 0.5 ? 0.23 : 0.08;
 	float cut_alpha = textureLod(albedo_tex, UV, 0.0).a;
-	if (abs(textureLod(albedo_tex, UV, 2.0).a - cut_alpha) > 0.01) {
+	if (skin_lod == 0 && abs(textureLod(albedo_tex, UV, 2.0).a - cut_alpha) > 0.01) {
 		vec4 cell = textureGather(albedo_tex, UV, 3);
 		float cell_max = max(max(cell.x, cell.y), max(cell.z, cell.w));
 		float seen_min = min4(mix(vec4(1.0), cell, step(cut, cell)));
@@ -178,7 +189,7 @@ void fragment() {
 	// (As the lines blur into their surroundings further off, they fade out by themselves.)
 	float seam = 0.0;
 	if (!wheel && !interior) {
-		vec4 around = texture(albedo_tex, UV, 3.0);
+		vec4 around = texture(albedo_tex, UV, 3.0 + float(skin_lod));
 		float around_luma = dot(around.rgb, vec3(0.2126, 0.7152, 0.0722));
 		float around_paint = 1.0 - smoothstep(0.7, 0.85, around.a);
 		// (Not beside a cut-out, whose transparent texels darken the mips round its edge.)

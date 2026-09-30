@@ -374,7 +374,8 @@ func _physics_process(dt: float) -> void:
 	var open := lerpf(1.0, SNOW_GRIP if _snow else WET_GRIP, _wet)
 	for c in get_parent().get_children():
 		if c is Car:
-			c.surface_grip = 1.0 if _cover.covered(c.global_position) else open
+			c.sheltered = _cover.covered(c.global_position)
+			c.surface_grip = 1.0 if c.sheltered else open
 
 
 # ------------------------------------------------------------------ lightning

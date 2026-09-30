@@ -87,6 +87,7 @@ const BONNET_BLOW_SPEED := 45.0
 ## go and the fog lamps light with it.
 static var precipitation := 0.0
 const REST_AFTER := 1.0   # s an AI car is held motionless before it sleeps
+const WHEEL_LOCK := 2.4   # wheel_turn() at full lock, standing (radians)
 ## Whether brake and reversing lamps cast real light (Low quality: just the glowing lamps).
 static var lamp_lights := true
 static var _glow_tex: GradientTexture2D   # the lamp glows' soft disc, shared
@@ -133,6 +134,7 @@ var max_velocity := 70.0   # [14] what the engine reaches on the flat, m/s: sets
 var brake_decel := 10.0    # [18] m/s^2
 var grip := 1.0            # [30] lateral grip multiplier over 3.2, x tyre factor [66]
 var surface_grip := 1.0    # the road under it: below 1 when wet or snowy (set by Weather)
+var sheltered := false     # in a tunnel or under a bridge, out of the rain (set by Weather)
 var off_road := 0.0        # share of the grounded wheels on loose ground (grass, dirt, sand, snow)
 var water_depth := 0.0     # m the car is under a stream or lake surface (set by the race): it wades
 var idle_rpm := 1000.0     # [12]
@@ -291,6 +293,7 @@ var _paint := Color.WHITE
 var _steer_mats: Array[ShaderMaterial] = []   # the materials turning the steering wheel and the driver's hands
 var _steer_shapes: Array = []   # [MeshInstance3D, angles]: Porsche Unleashed's arms and hands, posed by blend shapes
 var _steer_shown := 0.0
+var _steer_reach := INF   # how far (radians) the blend-shaped arms can turn the wheel either way
 var _reverse_lights: Array[Node3D] = []
 var _reverse_xf: Transform3D     # where the reversing lamps' light cone starts, local
 var _beams: Array[SpotLight3D] = []   # [between the lamps, left lamp, right lamp]
@@ -394,6 +397,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		var sm := ShaderMaterial.new()
 		sm.shader = Game.shader("res://shaders/car.gdshader")
 		sm.set_shader_parameter("albedo_tex", data.texture)
+		sm.set_shader_parameter("skin_lod", data.texture.get_meta("skin_lod", 0))   # SkinHD's upscale
 		if data.damage_texture:
 			sm.set_shader_parameter("damage_tex", data.damage_texture)
 		var paint := tint
@@ -440,6 +444,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			_steer_mats.append(part_mat)
 		if p.has("steer_shapes"):
 			_steer_shapes.append([mi, p.steer_shapes])
+			_steer_reach = minf(_steer_reach, minf(-p.steer_shapes[0], p.steer_shapes[p.steer_shapes.size() - 1]))
 			_pose_steer_shapes(mi, p.steer_shapes, 0.0)
 		# Where each vertex goes in the model's own damaged copy, for CarDamage.
 		if p.has("damaged"):
@@ -923,6 +928,17 @@ func corner_grip() -> float:
 	return grip * minf(front_grip, 1.0) * 0.87
 
 
+## Traffic's files were never meant to climb: the original game's traffic hardly drove.
+## The buses and lorries' engines can't pull their weight up a mountain road, and some
+## have tyres that spin on a wet or snowy one. At least three quarters of an ordinary
+## car's grip, and a first gear that pulls 40% of the weight.
+func fit_for_traffic() -> void:
+	grip = maxf(grip, 0.75)
+	var pull := _wheel_force(redline * 0.6, _gear_index(1)) / (mass * 9.81)
+	if pull > 0.0 and pull < 0.4:
+		torque_curve = _scaled(torque_curve, 0.4 / pull)
+
+
 ## The original AI's speed factor for a bend of radius r [49..54]: bends are sorted by how
 ## sharp they are (10^4 / radius) into gradual (no change), medium, sharp and extreme.
 func bend_speed_factor(r: float) -> float:
@@ -1177,7 +1193,7 @@ func _add_opening(p: Dictionary, mi: MeshInstance3D) -> void:
 	if p.has("window"):
 		var w: int = p.window
 		if not _windows.has(w):
-			_windows[w] = {"parts": [], "drop": p.drop, "t": 0.0, "goal": 0.0}
+			_windows[w] = {"parts": [], "drop": p.drop, "belt": p.belt, "t": 0.0, "goal": 0.0}
 		_windows[w].parts.append([mi, p.center])
 	if p.has("bay"):
 		if not _bays.has(p.bay):
@@ -1368,8 +1384,11 @@ func _pose_lid(g: int) -> void:
 	if _windows.has(g):
 		var w: Dictionary = _windows[g]
 		var drop: Vector3 = w.drop * smoothstep(0.0, 1.0, w.t)
+		# (What has gone down past the door's belt line is cut away: see Nfs5Car.WINDOW_DROP.)
+		var belt := Vector4(w.belt.x, w.belt.y, drop.y, drop.z)
 		for pm in w.parts:
 			(pm[0] as Node3D).transform = Transform3D(b, hinge + b * (pm[1] + drop - hinge))
+			(pm[0] as GeometryInstance3D).set_instance_shader_parameter("window_belt", belt)
 
 
 ## Sets one of the skin's lamp-lens uniforms (car.gdshader), when it changes.
@@ -2310,24 +2329,7 @@ func _build_dash() -> void:
 ## leaning glass, until they pass over the car or meet the roof's lining, a jump nearer.
 ## Either glass is taken as turned to show the eye what lies straight behind.
 func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
-	var inv := space.global_transform.affine_inverse()
-	var tris := PackedVector3Array()   # near the centreline, ahead of and above the eye
-	var meshes: Array = _body_meshes.duplicate()
-	if _dash:
-		meshes.append_array(_dash.find_children("*", "MeshInstance3D", true, false))
-	for mi: MeshInstance3D in meshes:
-		if mi.mesh == null or not mi.is_inside_tree():
-			continue
-		var xf := inv * mi.global_transform
-		var f := mi.mesh.get_faces()
-		for i in range(0, f.size() - 2, 3):
-			var a := xf * f[i]
-			var b := xf * f[i + 1]
-			var c := xf * f[i + 2]
-			if minf(a.x, minf(b.x, c.x)) > 0.15 or maxf(a.x, maxf(b.x, c.x)) < -0.15 \
-					or maxf(a.z, maxf(b.z, c.z)) < eye.z + 0.15 or maxf(a.y, maxf(b.y, c.y)) < eye.y - 0.1:
-				continue
-			tris.append_array([a, b, c])
+	var tris := _rear_mirror_tris(space, eye)
 	_rear_mirror = Node3D.new()
 	_rear_mirror.name = "RearMirror"
 	parent.add_child(_rear_mirror)
@@ -2396,6 +2398,44 @@ func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
 	_rear_mirror.visible = rear_mirror_wanted
 
 
+## The car's faces near the centreline, ahead of and above the eye (`eye` in `space`), in
+## `space`: where a rear-view mirror is looked for.
+func _rear_mirror_tris(space: Node3D, eye: Vector3) -> PackedVector3Array:
+	var inv := space.global_transform.affine_inverse()
+	var tris := PackedVector3Array()
+	var meshes: Array = _body_meshes.duplicate()
+	if _dash:
+		meshes.append_array(_dash.find_children("*", "MeshInstance3D", true, false))
+	for mi: MeshInstance3D in meshes:
+		if mi.mesh == null or not mi.is_inside_tree():
+			continue
+		var xf := inv * mi.global_transform
+		var f := mi.mesh.get_faces()
+		for i in range(0, f.size() - 2, 3):
+			var a := xf * f[i]
+			var b := xf * f[i + 1]
+			var c := xf * f[i + 2]
+			if minf(a.x, minf(b.x, c.x)) > 0.15 or maxf(a.x, maxf(b.x, c.x)) < -0.15 \
+					or maxf(a.z, maxf(b.z, c.z)) < eye.z + 0.15 or maxf(a.y, maxf(b.y, c.y)) < eye.y - 0.1:
+				continue
+			tris.append_array([a, b, c])
+	return tris
+
+
+## A Porsche Unleashed cabin's own rear-view mirror glass, as seen from outside (the menu's
+## showroom reflects on it): {faces, point, normal (facing back)} in the body's space, or {}
+## where the cabin has none.
+func model_rear_glass() -> Dictionary:
+	if not _dash_data.get("own_cabin", false):
+		return {}
+	var eye: Vector3 = _dash_data.eye
+	var g := _model_rear_glass(_rear_mirror_tris(_body_tilt, eye), eye)
+	if not g.is_empty():
+		var bn: Vector3 = g.normal
+		g.normal = Vector3(bn.x, bn.y, -sqrt(maxf(1.0 - bn.length_squared(), 0.0))).normalized()
+	return g
+
+
 ## A Porsche Unleashed mirror's glass ({node, point, normal}: a side mirror's, see
 ## _cabin_mirror_glass, or the modelled rear-view mirror's) framed for the in-car view, under
 ## `parent` (at the body's origin): its edge a dark rim MIRROR_BEZEL wide, over which a copy
@@ -2426,7 +2466,25 @@ func _bezel_glass(g: Dictionary, parent: Node3D) -> Dictionary:
 		var q := mid + (c - mid) * shrink
 		rim.set_normal(n)
 		rim.add_vertex(p + n * 0.001)
-		inset.add_vertex(p + u * (q.x - c.x) + w * (q.y - c.y) + n * 0.002)
+		# Laid back onto the face where it lands, its nearest layer there (a curved glass, the
+		# 993's, otherwise sinks behind the rim towards its edges, and the rim shows through it
+		# in black wedges).
+		var depth := -INF
+		for i in range(0, faces.size(), 3):
+			var t: Array[Vector3] = [faces[i], faces[i + 1], faces[i + 2]]
+			var a := Vector2(t[0].dot(u), t[0].dot(w))
+			var e1 := Vector2(t[1].dot(u), t[1].dot(w)) - a
+			var e2 := Vector2(t[2].dot(u), t[2].dot(w)) - a
+			var den := e1.cross(e2)
+			if absf(den) < 1e-9:
+				continue
+			var s := (q - a).cross(e2) / den
+			var r := e1.cross(q - a) / den
+			if s >= -1e-4 and r >= -1e-4 and s + r <= 1.0 + 1e-4:
+				depth = maxf(depth, t[0].dot(n) + s * (t[1] - t[0]).dot(n) + r * (t[2] - t[0]).dot(n))
+		if depth == -INF:
+			depth = p.dot(n)
+		inset.add_vertex(u * q.x + w * q.y + n * (depth + 0.002))
 	var shell := StandardMaterial3D.new()
 	shell.albedo_color = Color(0.045, 0.045, 0.05)
 	shell.roughness = 0.55
@@ -2435,7 +2493,7 @@ func _bezel_glass(g: Dictionary, parent: Node3D) -> Dictionary:
 	bezel.material_override = shell
 	var glass := MeshInstance3D.new()
 	glass.mesh = inset.commit()
-	glass.material_override = src.material_override
+	glass.material_override = src.get_active_material(0)
 	for m: MeshInstance3D in [bezel, glass]:
 		m.layers = REAR_MIRROR_LAYER
 		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -2580,7 +2638,7 @@ func _dial_full_scale(revs: bool) -> float:
 ## follows the road wheels, so it winds on gradually and turns less at speed, where they do;
 ## full lock at a standstill is a little over a third of a turn.
 func wheel_turn() -> float:
-	return -steer_angle / (max_steer * low_turn) * 2.4
+	return -steer_angle / (max_steer * low_turn) * WHEEL_LOCK
 
 
 ## Needles and steering wheel of the in-car view.
@@ -2627,9 +2685,9 @@ func wheel_states() -> Array[Dictionary]:
 
 ## The wipers a step on: while it rains or snows they sweep up and back, faster the harder
 ## it comes down, with a pause between sweeps when it's light; once it stops they finish
-## the sweep they're on and park.
+## the sweep they're on and park (as they do in a tunnel or under a bridge).
 func _wipe(dt: float) -> void:
-	var amount := clampf(precipitation, 0.0, 1.0)
+	var amount := 0.0 if sheltered else clampf(precipitation, 0.0, 1.0)
 	if _wipe_t == 0.0 and amount < 0.05:
 		return
 	var sweep := lerpf(WIPE_SLOW, WIPE_FAST, amount)
@@ -2719,9 +2777,12 @@ func _process(dt: float) -> void:
 	if not _fog_glows.is_empty() and _fog_glows[0].visible != fogs:
 		for g in _fog_glows:
 			g.visible = fogs
-	# The driver turns his wheel as far as the in-car view's.
-	if not (_steer_mats.is_empty() and _steer_shapes.is_empty()) and wheel_turn() != _steer_shown:
-		_steer_shown = wheel_turn()
+	# The driver turns his wheel as far as the in-car view's; Porsche Unleashed's, whose arms
+	# are frames that reach so far (about half a right angle), only that far at full lock,
+	# his hands on it all the way.
+	var shown := wheel_turn() * (_steer_reach / WHEEL_LOCK if _steer_reach < WHEEL_LOCK else 1.0)
+	if not (_steer_mats.is_empty() and _steer_shapes.is_empty()) and shown != _steer_shown:
+		_steer_shown = shown
 		for m in _steer_mats:
 			m.set_shader_parameter("steer_angle", _steer_shown)
 		for s in _steer_shapes:

@@ -23,6 +23,8 @@ float anim_layer(float base, float packed) {
 }
 
 void vertex() {
+	// Porsche Unleashed's scrolling water (see track.gdshader).
+	UV += fract(CUSTOM1.xy * TIME);
 	layer = anim_layer(UV2.x, UV2.y);
 }
 

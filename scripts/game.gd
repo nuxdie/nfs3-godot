@@ -134,6 +134,9 @@ func _ready() -> void:
 	# `godot --path . -- --carshots [traffic|cops|cars]` photographs cars for a contact sheet.
 	if "--carshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/car_shots.gd").new())
+	# `godot --path . -- --enhanceskins [cars|pu|hs|traffic|all]` upscales car skins (SkinHD).
+	if "--enhanceskins" in OS.get_cmdline_user_args():
+		add_child(load("res://tools/enhance_skins.gd").new())
 	# `godot --path . -- --fxshots [track]` stages slides, dust, scrapes and crashes to photograph.
 	if "--fxshots" in OS.get_cmdline_user_args():
 		add_child(load("res://tools/fx_shots.gd").new())
@@ -454,6 +457,9 @@ func load_car(path: String, preset := 0, who := 0) -> Object:
 				stand_in.display_name = car.display_name if car.display_name != "" else stand_in.display_name
 				_car_cache[key] = stand_in
 			else:
+				# Its sharper skin, if one's been made (not on Low: 4x the memory).
+				if quality != Quality.LOW:
+					SkinHD.apply(car, path, who if is_pu_path(path) else 0)
 				_car_cache[key] = car
 	return _car_cache[key]
 

@@ -77,6 +77,9 @@ void vertex() {
 		VERTEX.xz += vec2(dir.y, -dir.x) * CUSTOM0.x;
 		NORMAL = vec3(dir.x, 0.0, dir.y);
 	}
+	// Porsche Unleashed's scrolling textures (water, waterfalls, conveyor treads): CUSTOM1.xy
+	// is how far the UVs go a second.
+	UV += fract(CUSTOM1.xy * TIME);
 	layer = anim_layer(UV2.x, UV2.y);
 	one_sided = mod(UV2.y, 2.0);
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;

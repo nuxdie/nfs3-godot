@@ -488,6 +488,12 @@ tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, fr
                    (pu: Porsche Unleashed's cars, by car id: pu_993coupe36)
                    (--big / --low / --yaw=DEG / --wire for close inspection; --dent crashes each car
                    first, --officer stands a High Stakes cruiser's officer beside it)
+tools/enhance_skins.gd sharper car skins (SkinHD): each skin upscaled by Real-ESRGAN's anime model
+                   (Porsche Unleashed 2x, the others 4x), cached in user://skins_hd/ and swapped in
+                   when the car loads (not on Low quality):
+                   godot --path . -- --enhanceskins [cars|pu|hs|traffic|all] [id ...] [--esrgan=DIR] [--force]
+                   (DIR: realesrgan-ncnn-vulkan and its models/, default tools/realesrgan/, from
+                   github.com/xinntao/Real-ESRGAN/releases; car_shots --nohd compares without)
 tools/car_calib.gd flat-out drag test of every car against the original game's acceleration table:
                    godot --headless --path . -s tools/car_calib.gd [-- name-filter]
 tools/car_handling.gd  skidpad (lateral g, and against what the AI expects), lane change, trail

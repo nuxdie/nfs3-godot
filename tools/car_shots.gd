@@ -14,6 +14,9 @@ extends Node
 ## lights its left, right or all indicators. --open=6,7,8,9 opens its doors, bonnet, boot; --windows winds them down. --camy=M, --looky=M, --fov=DEG place the camera;
 ## --dent=N hits it N rounds (parts tear off), --tear=6,8,30 tears those groups off (Nfs5Car's).
 ## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --paint=N the car's colour N.
+## --wheel=RAD holds the steering wheel turned; --cockpit shoots the in-car view (--rearmirror close on its rear-view mirror). --driver=N seats Porsche Unleashed driver N; --onlydriver hides all but the people.
+## --nohd draws the skins as loaded, without SkinHD's upscales.
+## --dumpskin=PATH saves the car's skin as a PNG; --skin=PATH draws it with that one instead.
 ## --aa=msaa2|msaa4|msaa8|fxaa|smaa|none (comma-separated) overrides the view's antialiasing.
 
 var W := 480
@@ -65,6 +68,7 @@ func _run() -> void:
 		for c in Game.cars:
 			id_of[c.path] = c.id
 		paths = paths.filter(func(p: String) -> bool: return p.get_file() in ids or id_of.get(p, "") in ids)
+	SkinHD.enabled = not "--nohd" in args   # --nohd: the game's own skins, not SkinHD's upscales
 	var lights := "--lights" in args
 	var big := "--big" in args
 	var low := "--low" in args
@@ -165,12 +169,25 @@ func _run() -> void:
 				hcol += 1
 			heli.queue_free()
 			continue
-		var data: Object = Game.load_car(paths[i], i)
+		var who := 0
+		for a: String in args:
+			if a.begins_with("--driver="):   # Porsche Unleashed: that driver in the seat (1..10)
+				who = int(a.get_slice("=", 1))
+		var data: Object = Game.load_car(paths[i], i, who)
 		print("%-6s %-22s parts %d wheels %d popups %d lights %d colours %d tex %s half %s%s" % [
 			paths[i].get_file(), data.display_name, data.body_parts.size(), data.wheels.size(),
 			data.popup_lights.size(), data.lights.size(), data.colours.size(),
 			data.texture.get_size() if data.texture else "none", data.half_size,
 			"  ERROR " + data.error if data.error != "" else ""])
+		for a: String in args:
+			if a.begins_with("--dumpskin=") and data.texture:
+				data.texture.get_image().save_png(a.get_slice("=", 1))
+			elif a.begins_with("--skin=") and data.texture:
+				# A replacement skin (an upscale of a --dumpskin, any size), mipmapped as the loader does.
+				var img := Image.load_from_file(a.get_slice("=", 1))
+				img.convert(Image.FORMAT_RGBA8)
+				img.generate_mipmaps()
+				data.texture = ImageTexture.create_from_image(img)
 		var car := Car.new()
 		car.setup(data)
 		car.handbrake = true
@@ -228,8 +245,19 @@ func _run() -> void:
 		for a: String in args:
 			if a.begins_with("--steer="):
 				car.steer = float(a.get_slice("=", 1))
+			elif a.begins_with("--wheel="):   # the steering wheel and the driver's hands held turned (radians, + clockwise)
+				car.set_process(false)
+				for m in car._steer_mats:
+					m.set_shader_parameter("steer_angle", float(a.get_slice("=", 1)))
+				for sh in car._steer_shapes:
+					Car._pose_steer_shapes(sh[0], sh[1], float(a.get_slice("=", 1)))
 		if "--siren" in args:
 			car.enable_siren(true)
+		if "--onlydriver" in args:   # hides all but the people (their material is car_driver's)
+			for mi: MeshInstance3D in car.find_children("*", "MeshInstance3D", true, false):
+				var m := mi.get_active_material(0) as ShaderMaterial
+				if m == null or not m.shader.resource_path.ends_with("car_driver.gdshader"):
+					mi.visible = false
 		var hs: Vector3 = data.half_size
 		var dents := 0
 		for a: String in args:
@@ -278,6 +306,16 @@ func _run() -> void:
 					cam.fov = float(a.get_slice("=", 1))
 			cam.global_position = car.global_position + dir * dist + Vector3.UP * cam_y
 			cam.look_at(car.global_position + Vector3.UP * look_y, Vector3.UP)
+			if "--cockpit" in args and car.set_cockpit(true):   # the in-car view, from the driver's eye
+				var ce := car.cockpit_eye()
+				cam.global_position = car.global_transform * ce
+				cam.look_at(car.global_transform * (ce + Vector3(0.0, -0.3, 1.0)), Vector3.UP)
+				var rm: Node3D = car.get("_rear_mirror")
+				if "--rearmirror" in args and rm:   # close on the rear-view mirror
+					var glass := rm.find_children("*", "MeshInstance3D", false, false)
+					if not glass.is_empty():
+						cam.fov = 14.0
+						cam.look_at((glass[0] as MeshInstance3D).global_transform * (glass[0] as MeshInstance3D).get_aabb().get_center(), Vector3.UP)
 			for a: String in args:
 				if a.begins_with("--eye="):   # --eye=x,y,z:tx,ty,tz in the car's own frame (+z ahead, +x left)
 					var ab := a.get_slice("=", 1).split(":")
@@ -339,3 +377,4 @@ func _pick(cam: Camera3D, car: Node3D, data: Object, xy: PackedFloat64Array) -> 
 		if tex:
 			texel = tex.get_pixelv(Vector2i((h[3] as Vector2) * Vector2(tex.get_size() - Vector2i.ONE)))
 		print("pick %.3f m  %s  tri %d  uv %s  at %s  texel %s" % (h + [texel]))
+

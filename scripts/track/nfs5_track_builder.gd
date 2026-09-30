@@ -20,12 +20,31 @@ const STEEP := 0.5
 const LOST_MARGIN := 120.0
 ## Opaque scenery at least this big (m across, and high) keeps the chase camera out.
 const CAMERA_BLOCK_SIZE := Vector2(6.0, 2.5)
-## A cut-out texture's triangle is solid when less than this share of the texels it shows
-## is clear: the stonework of a church or a monument cut from a page with its arches' and
-## crosses' outlines, where foliage shows a fifth or more of clear.
-const SOLID_CLEAR := 0.1
-## _clear_share: the samples along each side of a triangle's UVs.
-const CLEAR_SAMPLES := 8
+## The cut-out images that are plants (by their name in the .fsh: grass, flowers, bushes,
+## ferns, reeds, vines, moss, trees and tree lines) and the glows round lamps: a car goes
+## through them, wherever they stand. Every other cut-out (rails, fences, railings, signs,
+## lamp posts, stonework) is solid.
+const PASSABLE_CUTOUTS := [
+	"abtb", "abtc", "aldr", "alt1", "alt2", "cabs", "cas1", "cas2", "cas3", "cbb1", "cbb4",
+	"crnf", "crns", "dais", "decb", "decc", "dedt", "drka", "evrc", "evrs", "evrt", "fern",
+	"fhb1", "fhb2", "fhb3", "fhb4", "fhca", "fhna", "fhpt", "fht1", "fht2", "fht3", "fht5",
+	"fht6", "fhtb", "fhte", "fhtl", "fhtm", "fhts", "ftl2", "ftl3", "ftl4", "ftl5", "ftl6",
+	"ftl7", "gpvf", "graz", "grvn", "lin1", "lin2", "litc", "mos1", "mos2", "moss", "nbsh",
+	"oake", "oakf", "oakg", "palm", "rots", "shrb", "stl5", "stmb", "trl3", "vine", "vinf",
+]
+
+## The guardrails' and railings' images: their upright triangles are taken out of the chunk
+## meshes into Guardrails, cut into columns so a car's hit bends them.
+const RAIL_IMAGES := [
+	"abgr", "abor", "abr1", "abr2", "abr3", "abr6", "absg", "bar1", "bar2", "bar4", "bar5",
+	"barr", "gud1", "gud2",
+]
+## m: the longest (along the ground) a rail triangle's edge is left. Twice
+## Nfs3TrackBuilder.RAIL_COLUMN: PU's rails run for kilometres, and a hit (Guardrails.RADIUS)
+## still bends them in a curve.
+const RAIL_COLUMN := 1.0
+## Chunks of rail meshed together.
+const RAIL_CHUNKS := 4
 
 enum { PASS_OPAQUE, PASS_FX, PASS_GLASS }
 
@@ -59,16 +78,31 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 		root.add_child(bd)
 	for bd in [road, terrain]:
 		TrackSurface.set_images(bd, t.images)
-	var alphas := {}   # cut-out image -> [its alpha bytes, width, height], for _add_solid
+	var passable := _passable_images(t, see_through)
+	var rail_images := {}
+	for i in t.image_names.size():
+		if RAIL_IMAGES.has(t.image_names[i]):
+			rail_images[i] = true
+	var rails := Guardrails.new()
+	rails.name = "Guardrails"
+	root.add_child(rails)
+	var rail_mesh := Nfs3TrackBuilder._rail_arrays()
 
 	for ci in t.chunks.size():
 		var c: Dictionary = t.chunks[ci]
-		_add_meshes(geo, "Chunk%03d" % ci, c.pieces, see_through, mats, Nfs3TrackBuilder.DRAW_DISTANCE)
-		_add_ground(road, c.pieces[Nfs5Track.Kind.ROAD], SURFACE_ROAD)
-		var ground := _split_steep(c.pieces[Nfs5Track.Kind.GROUND])
+		var taken := _take_rails(c.pieces, rail_images, rail_mesh)
+		var pieces: Array = taken[0]
+		_add_faces(scenery, taken[1])
+		_add_meshes(geo, "Chunk%03d" % ci, pieces, see_through, mats, Nfs3TrackBuilder.DRAW_DISTANCE)
+		_add_ground(road, pieces[Nfs5Track.Kind.ROAD], SURFACE_ROAD)
+		var ground := _split_steep(pieces[Nfs5Track.Kind.GROUND], see_through, passable)
 		_add_ground(terrain, ground[0], SURFACE_GROUND)
 		_add_faces(scenery, ground[1])
-		_add_solid(scenery, cam_block, c.pieces[Nfs5Track.Kind.SCENERY], see_through, alphas, t.images)
+		_add_solid(scenery, cam_block, pieces[Nfs5Track.Kind.SCENERY], passable)
+		if (ci % RAIL_CHUNKS == RAIL_CHUNKS - 1 or ci == t.chunks.size() - 1) \
+				and rail_mesh[0][Mesh.ARRAY_VERTEX].size() > 0:
+			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[PASS_OPAQUE], Nfs3TrackBuilder.DRAW_DISTANCE)
+			rail_mesh = Nfs3TrackBuilder._rail_arrays()
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
 	_add_ground(terrain, t.backdrop[Nfs5Track.Kind.GROUND], SURFACE_GROUND)
 
@@ -157,6 +191,8 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 		var col := PackedColorArray()
 		var uv := PackedVector2Array()
 		var uv2 := PackedVector2Array()
+		var scroll := PackedFloat32Array()   # CUSTOM1: the UVs' scroll a second (water)
+		var scrolls := false
 		for pc: Nfs5Track.Piece in pieces:
 			var wet := 1.0 if pc.kind == Nfs5Track.Kind.ROAD else 0.0
 			for tri in pc.tex.size():
@@ -173,6 +209,9 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 					col.append(c)
 					uv.append(pc.uv[i + k])
 					uv2.append(Vector2(tex, 0.0))
+					var sc := pc.scroll[tri]
+					scroll.append_array([sc.x, sc.y])
+					scrolls = scrolls or sc != Vector2.ZERO
 		if pos.is_empty():
 			continue
 		var arrays := []
@@ -182,8 +221,12 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 		arrays[Mesh.ARRAY_COLOR] = col
 		arrays[Mesh.ARRAY_TEX_UV] = uv
 		arrays[Mesh.ARRAY_TEX_UV2] = uv2
+		var flags := 0
+		if scrolls:
+			arrays[Mesh.ARRAY_CUSTOM1] = scroll
+			flags = Mesh.ARRAY_CUSTOM_RG_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM1_SHIFT
 		var mesh := ArrayMesh.new()
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
 		var mi := MeshInstance3D.new()
 		mi.name = mesh_name + Nfs3TrackBuilder.PASS_SUFFIX[pass_i]
 		mi.mesh = mesh
@@ -194,6 +237,76 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 			mi.visibility_range_end_margin = 40.0
 			mi.set_meta("landscape", true)
 		geo.add_child(mi)
+
+
+## [`pieces` without the upright triangles of the rails (`rail_images`); those triangles'
+## corners, for solid scenery]. The rails are appended to `out` (from
+## Nfs3TrackBuilder._rail_arrays) instead, cut so no edge spans more than RAIL_COLUMN, each
+## corner leaning by its height up its triangle (see Guardrails).
+static func _take_rails(pieces: Array, rail_images: Dictionary, out: Array) -> Array:
+	var faces := PackedVector3Array()
+	if rail_images.is_empty():
+		return [pieces, faces]
+	var arrays: Array = out[0]
+	var kept := []
+	for pc: Nfs5Track.Piece in pieces:
+		if pc.kind == Nfs5Track.Kind.ROAD:
+			kept.append(pc)
+			continue
+		var rest := Nfs5Track.Piece.new()
+		rest.kind = pc.kind
+		for tri in pc.tex.size():
+			var i := tri * 3
+			var tex := pc.tex[tri]
+			var n := (pc.pos[i + 2] - pc.pos[i]).cross(pc.pos[i + 1] - pc.pos[i]).normalized()
+			if not rail_images.has(tex) or absf(n.y) >= STEEP:
+				for k in 3:
+					rest.pos.append(pc.pos[i + k])
+					rest.uv.append(pc.uv[i + k])
+					rest.colour.append(pc.colour[i + k])
+				rest.tex.append(tex)
+				rest.scroll.append(pc.scroll[tri])
+				continue
+			faces.append_array([pc.pos[i], pc.pos[i + 1], pc.pos[i + 2]])
+			var lo := minf(pc.pos[i].y, minf(pc.pos[i + 1].y, pc.pos[i + 2].y))
+			var height := maxf(pc.pos[i].y, maxf(pc.pos[i + 1].y, pc.pos[i + 2].y)) - lo
+			var uv2 := Vector2(tex, 0.0)
+			# Halve the longest edge (along the ground) until none is longer than a column.
+			var todo := [[pc.pos[i], pc.pos[i + 1], pc.pos[i + 2], pc.uv[i], pc.uv[i + 1], pc.uv[i + 2],
+				pc.colour[i], pc.colour[i + 1], pc.colour[i + 2]]]
+			while not todo.is_empty():
+				var t: Array = todo.pop_back()
+				var e := 0
+				var longest := 0.0
+				for k in 3:
+					var d: Vector3 = t[(k + 1) % 3] - t[k]
+					var l := Vector2(d.x, d.z).length()
+					if l > longest:
+						longest = l
+						e = k
+				if longest > RAIL_COLUMN:
+					var a := e
+					var b := (e + 1) % 3
+					var m := [(t[a] + t[b]) * 0.5, (t[3 + a] + t[3 + b]) * 0.5, (t[6 + a] as Color).lerp(t[6 + b], 0.5)]
+					var t1 := t.duplicate()
+					var t2 := t.duplicate()
+					for q in 3:
+						t1[q * 3 + b] = m[q]
+						t2[q * 3 + a] = m[q]
+					todo.append(t1)
+					todo.append(t2)
+					continue
+				for k in 3:
+					var c: Color = t[6 + k]
+					c.a = 0.0
+					arrays[Mesh.ARRAY_VERTEX].append(t[k])
+					arrays[Mesh.ARRAY_NORMAL].append(n)
+					arrays[Mesh.ARRAY_COLOR].append(c)
+					arrays[Mesh.ARRAY_TEX_UV].append(t[3 + k])
+					arrays[Mesh.ARRAY_TEX_UV2].append(uv2)
+					out[1].append(clampf(((t[k] as Vector3).y - lo) / height, 0.0, 1.0) if height > 0.0 else 1.0)
+		kept.append(rest)
+	return [kept, faces]
 
 
 ## The piece's triangles as a collision shape of `body`, each tagged with its surface and
@@ -216,12 +329,17 @@ static func _add_ground(body: StaticBody3D, pc: Nfs5Track.Piece, surface: int) -
 ## The ground articles hold the walls standing on the ground too (buildings, booths, rock
 ## faces): [the level part, a Piece for the terrain the tyres run on; the steep triangles'
 ## corners], the steep ones for solid scenery, which the AI's scan of the road looks out for
-## (TrackPath.scan_obstacles) where it passes over the terrain.
-static func _split_steep(pc: Nfs5Track.Piece) -> Array:
+## (TrackPath.scan_obstacles) where it passes over the terrain. Plants (grass, flowers,
+## bushes on the verges) are neither: a car goes through them, however they lean.
+static func _split_steep(pc: Nfs5Track.Piece, see_through: PackedByteArray,
+		passable: PackedByteArray) -> Array:
 	var level := Nfs5Track.Piece.new()
 	level.kind = pc.kind
 	var steep := PackedVector3Array()
 	for tri in pc.tex.size():
+		var tex := pc.tex[tri]
+		if see_through[tex] == 1 and passable[tex]:
+			continue
 		var i := tri * 3
 		var n := (pc.pos[i + 2] - pc.pos[i]).cross(pc.pos[i + 1] - pc.pos[i]).normalized()
 		if absf(n.y) < STEEP:
@@ -231,7 +349,7 @@ static func _split_steep(pc: Nfs5Track.Piece) -> Array:
 			level.pos.append(pc.pos[i + k])
 			level.uv.append(pc.uv[i + k])
 			level.colour.append(pc.colour[i + k])
-		level.tex.append(pc.tex[tri])
+		level.tex.append(tex)
 	return [level, steep]
 
 
@@ -246,18 +364,15 @@ static func _add_faces(body: StaticBody3D, faces: PackedVector3Array) -> void:
 	body.add_child(cs)
 
 
-## The opaque scenery triangles as solid scenery; those of it big enough keep the camera out
-## too. Cut-outs (foliage) and see-through ones are left passable, but for the cut-out
-## triangles that show next to no clear texels (see SOLID_CLEAR).
+## The scenery triangles as solid scenery, but for the see-through ones and the plants
+## (PASSABLE_CUTOUTS); those of it big enough keep the camera out too.
 static func _add_solid(scenery: StaticBody3D, cam_block: StaticBody3D, pc: Nfs5Track.Piece,
-		see_through: PackedByteArray, alphas: Dictionary, images: Array) -> void:
+		passable: PackedByteArray) -> void:
 	var faces := PackedVector3Array()
 	for tri in pc.tex.size():
-		var i := tri * 3
-		var tex := pc.tex[tri]
-		if see_through[tex] == 2 or see_through[tex] == 1 \
-				and _clear_share(alphas, images, tex, pc.uv[i], pc.uv[i + 1], pc.uv[i + 2]) >= SOLID_CLEAR:
+		if passable[pc.tex[tri]]:
 			continue
+		var i := tri * 3
 		faces.append_array([pc.pos[i], pc.pos[i + 1], pc.pos[i + 2]])
 	if faces.is_empty():
 		return
@@ -270,34 +385,12 @@ static func _add_solid(scenery: StaticBody3D, cam_block: StaticBody3D, pc: Nfs5T
 		bd.add_child(cs)
 
 
-## The share of clear texels (alpha under 26, as _see_through counts them) of image `tex`
-## that a triangle with these UVs shows (repeating), sampled over it.
-static func _clear_share(alphas: Dictionary, images: Array, tex: int, a: Vector2, b: Vector2,
-		c: Vector2) -> float:
-	if not alphas.has(tex):
-		var im: Image = images[tex]
-		if im.get_format() != Image.FORMAT_RGBA8:
-			im = im.duplicate()
-			im.convert(Image.FORMAT_RGBA8)
-		var d := im.get_data()
-		var al := PackedByteArray()
-		al.resize(d.size() / 4)
-		for k in al.size():
-			al[k] = d[k * 4 + 3]
-		alphas[tex] = [al, im.get_width(), im.get_height()]
-	var e: Array = alphas[tex]
-	var al: PackedByteArray = e[0]
-	var w: int = e[1]
-	var h: int = e[2]
-	var clear := 0
-	var n := 0
-	for i in CLEAR_SAMPLES + 1:
-		for j in CLEAR_SAMPLES + 1 - i:
-			var uv := (a * (i + 1.0 / 3.0) + b * (j + 1.0 / 3.0) + c * (CLEAR_SAMPLES - i - j + 1.0 / 3.0)) \
-				/ (CLEAR_SAMPLES + 1.0)
-			var x := mini(int(fposmod(uv.x, 1.0) * w), w - 1)
-			var y := mini(int(fposmod(uv.y, 1.0) * h), h - 1)
-			n += 1
-			if al[y * w + x] < 26:
-				clear += 1
-	return float(clear) / n
+## Per image, 1 where scenery a car goes through: see-through (glass, water) or a cut-out
+## plant (PASSABLE_CUTOUTS).
+static func _passable_images(t: Nfs5Track, see_through: PackedByteArray) -> PackedByteArray:
+	var out := PackedByteArray()
+	out.resize(t.images.size())
+	for i in out.size():
+		out[i] = int(see_through[i] == 2 or see_through[i] == 1 and i < t.image_names.size() \
+			and PASSABLE_CUTOUTS.has(t.image_names[i]))
+	return out
