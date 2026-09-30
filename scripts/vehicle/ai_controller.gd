@@ -280,7 +280,8 @@ func _ghost_step(dt: float) -> bool:
 	if _ghost_check <= 0.0:
 		_ghost_check = 0.25
 		var near := _nearest_watcher()
-		if not _ghost and near > GHOST_ENTER and _dodge == 0.0 and absf(car.speed) > traffic_speed(node, -1 if reverse_dir else 1) * 0.8 \
+		if not _ghost and near > GHOST_ENTER and _dodge == 0.0 and path.idx(node + (-1 if reverse_dir else 1)) != node \
+				and absf(car.speed) > traffic_speed(node, -1 if reverse_dir else 1) * 0.8 \
 				and car.grounded_wheels == 4 and absf(path.lateral(car.global_position, node) - lane) < 1.0:
 			_ghost_enter()
 		elif _ghost and near < GHOST_LEAVE:
@@ -295,6 +296,11 @@ func _ghost_step(dt: float) -> bool:
 	var nxt := path.idx(node + dir)
 	var seg := path.points[node].distance_to(path.points[nxt])
 	while _ghost_f > seg:
+		if nxt == node:
+			# The end of a point-to-point road (TrackPath.idx clamps there): no further to
+			# glide, so it drives again and the race deals with it like any other car.
+			_ghost_leave()
+			return false
 		_ghost_f -= seg
 		node = nxt
 		nxt = path.idx(node + dir)

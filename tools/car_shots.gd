@@ -12,7 +12,9 @@ extends Node
 ## Stakes cruiser's officer beside it; --siren sets the light bar going. The set "heli" is High Stakes' helicopter.
 ## --wipeat=T, --spoilerat=T hold a Porsche Unleashed car's wipers or spoiler part-way (0 .. 1); --indicate=-1|1|2
 ## lights its left, right or all indicators. --open=6,7,8,9 opens its doors, bonnet, boot; --windows winds them down. --camy=M, --looky=M, --fov=DEG place the camera;
+## --dent=N hits it N rounds (parts tear off), --tear=6,8,30 tears those groups off (Nfs5Car's).
 ## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --paint=N the car's colour N.
+## --aa=msaa2|msaa4|msaa8|fxaa|smaa|none (comma-separated) overrides the view's antialiasing.
 
 var W := 480
 var H := 300
@@ -73,6 +75,16 @@ func _run() -> void:
 		H = 800
 
 	get_window().size = Vector2i(W, H)
+	for a: String in args:
+		if a.begins_with("--aa="):   # msaa2|msaa4|msaa8|fxaa|smaa|none, comma-separated
+			get_viewport().msaa_3d = Viewport.MSAA_DISABLED
+			for m in a.get_slice("=", 1).split(","):
+				match m:
+					"msaa2": get_viewport().msaa_3d = Viewport.MSAA_2X
+					"msaa4": get_viewport().msaa_3d = Viewport.MSAA_4X
+					"msaa8": get_viewport().msaa_3d = Viewport.MSAA_8X
+					"fxaa": get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+					"smaa": get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_SMAA
 	# Where the car parks: the studio floor's origin, or a node on the track's road.
 	var park := Transform3D()
 	if track_id != "":
@@ -169,6 +181,12 @@ func _run() -> void:
 		for a: String in args:
 			if a.begins_with("--paint=") and int(a.get_slice("=", 1)) < data.colours.size():   # a colour by index
 				car.set_paint(data.colours[int(a.get_slice("=", 1))])
+		for a: String in args:
+			if a.begins_with("--hidehood="):   # hides a cabriolet's hood parts: up, down or top
+				var which: String = a.get_slice("=", 1)
+				for mi in (car._hood_up if which == "up" else car._hood_folded if which == "down" else car._hood_top):
+					mi.visible = false
+					mi.set_meta("hidden_probe", true)
 		if "--topup" in args:
 			car.set_top_down(false, true)
 		for a: String in args:
@@ -213,15 +231,29 @@ func _run() -> void:
 		if "--siren" in args:
 			car.enable_siren(true)
 		var hs: Vector3 = data.half_size
-		if "--dent" in args:
+		var dents := 0
+		for a: String in args:
+			if a == "--dent":
+				dents = 1
+			elif a.begins_with("--dent="):   # that many rounds of the two hits (parts tear off)
+				dents = int(a.get_slice("=", 1))
+		if dents > 0:
 			var dmg := CarDamage.new()
 			car.add_child(dmg)
 			await get_tree().physics_frame
 			var xf := car.global_transform
-			dmg.hit(xf * Vector3(hs.x * 0.7, 0.1, hs.z), xf.basis * Vector3(-0.3, 0, -1).normalized(), CarDamage.FULL_HIT)
-			dmg.hit(xf * Vector3(-hs.x, 0.1, -hs.z * 0.4), xf.basis * Vector3.RIGHT, CarDamage.FULL_HIT)
-			for k in 6:
-				await get_tree().process_frame
+			for k in dents:
+				dmg.hit(xf * Vector3(hs.x * 0.7, 0.1, hs.z), xf.basis * Vector3(-0.3, 0, -1).normalized(), CarDamage.FULL_HIT)
+				dmg.hit(xf * Vector3(-hs.x, 0.1, -hs.z * 0.4), xf.basis * Vector3.RIGHT, CarDamage.FULL_HIT)
+				dmg._cooldown = 0.0
+			for k in 6 if dents == 1 else 90:   # (what tore off, time to land)
+				await get_tree().physics_frame
+		for a: String in args:
+			if a.begins_with("--tear="):   # Porsche Unleashed: tear these groups off (Car.tear_off)
+				for g in a.get_slice("=", 1).split(","):
+					car.tear_off(int(g))
+				for k in 90:
+					await get_tree().physics_frame
 		if "--officer" in args and car.officer_mesh:
 			var off := MeshInstance3D.new()
 			off.mesh = car.officer_mesh
@@ -257,6 +289,9 @@ func _run() -> void:
 				for k in 4:
 					await get_tree().process_frame
 				var img := get_viewport().get_texture().get_image()
+				for pa: String in args:
+					if pa.begins_with("--pick="):   # names the parts under a pixel (x,y of the shot)
+						_pick(cam, car, data, pa.get_slice("=", 1).split_floats(","))
 				img.convert(Image.FORMAT_RGBA8)
 				img.resize(W, H)
 				sheet.blit_rect(img, Rect2i(0, 0, W, H), Vector2i(W * col, H * i))
@@ -269,3 +304,38 @@ func _run() -> void:
 	sheet.save_png(file)
 	print("saved ", file)
 	get_tree().quit()
+
+
+## Prints the body parts a ray through pixel (x, y) crosses, nearest first, and the UV there.
+func _pick(cam: Camera3D, car: Node3D, data: Object, xy: PackedFloat64Array) -> void:
+	var px := Vector2(xy[0], xy[1]) * Vector2(get_viewport().get_visible_rect().size) / Vector2(W, H)
+	var from := cam.project_ray_origin(px)
+	var dir := cam.project_ray_normal(px)
+	var hits := []
+	for mi in car.find_children("*", "MeshInstance3D", true, false):
+		if not (mi as MeshInstance3D).is_visible_in_tree() or mi.mesh == null:
+			continue
+		var pname := "?"
+		for bp in data.body_parts:
+			if bp.mesh == mi.mesh:
+				pname = str(bp.name)
+		var xf: Transform3D = mi.global_transform
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		var pos: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array(range(pos.size()))
+		var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV] if arr[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
+		for t in range(0, idx.size() - 2, 3):
+			var a := xf * pos[idx[t]]
+			var b := xf * pos[idx[t + 1]]
+			var c := xf * pos[idx[t + 2]]
+			var hit: Variant = Geometry3D.ray_intersects_triangle(from, dir, a, b, c)
+			if hit != null:
+				var uv := uvs[idx[t]] if not uvs.is_empty() else Vector2.ZERO
+				hits.append([from.distance_to(hit), pname, t / 3, uv, car.to_local(hit)])
+	hits.sort_custom(func(p: Array, q: Array) -> bool: return p[0] < q[0])
+	var tex: Image = data.texture.get_image() if data.texture else null
+	for h in hits:
+		var texel := Color()
+		if tex:
+			texel = tex.get_pixelv(Vector2i((h[3] as Vector2) * Vector2(tex.get_size() - Vector2i.ONE)))
+		print("pick %.3f m  %s  tri %d  uv %s  at %s  texel %s" % (h + [texel]))

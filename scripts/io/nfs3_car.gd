@@ -42,6 +42,11 @@ var half_size := Vector3(0.9, 0.6, 2.2)
 var colours: Array[Color] = []
 var lights: Array[Dictionary] = []       # {pos} + the dummy's name decoded, see decode_light()
 var plate := {}                          # High Stakes: the rear plate {pos, euro} (its ":LICENSE" dummy), or {}
+## Where the sun glints off the chrome, [{pos, facing, lid}] (Porsche Unleashed's glare effects;
+## Car puts them on the others' wheels), and where the exhaust comes out: Porsche Unleashed's
+## tail pipes, High Stakes' ":SMOKE" dummies (the Kenworth's stacks). Car-local, as the lamps.
+var glints: Array[Dictionary] = []
+var exhausts: Array[Vector3] = []
 var carp := {}                           # id -> PackedFloat32Array
 var high_stakes := false                 # a High Stakes (FCE4) car
 ## The showroom text of fedata.eng (see read_info): make, model, price, engine, power, top
@@ -418,6 +423,8 @@ func _parse_fce(d: PackedByteArray) -> void:
 		var dname := d.slice(o + 2564 + i * 64, o + 2628 + i * 64).get_string_from_ascii().strip_edges().to_upper()
 		if dname.begins_with(":LICENSE"):
 			plate = {"pos": _v(d, o + 56 + i * 12), "euro": dname.contains("EURO")}
+		elif dname.begins_with(":SMOKE"):
+			exhausts.append(_v(d, o + 56 + i * 12))
 		elif not dname.is_empty() and not dname.begins_with(":"):
 			var l := decode_light(dname)
 			l.pos = _v(d, o + 56 + i * 12)

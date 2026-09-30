@@ -73,6 +73,15 @@ const WINDOW_TIME := 2.0
 const LATCH_BREAK := 0.55
 const LATCH_REACH := 1.2
 const LATCH_AJAR := 0.12
+## What tears off (Porsche Unleashed's doors, lids, skirts, spoiler: _loose): a full hit square
+## on a part takes this much of the way to losing it (a door or lid only goes once its latch
+## has sprung), the sills less; and a sprung lid slamming against its stop faster than
+## TEAR_SLAM (rad/s) wrenches its hinges by TEAR_SLAM_HURT per rad/s over.
+const TEAR_HIT := 0.7
+const TEAR_SILL := 0.45
+const TEAR_REACH := 0.3
+const TEAR_SLAM := 5.0
+const TEAR_SLAM_HURT := 0.04
 const BONNET_BLOW_SPEED := 45.0
 ## How hard it's raining or snowing where the camera is, 0..1 (Weather sets it): the wipers
 ## go and the fog lamps light with it.
@@ -242,6 +251,9 @@ var indicate := 0
 var _lids := {}
 var _windows := {}
 var _bays := {}
+## What can be torn off: group (a lid's, or Nfs5Car.BUMPER_FRONT...) -> {nodes (every mesh that
+## goes with it), box (theirs, car-local, shut), hurt (0 .. 1, off)}.
+var _loose := {}
 var _skin_mat: ShaderMaterial   # the skin's material, lit where the lamps' lenses are
 var _lens_state := {}           # uniform -> value, as last set on it
 var _indicate_auto := 0
@@ -301,8 +313,11 @@ const VISUAL_LAYER := 2
 const OWN_VIEW_LAYER := 32
 ## The in-car view's dashboard, seats and doors: everything but the side mirrors sees them.
 const DASH_LAYER := 64
-## The rear-view mirror's own housing and glass, which its view leaves out.
+## The in-car mirrors' own glass and housings (the rear-view mirror's, the Porsche Unleashed
+## side mirrors' bezels), which no mirror's view shows.
 const REAR_MIRROR_LAYER := 128
+## How wide the dark rim round a Porsche Unleashed mirror's glass is in the in-car view (m).
+const MIRROR_BEZEL := 0.007
 ## Neither game models a rear-view mirror inside: one is hung at the top of the windscreen,
 ## on the car's centreline: its glass (m, rounded ends), housing rim and depth, and how far
 ## the glass sits below the windscreen's top and behind the glass there.
@@ -451,6 +466,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			_pose_frames(mi, 0.0)
 		_body_tilt.add_child(mi)
 		_add_opening(p, mi)
+		_add_loose(p, mi)
 		if p.has("bay"):
 			continue   # (it doesn't dent: nobody sees it but through an open lid)
 		if p.has("mirror_glass"):
@@ -634,9 +650,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		glow.visible = false
 		_body_tilt.add_child(glow)
 		_brake_lights.append(glow)
-	# Indicators (Porsche Unleashed's), each flashing with its side (+X is the driver's left),
-	# and fog lamps.
-	for l in _lamps_of(data, "I"):
+	# Indicators, each flashing with its side (+X is the driver's left), and fog lamps.
+	for l in _indicator_lamps(data, heads, tails):
 		var glow := _lamp_glow(l.pos, LAMP_COLOURS[l.colour], 0.24 * _lamp_size(l), signf(l.pos.z))
 		glow.set_meta("glint", [signf(l.pos.z), _colour_v(l.colour) * 1.2])
 		glow.set_meta("lamp", l)
@@ -707,8 +722,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		_body_tilt.add_child(beam)
 		_beams.append(beam)
 	set_high_beam(false)
-	if data is Nfs5Car:
-		_pu_effects(data)
+	if data is Nfs3Car:
+		_car_effects(data)
 	for g: GeometryInstance3D in find_children("*", "GeometryInstance3D", true, false):
 		g.layers = VISUAL_LAYER
 	for m in _cabin_mirror_glass:
@@ -973,8 +988,11 @@ func _pose_top() -> void:
 
 ## Porsche Unleashed's effects: the game's glare on the lamps, the sun's glints off the
 ## chrome (a mesh per door or lid they ride on, posed with it), the exhaust (CarExhaust).
-func _pu_effects(data: Nfs5Car) -> void:
-	var glare := Nfs5Car.fx("GLAR")
+func _car_effects(data: Nfs3Car) -> void:
+	var pu := data is Nfs5Car
+	if not pu:
+		_mark_lenses(data)
+	var glare := Nfs5Car.fx("GLAR") if pu else null
 	if glare:
 		var glows: Array = _lamps + _brake_lights + _reverse_lights + _fog_glows
 		for sg in _signals:
@@ -985,13 +1003,22 @@ func _pu_effects(data: Nfs5Car) -> void:
 				(q.material as ShaderMaterial).set_shader_parameter("glow_tex", glare)
 				q.size *= PU_GLARE_SCALE
 	var glint := Nfs5Car.fx("GLNT")
-	if glint and not data.glints.is_empty():
+	if glint == null:
+		glint = _star_texture()
+	# The other cars mark no chrome: the sun glints off their wheels' hubs.
+	var glints: Array[Dictionary] = data.glints
+	if not pu:
+		glints = []
+		for w in _wheels:
+			var side := 1.0 if w.left else -1.0
+			glints.append({"pos": w.center + Vector3(side * 0.1, STATIC_SAG, 0.0), "facing": Vector3(side, 0.15, 0.0).normalized(), "lid": 0})
+	if not glints.is_empty():
 		if _glint_mat == null:
 			_glint_mat = ShaderMaterial.new()
 			_glint_mat.shader = preload("res://shaders/car_glint.gdshader")
 			_glint_mat.set_shader_parameter("glint_tex", glint)
 		var by_lid := {}
-		for gl: Dictionary in data.glints:
+		for gl: Dictionary in glints:
 			if not by_lid.has(gl.lid):
 				by_lid[gl.lid] = []
 			by_lid[gl.lid].append(gl)
@@ -1016,11 +1043,102 @@ func _pu_effects(data: Nfs5Car) -> void:
 			_body_tilt.add_child(mi)
 			if _lids.has(lid):
 				_lids[lid].parts.append([mi, Vector3.ZERO])
-	if not data.exhausts.is_empty():
+			if _loose.has(lid):
+				_loose[lid].nodes.append(mi)
+	# Without their pipes marked (NFS3's, most of High Stakes'), a pair under the back bumper.
+	var pipes: Array[Vector3] = data.exhausts
+	if pipes.is_empty() and not _wheels.is_empty():
+		var y: float = _wheels[2].center.y - 0.02
+		var z := -_half_size.z + 0.06
+		pipes = [Vector3(_half_size.x * 0.45, y, z), Vector3(-_half_size.x * 0.45, y, z)]
+	if not pipes.is_empty():
 		var ex: Node3D = preload("res://scripts/vehicle/car_exhaust.gd").new()
 		ex.name = "Exhaust"
-		ex.pipes = data.exhausts
+		ex.pipes = pipes
 		_body_tilt.add_child(ex)
+
+
+## The car's indicators: Porsche Unleashed's own (I); High Stakes' amber and yellow parking
+## and marker lamps (P), which sit at the corners where they go; else, as on NFS3's cars, a
+## lamp just outboard of each outer headlamp and tail lamp.
+static func _indicator_lamps(data: Object, heads: Array, tails: Array) -> Array[Dictionary]:
+	var out := _lamps_of(data, "I")
+	if not out.is_empty() or data is Nfs5Car:
+		return out
+	for l in _lamps_of(data, "P"):
+		if l.colour in ["O", "Y"]:
+			var i := Nfs3Car.decode_light("IOYN")
+			i.pos = l.pos
+			i.intensity = l.intensity
+			out.append(i)
+	if not out.is_empty() or not "lights" in data:
+		return out
+	for set: Array in [heads, tails]:
+		if set.size() < 2:
+			continue
+		for l: Dictionary in _outer_pair(set):
+			var i := Nfs3Car.decode_light("IOYN")
+			i.pos = l.pos + Vector3(signf(l.pos.x) * 0.1, 0.0, 0.0)
+			i.intensity = 3
+			out.append(i)
+	return out
+
+
+## The lamps' lenses on an NFS3 or High Stakes model, which marks none: the vertices near each
+## lamp dummy take COLOR (0, 1, 1) (car.gdshader lights them with it; the rest white, as
+## meshes without colours read), once per model.
+const LENS_REACH := 0.14
+
+
+static func _mark_lenses(data: Nfs3Car) -> void:
+	if data.has_meta("lenses") or data.lights.is_empty():
+		return
+	data.set_meta("lenses", true)
+	var lamps: Array[Vector4] = []
+	for l: Dictionary in data.lights:
+		if l.kind in ["H", "T", "B", "R", "P"] and l.intensity > 0:
+			lamps.append(Vector4(l.pos.x, l.pos.y, l.pos.z, LENS_REACH * clampf(l.intensity / 5.0, 0.7, 1.5)))
+	for p: Dictionary in data.body_parts:
+		if p.get("glass", false) or p.get("driver", false) or not p.mesh is ArrayMesh:
+			continue
+		var mesh: ArrayMesh = p.mesh
+		if mesh.get_blend_shape_count() > 0:
+			continue
+		var surfaces := []
+		for si in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(si)
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var cols := PackedColorArray()
+			cols.resize(verts.size())
+			cols.fill(Color.WHITE)
+			var any := false
+			for i in verts.size():
+				var v: Vector3 = verts[i] + p.center
+				for lp in lamps:
+					if v.distance_squared_to(Vector3(lp.x, lp.y, lp.z)) < lp.w * lp.w:
+						cols[i] = Color(0.0, 1.0, 1.0)
+						any = true
+						break
+			if any:
+				arrays[Mesh.ARRAY_COLOR] = cols
+			surfaces.append([mesh.surface_get_primitive_type(si), arrays, mesh.surface_get_material(si)])
+		mesh.clear_surfaces()
+		for sf in surfaces:
+			mesh.add_surface_from_arrays(sf[0], sf[1])
+			mesh.surface_set_material(mesh.get_surface_count() - 1, sf[2])
+
+
+## A four-pointed star for the glints where Porsche Unleashed's (GLNT) isn't to be had.
+static func _star_texture() -> Texture2D:
+	var img := Image.create(32, 32, false, Image.FORMAT_RGBA8)
+	for y in 32:
+		for x in 32:
+			var d := Vector2(x - 15.5, y - 15.5) / 15.5
+			var a := clampf(1.0 - d.length(), 0.0, 1.0)
+			var rays := maxf(clampf(1.0 - absf(d.x) * 8.0, 0.0, 1.0), clampf(1.0 - absf(d.y) * 8.0, 0.0, 1.0))
+			var v := clampf(a * a * 1.5 + rays * a, 0.0, 1.0)
+			img.set_pixel(x, y, Color(1, 1, 1, v))
+	return ImageTexture.create_from_image(img)
 
 
 ## Points the glints' sun where the scene's is (once a frame, for every car): none at night.
@@ -1119,6 +1237,71 @@ func latch_hit(p: Vector3, s: float) -> void:
 			l.spin = randf_range(1.0, 3.0) * signf(l.open)
 
 
+## Files a Porsche Unleashed part that a crash can tear off, with its door or lid ("lid") and
+## as a part of its own ("loose": the skirts, the spoiler).
+func _add_loose(p: Dictionary, mi: MeshInstance3D) -> void:
+	if p.has("spoiler"):
+		mi.set_meta("spoiler", true)
+	for key in ["lid", "loose"]:
+		if not p.has(key):
+			continue
+		var g: int = p[key]
+		var box: AABB = p.mesh.get_aabb()
+		box.position += p.center
+		if not _loose.has(g):
+			_loose[g] = {"nodes": [], "box": box, "hurt": 0.0}
+		_loose[g].nodes.append(mi)
+		_loose[g].box = (_loose[g].box as AABB).merge(box)
+
+
+## A crash at car-local `p` reaching `radius`, `s` of a full hit (CarDamage): the parts near
+## it closer to coming off, and off if that was enough.
+func loose_hit(p: Vector3, radius: float, s: float) -> void:
+	for g: int in _loose.keys():
+		if not _loose.has(g):
+			continue   # (gone with another: the spoiler with the boot)
+		var l: Dictionary = _loose[g]
+		var box: AABB = l.box
+		var reach := radius + TEAR_REACH
+		var d := (p.clamp(box.position, box.end) - p).length()
+		if d >= reach:
+			continue
+		var f := 1.0 - d / reach
+		l.hurt += s * s * f * (TEAR_SILL if g in [Nfs5Car.SILL_LEFT, Nfs5Car.SILL_RIGHT] else TEAR_HIT)
+		if l.hurt >= 1.0 and not far and (not _lids.has(g) or _lids[g].broken):
+			tear_off(g)
+
+
+## Group `g`'s parts come off the car and go their own way (CarDebris): a door takes its
+## window and mirror, the boot its spoiler; the bay under a lost lid is left open.
+func tear_off(g: int) -> void:
+	if not _loose.has(g):
+		return
+	var nodes: Array = _loose[g].nodes
+	_loose.erase(g)
+	for o: int in _loose.keys():
+		var left: Array = _loose[o].nodes.filter(func(n: Node) -> bool: return not n in nodes)
+		if left.is_empty():
+			_loose.erase(o)
+		else:
+			_loose[o].nodes = left
+	_lids.erase(g)
+	_windows.erase(g)
+	for mi: Node3D in _bays.get(g, []):
+		mi.visible = true   # (the bay on the car, the lid's underside on the piece)
+	_bays.erase(g)
+	var keep := func(n: Node) -> bool: return not n in nodes
+	_body_meshes.assign(_body_meshes.filter(keep))
+	_spoiler_up.assign(_spoiler_up.filter(keep))
+	_spoiler_down.assign(_spoiler_down.filter(keep))
+	_spoiler_moving.assign(_spoiler_moving.filter(keep))
+	_cabin_mirror_glass.assign(_cabin_mirror_glass.filter(func(m: Dictionary) -> bool: return not m.node in nodes))
+	# (Without its spoiler the back loses the downforce it gave.)
+	if nodes.any(func(n: Node) -> bool: return n.has_meta("spoiler")):
+		spoiler_type = 0
+	CarDebris.launch(self, nodes)
+
+
 ## The doors, lids and windows a step on: toward where they're told, or, with the latch
 ## sprung, swinging on their hinges: pulled back toward ajar, flung by the body's motion.
 func _move_openings(dt: float) -> void:
@@ -1149,6 +1332,10 @@ func _move_openings(dt: float) -> void:
 				w = -w * 0.35
 			elif a > full:
 				a = full
+				if absf(w) > TEAR_SLAM and _loose.has(g):
+					_loose[g].hurt += (absf(w) - TEAR_SLAM) * TEAR_SLAM_HURT
+					if _loose[g].hurt >= 1.0 and not far:
+						tear_off.call_deferred(g)
 				w = -w * 0.3
 			l.angle = a * signf(l.open)
 			l.spin = w * signf(l.open)
@@ -1194,10 +1381,12 @@ func _set_lens(uniform: String, value: float) -> void:
 
 
 ## The spoiler at _spoiler_t: lowered, raised, or between them through its frames (without
-## them it just goes from one to the other halfway).
+## them it just goes from one to the other halfway). With frames it stays on the last one
+## when up: the raised model maps its underside anew (the grille's louvres, a painted fan)
+## where the frames have the dark gap they rose through.
 func _pose_spoiler() -> void:
-	var moving := _spoiler_t > 0.0 and _spoiler_t < 1.0 and not _spoiler_moving.is_empty()
-	var up := _spoiler_t >= (1.0 if not _spoiler_moving.is_empty() else 0.5)
+	var moving := _spoiler_t > 0.0 and not _spoiler_moving.is_empty()
+	var up := _spoiler_t >= 0.5 and _spoiler_moving.is_empty()
 	for mi in _spoiler_up:
 		mi.visible = up and not moving
 	for mi in _spoiler_down:
@@ -2016,9 +2205,12 @@ func set_cockpit(on: bool) -> bool:
 			_cabin_mirrors.name = "Mirrors"
 			_body_tilt.add_child(_cabin_mirrors)
 			if not _cabin_mirror_glass.is_empty():
+				var glass: Array[Dictionary] = []
+				for g in _cabin_mirror_glass:
+					glass.append(_bezel_glass(g, _cabin_mirrors))
 				var mirrors := CarMirrors.new()
 				_cabin_mirrors.add_child(mirrors)
-				mirrors.setup(self, _cabin_mirror_glass, _dash_data.eye, _half_size)
+				mirrors.setup(self, glass, _dash_data.eye, _half_size)
 			_build_rear_mirror(_cabin_mirrors, _body_tilt, _dash_data.eye)
 		if _cabin_mirrors:
 			_cabin_mirrors.visible = on
@@ -2160,7 +2352,12 @@ func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
 	dark.roughness = 0.15
 	glass.material_override = dark
 	_rear_mirror.add_child(glass)
-	if model_glass.is_empty():
+	if not model_glass.is_empty():
+		# The model's glass is its housing's whole face: framed as the side mirrors are.
+		var framed := _bezel_glass({"node": glass, "point": glass_at, "normal": n}, _rear_mirror)
+		glass.free()
+		glass = framed.node
+	else:
 		var x_axis := Vector3.UP.cross(n).normalized()
 		var basis := Basis(x_axis, n.cross(x_axis), n)
 		glass.mesh = _rounded_slab(REAR_MIRROR_SIZE, 0.0)
@@ -2197,6 +2394,53 @@ func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
 	var gl: Array[Dictionary] = [{"node": glass, "point": glass_at, "normal": n, "rear": true}]
 	mirrors.setup(self, gl, eye, _half_size)
 	_rear_mirror.visible = rear_mirror_wanted
+
+
+## A Porsche Unleashed mirror's glass ({node, point, normal}: a side mirror's, see
+## _cabin_mirror_glass, or the modelled rear-view mirror's) framed for the in-car view, under
+## `parent` (at the body's origin): its edge a dark rim MIRROR_BEZEL wide, over which a copy
+## of it drawn that much smaller shows the view. The copy's {node, point, normal}.
+func _bezel_glass(g: Dictionary, parent: Node3D) -> Dictionary:
+	var src: MeshInstance3D = g.node
+	var n: Vector3 = g.normal
+	var u := Vector3.UP.cross(n).normalized() if absf(n.y) < 0.9 else Vector3.RIGHT
+	var w := n.cross(u)
+	var faces := PackedVector3Array()
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for v in src.mesh.get_faces():
+		var p := src.transform * v
+		faces.append(p)
+		lo = lo.min(Vector2(p.dot(u), p.dot(w)))
+		hi = hi.max(Vector2(p.dot(u), p.dot(w)))
+	var mid := (lo + hi) * 0.5
+	var half := (hi - lo) * 0.5
+	var shrink := Vector2(maxf(1.0 - MIRROR_BEZEL / maxf(half.x, 0.001), 0.5),
+		maxf(1.0 - MIRROR_BEZEL / maxf(half.y, 0.001), 0.5))
+	var rim := SurfaceTool.new()
+	var inset := SurfaceTool.new()
+	rim.begin(Mesh.PRIMITIVE_TRIANGLES)
+	inset.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for p in faces:
+		var c := Vector2(p.dot(u), p.dot(w))
+		var q := mid + (c - mid) * shrink
+		rim.set_normal(n)
+		rim.add_vertex(p + n * 0.001)
+		inset.add_vertex(p + u * (q.x - c.x) + w * (q.y - c.y) + n * 0.002)
+	var shell := StandardMaterial3D.new()
+	shell.albedo_color = Color(0.045, 0.045, 0.05)
+	shell.roughness = 0.55
+	var bezel := MeshInstance3D.new()
+	bezel.mesh = rim.commit()
+	bezel.material_override = shell
+	var glass := MeshInstance3D.new()
+	glass.mesh = inset.commit()
+	glass.material_override = src.material_override
+	for m: MeshInstance3D in [bezel, glass]:
+		m.layers = REAR_MIRROR_LAYER
+		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(m)
+	return {"node": glass, "point": g.point, "normal": n}
 
 
 ## A modelled rear-view mirror's glass among `tris` (see _build_rear_mirror): the nearest
@@ -2239,7 +2483,25 @@ static func _model_rear_glass(tris: PackedVector3Array, eye: Vector3) -> Diction
 			continue
 		var mid: Vector3 = pl[2] / area
 		if best.is_empty() or eye.distance_to(mid) < eye.distance_to(best.point):
-			best = {"faces": pl[0], "point": mid}
+			best = {"faces": pl[0], "point": mid, "box": box, "normal": Vector3(key.x, key.y, 0.0) * 0.1}
+	if best.is_empty():
+		return best
+	# A curved glass (the 993's) turns its sides toward the driver: they're its glass too,
+	# the faces across it facing back that aren't behind it (the housing's back is; the
+	# stalk above it faces down).
+	var bn: Vector3 = best.normal
+	bn = Vector3(bn.x, bn.y, -sqrt(maxf(1.0 - bn.length_squared(), 0.0))).normalized()
+	var box: AABB = best.box
+	var reach := AABB(box.position - Vector3(0.015, 0.004, 0.015), box.size + Vector3(0.03, 0.008, 0.03))
+	var faces := PackedVector3Array()
+	for i in range(0, tris.size(), 3):
+		var mid := (tris[i] + tris[i + 1] + tris[i + 2]) / 3.0
+		var cross := (tris[i + 1] - tris[i]).cross(tris[i + 2] - tris[i])
+		if cross.length() < 1e-7 or absf(cross.normalized().z) < 0.9 or not reach.has_point(mid) \
+				or (mid - (best.point as Vector3)).dot(bn) < -0.004:
+			continue
+		faces.append_array([tris[i], tris[i + 1], tris[i + 2]])
+	best.faces = faces
 	return best
 
 

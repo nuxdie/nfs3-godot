@@ -17,6 +17,8 @@ uniform sampler2D damage_tex : source_color, hint_default_transparent, filter_li
 uniform vec4 paint : source_color = vec4(0.5, 0.5, 0.5, 1.0);
 uniform float gloss = 0.4;
 uniform bool wheel = false;
+// Panel shut lines: how deep (model units) the dark lines drawn in the paint are cut.
+uniform float seam_depth = 0.006;
 // High Stakes' cockpit (the in-car view's dash, seats and doors): shut in under the roof, it
 // sees neither the sky nor the reflection probe's open road, so it takes no clearcoat and
 // only a faint sheen instead of mirroring them as a blue-grey film.
@@ -43,6 +45,57 @@ uniform float indicator_left = 0.0;
 uniform float indicator_right = 0.0;
 
 varying vec3 model_pos;
+
+// A Porsche Unleashed window page's see-through pane: its texel's alpha exactly 128 (nearest,
+// as filtering would blend it with the seal's 255 and the rim's paint 117 into its range).
+float min4(vec4 v) {
+	return min(min(v.x, v.y), min(v.z, v.w));
+}
+
+// How far the skin at uv falls below the paint round it (`around`, its luminance a few mips
+// up): 0 plain paint .. 1 a shut line drawn in it.
+float seam_at(sampler2D tex, vec2 uv, float around) {
+	float l = dot(texture(tex, uv).rgb, vec3(0.2126, 0.7152, 0.0722));
+	return 1.0 - smoothstep(0.5, 0.9, l / max(around, 0.01));
+}
+
+bool pu_pane(sampler2D tex, vec2 uv) {
+	ivec2 size = textureSize(tex, 0);
+	float a = texelFetch(tex, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).a;
+	return abs(a - 128.0 / 255.0) < 0.01;
+}
+
+// Porsche Unleashed's share of the texels round UV whose alpha is `a` (paint 117, cabin 224),
+// among the visible ones: at a cut-out's edge (the dials' faces, the handles) the filtered
+// alpha fades from 0 up to the opaque 255 through those, which would tint the rim.
+float pu_alpha_share(sampler2D tex, vec2 uv, float a) {
+	vec2 f = fract(uv * vec2(textureSize(tex, 0)) - 0.5);
+	vec4 w = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
+	vec4 g = textureGather(tex, uv, 3);
+	vec4 seen = w * step(0.08, g);
+	vec4 hit = seen * (1.0 - step(0.02, abs(g - a)));
+	return dot(hit, vec4(1.0)) / max(dot(seen, vec4(1.0)), 1e-5);
+}
+
+// The skin's alpha at UV from mip `lod`, filtered with a cubic B-spline (four bilinear taps).
+float bspline_alpha(sampler2D tex, vec2 uv, float lod) {
+	vec2 size = vec2(textureSize(tex, int(lod)));
+	vec2 p = uv * size - 0.5;
+	vec2 i = floor(p);
+	vec2 t = p - i;
+	vec2 t2 = t * t;
+	vec2 t3 = t2 * t;
+	vec2 w0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0;
+	vec2 w1 = (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0;
+	vec2 w2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0;
+	vec2 w3 = t3 / 6.0;
+	vec2 g0 = w0 + w1;
+	vec2 g1 = w2 + w3;
+	vec2 lo = (i - 0.5 + w1 / g0) / size;
+	vec2 hi = (i + 1.5 + w3 / g1) / size;
+	return g0.y * (g0.x * textureLod(tex, lo, lod).a + g1.x * textureLod(tex, vec2(hi.x, lo.y), lod).a)
+			+ g1.y * (g0.x * textureLod(tex, vec2(lo.x, hi.y), lod).a + g1.x * textureLod(tex, hi, lod).a);
+}
 
 void vertex() {
 	model_pos = VERTEX;
@@ -72,21 +125,97 @@ void fragment() {
 	// of the skin; the averaged alpha of the small mip levels shows those as strips on the road.
 	// Porsche Unleashed's cut-outs (the wheel arches, round handles and flaps) are a hard step
 	// from 0 to the paint's alpha (0.46) at a couple of cm a texel: cut halfway up the
-	// filtered step, where its contour runs round the texels' corners instead of hugging them.
-	if (textureLod(albedo_tex, UV, 0.0).a < (COLOR.b < 0.5 ? 0.23 : 0.08)) {
+	// filtered step. Their contours are drawn in stairs of several texels, which a bilinear
+	// lookup of the full-size skin keeps: near a cut-out's edge (where the small mip differs)
+	// the alpha is taken smoothed from the half-size one instead, whose contour runs in
+	// curves, but only in the cells with a visible texel, so it doesn't spill into the
+	// cut-out where it borders another piece of the skin.
+	// Cut-outs from fully opaque texels (the tyres' inner discs, a 32-texel circle on a
+	// square) are cut halfway up their own step, 0.5, from the full-size skin smoothed: at
+	// the paint's 0.23 the smoothed contour lies outside the visible cells all round, which
+	// clipped it back to the texel stairs; and the half-size one is too coarse for so small
+	// a shape, bulging it into its neighbours.
+	float cut = COLOR.b < 0.5 ? 0.23 : 0.08;
+	float cut_alpha = textureLod(albedo_tex, UV, 0.0).a;
+	if (abs(textureLod(albedo_tex, UV, 2.0).a - cut_alpha) > 0.01) {
+		vec4 cell = textureGather(albedo_tex, UV, 3);
+		float cell_max = max(max(cell.x, cell.y), max(cell.z, cell.w));
+		float seen_min = min4(mix(vec4(1.0), cell, step(cut, cell)));
+		if (cell_max < cut) {
+			cut_alpha = 0.0;
+		} else if (seen_min > 0.99) {
+			cut_alpha = bspline_alpha(albedo_tex, UV, 0.0) * cut / 0.5;
+		} else {
+			cut_alpha = bspline_alpha(albedo_tex, UV, 1.0);
+		}
+	}
+	if (cut_alpha < cut) {
+		discard;
+	}
+	// Porsche Unleashed's lid undersides (UV2.x ONE_SIDED_MARK, Nfs5Car) face one way only.
+	if (UV2.x < -2.5 && !FRONT_FACING) {
+		discard;
+	}
+	// Porsche Unleashed's window triangles (COLOR.b WINDOW_MARK, Nfs5Car): the glass part draws
+	// their pane (alpha 128 on the window page), this their seal and painted rim.
+	if (abs(COLOR.b - 0.25) < 0.1 && pu_pane(albedo_tex, UV)) {
 		discard;
 	}
 	float paint_area = 1.0 - smoothstep(0.7, 0.85, c.a);
+	bool pu_edge = COLOR.b < 0.5 && textureLod(albedo_tex, UV, 0.0).a < 0.99 && min4(textureGather(albedo_tex, UV, 3)) < 0.08;
+	if (pu_edge) {
+		paint_area = pu_alpha_share(albedo_tex, UV, 117.0 / 255.0);
+	}
 	// Linear luminance; glass is ~0.1 in sRGB (0.01 linear), paint mostly above 0.3.
 	float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
 	// (Porsche Unleashed's windows are parts of their own: its dark paint texels are the
 	// panels' shut lines and the shadows drawn round handles and flaps, and stay paint.)
 	float glass = paint_area * (1.0 - smoothstep(0.012, 0.05, luma)) * step(0.5, COLOR.b);
 	float painted = paint_area - glass;
+	// Shut lines: paint texels much darker than the skin round them (three mips up). They are
+	// only drawn, so the clearcoat mirrored the sky straight across them and they vanished;
+	// cut into the body here they break its reflections and catch the light on one edge.
+	// (As the lines blur into their surroundings further off, they fade out by themselves.)
+	float seam = 0.0;
+	if (!wheel && !interior) {
+		vec4 around = texture(albedo_tex, UV, 3.0);
+		float around_luma = dot(around.rgb, vec3(0.2126, 0.7152, 0.0722));
+		float around_paint = 1.0 - smoothstep(0.7, 0.85, around.a);
+		// (Not beside a cut-out, whose transparent texels darken the mips round its edge.)
+		float solid = smoothstep(0.8, 0.95, around.a / max(c.a, 0.01)) * (pu_edge ? 0.0 : 1.0);
+		// How many screen pixels a skin texel spans: a line a texel or two wide thinner than a
+		// pixel only sparkles as the car moves, so the seams fade out below that (the bump,
+		// which needs a few pixels across the groove to show its edges, sooner).
+		vec2 texels = UV * vec2(textureSize(albedo_tex, 0));
+		float texel_px = 1.0 / max(max(length(dFdx(texels)), length(dFdy(texels))), 1e-4);
+		// The other cars' skins (256 texels square, with shading drawn in) mark far more than the
+		// shut lines, a texel's width a hand across: only dim their mirror there, and gently.
+		float bump = COLOR.b < 0.5 ? smoothstep(0.8, 2.0, texel_px) : 0.0;
+		float keep = painted * around_paint * solid * smoothstep(0.3, 0.8, texel_px) * (COLOR.b < 0.5 ? 1.0 : 0.5);
+		seam = keep * seam_at(albedo_tex, UV, around_luma);
+		if (bump > 0.0) {
+			// Bump without tangents (Mikkelsen's surface gradient): the groove's depth, taken a
+			// pixel over each way from the skin itself (not the 2x2 blocks dFdx sees, which
+			// step along a line's edge and crawl), tilts the normal into it.
+			float d = -keep * bump * seam_depth;
+			float h = seam * d / max(keep, 1e-4);
+			float dhx = seam_at(albedo_tex, UV + dFdx(UV), around_luma) * d - h;
+			float dhy = seam_at(albedo_tex, UV + dFdy(UV), around_luma) * d - h;
+			vec3 dpdx = dFdx(VERTEX);
+			vec3 dpdy = dFdy(VERTEX);
+			vec3 r1 = cross(dpdy, NORMAL);
+			vec3 r2 = cross(NORMAL, dpdx);
+			float det = dot(dpdx, r1);
+			if (abs(det) > 1e-12) {
+				NORMAL = normalize(abs(det) * NORMAL - sign(det) * (dhx * r1 + dhy * r2));
+			}
+		}
+	}
 	vec3 body = min(c.rgb * paint.rgb, vec3(1.0));
 	ALBEDO = mix(c.rgb, body, painted);
 	if (interior_paint.a > 0.0) {
-		float cabin = 1.0 - smoothstep(0.012, 0.03, abs(textureLod(albedo_tex, UV, 0.0).a - 224.0 / 255.0));
+		float cabin = pu_edge ? pu_alpha_share(albedo_tex, UV, 224.0 / 255.0)
+				: 1.0 - smoothstep(0.012, 0.03, abs(textureLod(albedo_tex, UV, 0.0).a - 224.0 / 255.0));
 		ALBEDO = mix(ALBEDO, min(c.rgb * interior_paint.rgb, vec3(1.0)), cabin);
 	}
 	vec4 crumple = texture(damage_tex, UV);
@@ -118,6 +247,13 @@ void fragment() {
 	CLEARCOAT = painted * mix(0.1, 1.0, sky);
 	CLEARCOAT_ROUGHNESS = 0.05;
 #endif
+	// In the gap: no mirror finish, and the sky and the probe's light kept out.
+	SPECULAR *= 1.0 - 0.8 * seam;
+#ifndef LOW_QUALITY
+	CLEARCOAT *= 1.0 - seam;
+#endif
+	AO = 1.0 - 0.7 * seam;
+	AO_LIGHT_AFFECT = 0.4;
 	if (wheel) {
 		// Painted rims: bright texels are alloy, dark ones tyre wall drawn in the paint area.
 		float alloy = painted * smoothstep(0.1, 0.35, luma);
@@ -150,23 +286,25 @@ void fragment() {
 #ifndef LOW_QUALITY
 		CLEARCOAT *= mix(1.0, 0.45, matte);
 #endif
-		// A lamp's lens: clear, glossy glass over its reflector, lit with its lamp.
-		float lens = COLOR.g * unpainted;
+	}
+	// A lamp's lens: clear, glossy glass over its reflector, lit with its lamp. Porsche
+	// Unleashed's by their material (COLOR.g), the others' round their lamp dummies (COLOR
+	// (0, 1, 1): Car._mark_lenses); unpainted texels only.
+	float lens = (COLOR.b < 0.5 ? COLOR.g : step(0.5, COLOR.g) * (1.0 - step(0.5, COLOR.r))) * (1.0 - paint_area);
+	if (lens > 0.0 && !wheel) {
 		ROUGHNESS = mix(ROUGHNESS, 0.05, lens);
 		SPECULAR = mix(SPECULAR, 0.75, lens);
-		if (lens > 0.0) {
-			float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
-			float red = smoothstep(0.12, 0.3, c.r - max(c.g, c.b) * 1.1) * (1.0 - smoothstep(0.35, 0.6, c.g));
-			float amber = step(0.4, c.r) * smoothstep(0.18, 0.3, c.g) * (1.0 - smoothstep(0.7, 0.85, c.g / max(c.r, 0.01))) * (1.0 - smoothstep(0.25, 0.4, c.b / max(c.r, 0.01)));
-			float clear = (1.0 - smoothstep(0.12, 0.25, sat)) * smoothstep(0.3, 0.65, luma);
-			float front = step(0.0, model_pos.z);
-			float ind = model_pos.x >= 0.0 ? indicator_left : indicator_right;
-			vec3 glow = c.rgb * (front * clear * head_lit * 1.6
-					+ (1.0 - front) * red * (tail_lit * 0.8 + brake_lit * 2.4)
-					+ (1.0 - front) * clear * reverse_lit * 1.6
-					+ amber * ind * 2.6);
-			EMISSION = glow * lens;
-		}
+		float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+		float red = smoothstep(0.12, 0.3, c.r - max(c.g, c.b) * 1.1) * (1.0 - smoothstep(0.35, 0.6, c.g));
+		float amber = step(0.4, c.r) * smoothstep(0.18, 0.3, c.g) * (1.0 - smoothstep(0.7, 0.85, c.g / max(c.r, 0.01))) * (1.0 - smoothstep(0.25, 0.4, c.b / max(c.r, 0.01)));
+		float clear = (1.0 - smoothstep(0.12, 0.25, sat)) * smoothstep(0.3, 0.65, luma);
+		float front = step(0.0, model_pos.z);
+		float ind = model_pos.x >= 0.0 ? indicator_left : indicator_right;
+		vec3 glow = c.rgb * (front * clear * head_lit * 1.6
+				+ (1.0 - front) * red * (tail_lit * 0.8 + brake_lit * 2.4)
+				+ (1.0 - front) * clear * reverse_lit * 1.6
+				+ amber * ind * 2.6);
+		EMISSION = glow * lens;
 	}
 	if (interior) {
 		ROUGHNESS = max(ROUGHNESS, 0.7);
@@ -175,6 +313,19 @@ void fragment() {
 		CLEARCOAT = 0.0;
 #endif
 	}
+	// Specular antialiasing (Kaplanyan / Filament): where the normal turns a lot within a pixel
+	// (tight curves of the low-poly body seen from afar, the grooves above), a sharp highlight
+	// or mirrored edge only lands on some pixels and sparkles; widen the lobe to what the
+	// pixel covers.
+	vec3 dndx = dFdx(NORMAL);
+	vec3 dndy = dFdy(NORMAL);
+	float kernel = min(0.3 * (dot(dndx, dndx) + dot(dndy, dndy)), 0.2);
+	float a = ROUGHNESS * ROUGHNESS;
+	ROUGHNESS = sqrt(sqrt(a * a + kernel));
+#ifndef LOW_QUALITY
+	a = CLEARCOAT_ROUGHNESS * CLEARCOAT_ROUGHNESS;
+	CLEARCOAT_ROUGHNESS = sqrt(sqrt(a * a + kernel));
+#endif
 	// Back faces are the insides of panels that tuck under the body, seen along the bottom
 	// edges; reflecting the sky they flicker as bright specks, so light them matte.
 	if (!FRONT_FACING) {

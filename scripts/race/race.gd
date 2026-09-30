@@ -105,7 +105,10 @@ func _ready() -> void:
 		await tree.process_frame
 		if not is_inside_tree():
 			return
-		Game.load_car(cars[i][0], cars[i][1])
+		if i == 0:
+			Game.player_car_data()
+		else:
+			Game.load_car(cars[i][0], cars[i][1])
 	hud.loading_stage("Lighting the scenery", 0.76, 0.82)
 	await tree.process_frame
 	_build_world(built[0])
@@ -709,11 +712,28 @@ func _unhandled_input(e: InputEvent) -> void:
 func _input(e: InputEvent) -> void:
 	# Ahead of the GUI, which could otherwise swallow it.
 	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_F4:
-		_probe_view()
+		if e.shift_pressed:
+			_probe_hide_next()
+		else:
+			_probe_view()
 
 
-## Debug (F4): prints what's drawn near the camera, bar the opaque track scenery, and saves the
-## frame, to catch a rare visual glitch in the act.
+## What a drawable is, for the probe: its shader's file, or its material's class.
+static func _probe_what(g: GeometryInstance3D) -> String:
+	var mat: Material = g.material_override
+	if mat == null and g is MeshInstance3D and (g as MeshInstance3D).mesh:
+		var m := (g as MeshInstance3D).mesh
+		mat = m.surface_get_material(0) if m.get_surface_count() > 0 else null
+	elif mat == null and g is CPUParticles3D and (g as CPUParticles3D).mesh:
+		mat = (g as CPUParticles3D).mesh.surface_get_material(0)
+	if mat is ShaderMaterial and (mat as ShaderMaterial).shader:
+		return (mat as ShaderMaterial).shader.resource_path.get_file()
+	return mat.get_class() if mat else "-"
+
+
+## Debug (F4): prints what's drawn, bar the track's own scenery (near the camera, or at any
+## distance for particles and anything over 15 m), and saves the frame, to catch a rare
+## visual glitch in the act. Shift+F4 hides one kind of thing more each press (_probe_hide_next).
 func _probe_view() -> void:
 	var cam3d := get_viewport().get_camera_3d()
 	if cam3d == null:
@@ -724,26 +744,34 @@ func _probe_view() -> void:
 		var g := n as GeometryInstance3D
 		if not g.is_visible_in_tree() or (_track_mat and g.material_override == _track_mat):
 			continue
+		var what := _probe_what(g)
+		if what.begins_with("track"):
+			continue
 		var box := g.global_transform * g.get_aabb()
 		var d := (eye.clamp(box.position, box.end) - eye).length()
-		if d > 40.0:
+		var p := g as CPUParticles3D
+		var big := box.size.length() > 15.0 and not g is MultiMeshInstance3D
+		if d > 40.0 and not big and not (p and p.emitting):
 			continue
-		var mat: Material = g.material_override
-		if mat == null and g is MeshInstance3D and (g as MeshInstance3D).mesh:
-			var m := (g as MeshInstance3D).mesh
-			mat = m.surface_get_material(0) if m.get_surface_count() > 0 else null
-		var what := "-"
-		if mat is ShaderMaterial and (mat as ShaderMaterial).shader:
-			what = (mat as ShaderMaterial).shader.resource_path.get_file()
-		elif mat:
-			what = mat.get_class()
-		rows.append([d, "%6.1f m  size %s  %s  layers %d  %s" % [d, box.size.snapped(Vector3.ONE * 0.1),
-			what, g.layers, g.get_path()]])
+		var extra := ""
+		if p:
+			# Particles' AABB says nothing: where the emitter is, and what it's making.
+			extra = "  emitting %s at %s (%.0f m) scale %.1f-%.1f colour %s" % [p.emitting,
+				p.global_position.snapped(Vector3.ONE * 0.1), p.global_position.distance_to(eye),
+				p.scale_amount_min, p.scale_amount_max, p.color]
+		rows.append([d, "%6.1f m  size %s  %s  layers %d  %s%s%s" % [d, box.size.snapped(Vector3.ONE * 0.1),
+			what, g.layers, g.get_path(), extra, "  <== BIG" if big else ""]])
 	rows.sort_custom(func(a, b): return a[0] < b[0])
 	var lines := PackedStringArray(["--- F4 probe at %s, looking %s" % [eye.snapped(Vector3.ONE * 0.1),
 		(-cam3d.global_basis.z).snapped(Vector3.ONE * 0.01)]])
 	for r in rows:
 		lines.append(r[1])
+	if _skid_marks:
+		var near: Array = [eye]
+		for c: Car in racers.map(func(r): return r.car) + traffic_cars + cops:
+			if is_instance_valid(c):
+				near.append(c.global_position)
+		lines.append_array(_skid_marks.odd_marks(near).slice(0, 40))
 	var path := "user://probe_%d" % Time.get_unix_time_from_system()
 	get_viewport().get_texture().get_image().save_png(path + ".png")
 	lines.append("--- saved " + ProjectSettings.globalize_path(path) + ".png/.txt")
@@ -752,6 +780,41 @@ func _probe_view() -> void:
 		f.store_string("\n".join(lines) + "\n")
 	print("\n".join(lines))
 	hud.flash("Probe saved", 1.5)
+
+
+var _probe_hidden := 0   # how many of _PROBE_KINDS Shift+F4 has hidden so far
+const _PROBE_KINDS := ["particles", "skid marks", "other cars", "player car", "all non-track"]
+
+
+## Debug (Shift+F4): hides the next kind of drawable in _PROBE_KINDS on top of the ones
+## already hidden (then shows everything again), to find which one a glitch belongs to.
+func _probe_hide_next() -> void:
+	_probe_hidden = (_probe_hidden + 1) % (_PROBE_KINDS.size() + 1)
+	for n: Node in get_tree().root.find_children("*", "GeometryInstance3D", true, false):
+		var g := n as GeometryInstance3D
+		if _probe_what(g).begins_with("track") or (_track_mat and g.material_override == _track_mat):
+			continue
+		var car: Node = g
+		while car != null and not car is Car:
+			car = car.get_parent()
+		var kind := 4
+		if g is CPUParticles3D or g is GPUParticles3D:
+			kind = 0
+		elif g is SkidMarks:
+			kind = 1
+		elif car != null:
+			kind = 3 if car == player else 2
+		# (Its own flag, so the game's own visibility switching is left alone.)
+		var off := kind < _probe_hidden
+		if off and not g.has_meta("probe_layers"):
+			g.set_meta("probe_layers", g.layers)
+			g.layers = 0
+		elif not off and g.has_meta("probe_layers"):
+			g.layers = g.get_meta("probe_layers")
+			g.remove_meta("probe_layers")
+	var msg := "Probe: all shown" if _probe_hidden == 0 else "Probe hid: " + ", ".join(_PROBE_KINDS.slice(0, _probe_hidden))
+	print(msg)
+	hud.flash(msg, 2.0)
 
 
 ## Hands the track shader the drop shadows of the MAX_SHADOWS cars nearest the camera.

@@ -96,7 +96,9 @@ func setup(car: Car, glass: Array[Dictionary], eye: Vector3, half_size: Vector3)
 		var near := 0.0
 		for p in pts:
 			near = maxf(near, -(local.affine_inverse() * p).z)
-		near += 0.005
+		# (A modelled rear-view mirror's glass isn't turned as the view is: its housing reaches
+		# a little past it.)
+		near += 0.03 if rear else 0.005
 		var vp := SubViewport.new()
 		vp.size = size
 		vp.msaa_3d = Viewport.MSAA_DISABLED

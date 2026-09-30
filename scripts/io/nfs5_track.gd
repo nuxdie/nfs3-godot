@@ -49,13 +49,21 @@ const FIT_CELL := 4.0
 ## rise and drop the ground may take at a step and still carry on, how far above and below
 ## the slice it may go (the walls reach 6 m over it and 3 m under); over how many
 ## slices each way a wall goes by the nearest.
-const EDGE_REACH := 10.0
+const EDGE_REACH := 40.0
 const EDGE_STEP := 1.0
 const EDGE_RISE := 1.0
 const EDGE_DROP := 1.0
 const EDGE_UP := 4.0
 const EDGE_DOWN := 2.5
 const EDGE_SPAN := 2
+## _open_walls: how far along the road (m) a slice is another stretch of it (the far side of
+## a hairpin, a road doubling back), which a wall stops halfway to; how far along and
+## above or below its slice a point is beside it; the share of a bend's radius a wall
+## on its inside may reach, and over how many slices each way the bend is measured.
+const EDGE_OTHER := 40.0
+const EDGE_BESIDE := 4.0
+const EDGE_BEND := 0.8
+const EDGE_BEND_SPAN := 3
 
 enum Kind { ROAD, GROUND, SCENERY }
 
@@ -521,26 +529,42 @@ static func _surface_at(grid: Dictionary, p: Vector3, lo: float, hi: float) -> f
 ## white line, with the verge, the pavement or the hard shoulder behind them. Each goes out over
 ## the ground beyond, EDGE_STEP at a time while it carries on (up a bank no steeper than
 ## EDGE_RISE, down one no steeper than EDGE_DROP, and from EDGE_DOWN under the slice's
-## plane to EDGE_UP over it, where the wall hangs from), to EDGE_REACH at most. A bank too steep to climb stops the car itself,
-## and where the ground stops at a wall, a building or a barrier, those are solid. A slice
+## plane to EDGE_UP over it, where the wall hangs from), to EDGE_REACH at most, halfway to
+## another stretch of the road, and inside a bend short of where its slices' walls cross
+## (_bend_reach). A bank too steep to climb stops the car itself, and where the ground
+## stops at a wall, a building or a barrier, those are solid. A slice
 ## goes by the least of its neighbours' (EDGE_SPAN each way), so a gap between two
 ## buildings doesn't pocket out.
 func _open_walls(grid: Dictionary, road: Array, loop: bool) -> Array[PackedFloat32Array]:
 	var n := road.size()
+	# Along the road (m) to each slice, and its slices by XZ cell, for _nearer_other.
+	var arc := PackedFloat32Array()
+	arc.resize(n)
+	for k in range(1, n):
+		arc[k] = arc[k - 1] + road[k].pos.distance_to(road[k - 1].pos)
+	var length: float = arc[n - 1] + (road[0].pos.distance_to(road[n - 1].pos) if loop else 0.0)
+	var cells := {}
+	for k in n:
+		cells.get_or_add(_edge_cell(road[k].pos), []).append(k)
 	var out := [PackedFloat32Array(), PackedFloat32Array()]
-	for vr: Nfs3Track.VRoad in road:
+	for k in n:
+		var vr: Nfs3Track.VRoad = road[k]
+		var reach := _bend_reach(road, k, loop)
 		for side in 2:
 			var sg := 1.0 if side == 1 else -1.0
-			var d: float = vr.right_wall if side == 1 else vr.left_wall
+			var edge: float = vr.right_wall if side == 1 else vr.left_wall
+			var d := edge
 			var at := vr.pos + vr.right * d * sg
 			# The ground at the lane edge: a banked road can be off the slice's tilt there.
 			var h := _surface_at(grid, at, at.y - EDGE_DOWN, at.y + EDGE_DOWN)
-			while not is_nan(h) and d < (vr.right_wall if side == 1 else vr.left_wall) + EDGE_REACH:
+			while not is_nan(h) and d < minf(edge + EDGE_REACH, reach[side]):
 				at = vr.pos + vr.right * (d + EDGE_STEP) * sg
 				var nh := _surface_at(grid, at, h - EDGE_DROP, h + EDGE_RISE)
 				# The wall hangs off the slice (Nfs3TrackBuilder.make_walls): no further than
 				# it still reaches the ground from.
 				if is_nan(nh) or nh - at.y > EDGE_UP or at.y - nh > EDGE_DOWN:
+					break
+				if _nearer_other(road, cells, arc, length, loop, k, Vector3(at.x, nh, at.z), d + EDGE_STEP):
 					break
 				h = nh
 				d += EDGE_STEP
@@ -556,6 +580,55 @@ func _open_walls(grid: Dictionary, road: Array, loop: bool) -> Array[PackedFloat
 			var road_edge: float = road[k].right_wall if side == 1 else road[k].left_wall
 			walls[side][k] = maxf(road_edge, least)
 	return walls
+
+
+static func _edge_cell(p: Vector3) -> Vector2i:
+	return Vector2i(floori(p.x / EDGE_OTHER), floori(p.z / EDGE_OTHER))
+
+
+## How far [left, right] a wall of slice `k` may go: on the inside of a bend, no further
+## than EDGE_BEND of its radius, where the walls of the slices round it would cross.
+static func _bend_reach(road: Array, k: int, loop: bool) -> Array:
+	var n := road.size()
+	var a := k - EDGE_BEND_SPAN
+	var b := k + EDGE_BEND_SPAN
+	if not loop:
+		a = maxi(a, 0)
+		b = mini(b, n - 1)
+	var fa: Vector3 = road[posmod(a, n)].forward
+	var fb: Vector3 = road[posmod(b, n)].forward
+	var turn := fa.angle_to(fb)
+	var out := [INF, INF]
+	if b <= a or turn < 0.01:
+		return out
+	var span := 0.0
+	for j in range(a, b):
+		span += road[posmod(j + 1, n)].pos.distance_to(road[posmod(j, n)].pos)
+	# Turning towards the right: its inside is the right.
+	var inside := 1 if (fb - fa).dot(road[k].right) > 0.0 else 0
+	out[inside] = EDGE_BEND * span / turn
+	return out
+
+
+## Whether `p`, `d` out from slice `k`, is as near to another stretch of the road (a slice
+## EDGE_OTHER along it or further) as to its own: beside that slice, and no further across.
+static func _nearer_other(road: Array, cells: Dictionary, arc: PackedFloat32Array, length: float,
+		loop: bool, k: int, p: Vector3, d: float) -> bool:
+	var c := _edge_cell(p)
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for j: int in cells.get(c + Vector2i(dx, dz), []):
+				var along := absf(arc[j] - arc[k])
+				if loop:
+					along = minf(along, length - along)
+				if along < EDGE_OTHER:
+					continue
+				var vr: Nfs3Track.VRoad = road[j]
+				var o := p - vr.pos
+				if absf(o.dot(vr.forward)) <= EDGE_BESIDE and absf(o.y) < EDGE_UP \
+						and absf(o.dot(vr.right)) <= d:
+					return true
+	return false
 
 
 ## The sea's layers ("wtr" textures, alpha 95 at most) are blended over what the game draws

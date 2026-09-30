@@ -30,6 +30,8 @@ static var _queue_frame := -1
 var damage := 0.0           # 0..1 overall, mirrored into the car's handling
 
 var _car: Car
+## Porsche Unleashed's cars come in parts that move about the body (doors and lids on their
+## hinges, windows down into the doors), so each is dented in its own space: see _to_part().
 var _parts: Array[Dictionary] = []   # {mi, mesh (own copy), surfaces: [{arrays, rest, material}]}
 var _prev_vel := Vector3.ZERO
 var _cooldown := 0.0
@@ -46,6 +48,10 @@ func _ready() -> void:
 			_mid_y = c.position.y
 	for mi in _car.body_meshes():
 		var src := mi.mesh
+		# Parts that move by blend shapes (wipers, the spoiler on its way up, a folding top,
+		# the driver's arms) keep their shape: rebuilding the mesh would lose the frames.
+		if src == null or src.get_blend_shape_count() > 0:
+			continue
 		var surfaces: Array[Dictionary] = []
 		var damaged: Variant = mi.get_meta("damaged") if mi.has_meta("damaged") else null
 		for s in src.get_surface_count():
@@ -152,8 +158,9 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 	# Lamps the files mark breakable go out in a hit hard enough to bend them.
 	if s >= LAMP_BREAK:
 		_car.break_lamps(p, radius)
-	# ... and doors and lids spring open (Porsche Unleashed's).
+	# ... and doors and lids spring open (Porsche Unleashed's), and what's had enough comes off.
 	_car.latch_hit(p, s)
+	_car.loose_hit(p, radius, s)
 	for n in _car.fittings():
 		var f := 1.0 - n.position.distance_to(p) / radius
 		if f > 0.0:
@@ -200,15 +207,20 @@ func _nearest_vertex(p: Vector3) -> Vector3:
 		var best := INF
 		var out := p
 		for part in _parts:
-			var o: Vector3 = part.mi.position
-			var lp := p - o
+			var mi: MeshInstance3D = part.mi
+			# (Not onto one that isn't there: the raised spoiler while it's down, one torn off.)
+			if not mi.visible or not _on_car(mi):
+				continue
+			var to_part := _to_part(mi)
+			var to_car := to_part.affine_inverse()
+			var lp := to_part * p
 			for sf in part.surfaces:
 				var verts: PackedVector3Array = sf.arrays[Mesh.ARRAY_VERTEX]
 				for i in _near(sf, lp, reach, 0.0):
 					var d := verts[i].distance_squared_to(lp)
 					if d < best:
 						best = d
-						out = verts[i] + o
+						out = to_car * verts[i]
 		if best < INF:
 			return out
 		reach *= 2.0
@@ -247,10 +259,30 @@ static func _grid(sf: Dictionary) -> Dictionary:
 	return _grid_cache[sf.key]
 
 
-func _dent(p: Vector3, dir: Vector3, radius: float, depth: float) -> void:
+## Whether `mi` is still on the car (not torn off: Car.tear_off).
+func _on_car(mi: Node) -> bool:
+	return is_instance_valid(mi) and _car.is_ancestor_of(mi)
+
+
+## From car-local to `mi`'s own space, wherever its hinges and the body's lean have it now.
+func _to_part(mi: Node3D) -> Transform3D:
+	var t := Transform3D.IDENTITY
+	var n: Node = mi
+	while n != null and n != _car:
+		if n is Node3D:
+			t = (n as Node3D).transform * t
+		n = n.get_parent()
+	return t.affine_inverse()
+
+
+func _dent(p: Vector3, car_dir: Vector3, radius: float, depth: float) -> void:
 	for part in _parts:
 		var mi: MeshInstance3D = part.mi
-		var lp := p - mi.position
+		if not _on_car(mi):
+			continue
+		var to_part := _to_part(mi)
+		var lp := to_part * p
+		var dir := (to_part.basis * car_dir).normalized()
 		var mesh: ArrayMesh = part.mesh
 		var changed := false
 		for sf in part.surfaces:

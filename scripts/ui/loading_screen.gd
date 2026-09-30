@@ -84,6 +84,7 @@ func _init() -> void:
 func _read_game() -> void:
 	var id := Game.track_id
 	_tex = TrackPostcards.cached(id, Game.night)
+	_view.set_backdrop(_tex)
 	_title = Game.track_name(id).to_upper()
 	var m := Game.mode
 	_over = Game.MODE_NAMES[m].to_upper()
@@ -142,7 +143,7 @@ func _read_game() -> void:
 func _ready() -> void:
 	if Game.car_index < Game.cars.size():
 		var i := Game.car_index
-		var data: Object = Game.load_car(Game.cars[i].path, i)
+		var data: Object = Game.own_car(i)
 		var up := Game.upgrade_of(i) if Game.circuit_run.is_empty() else Game.garage_upgrade(i)
 		_view.show_car(data, Game.paint_tint(i, data), up, i, 0.0)
 

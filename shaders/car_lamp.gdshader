@@ -24,6 +24,10 @@ void vertex() {
 
 void fragment() {
 	vec4 t = texture(glow_tex, UV);
-	ALBEDO = t.rgb * colour.rgb;
-	ALPHA = t.a * colour.a * fade;
+	// Porsche Unleashed's glare is opaque, its light in the colour: carry that in the alpha
+	// instead (the same light added), else blend_add would make the showroom's transparent
+	// viewport opaque black round every lamp.
+	float l = max(max(t.r, t.g), max(t.b, 1e-4));
+	ALBEDO = t.rgb / l * colour.rgb;
+	ALPHA = t.a * l * colour.a * fade;
 }

@@ -2,11 +2,10 @@ class_name Nfs5TrackBuilder
 ## Builds a Porsche Unleashed track (Nfs5Track) into the same nodes Nfs3TrackBuilder makes
 ## for NFS3 and High Stakes, under the same track shaders: a mesh per chunk and pass, the
 ## road and terrain bodies (tagged for the tyres), solid scenery, camera blockers and the
-## virtual road's walls. Its road is the articles flagged road, the ground under it the rest
-## flagged ground (verges, fields, cliffs), but for the ground's steep faces (the walls of
+## virtual road's walls, for the AI only: the player has none. Its road is the articles
+## flagged road, the ground under it the rest flagged ground (verges, fields, cliffs), but for the ground's steep faces (the walls of
 ## buildings, booths, rock faces), which are solid scenery; what isn't ground is scenery,
 ## solid where it's opaque (rails, posts) and passable where it's a cut-out (foliage).
-## The walls leave the side roads (Nfs5Track.side_roads) open and fence them in too.
 
 ## Its baked colours are half-bright: the game lights them at twice their value.
 const BRIGHTNESS := 2.0
@@ -16,13 +15,17 @@ const SURFACE_GROUND := 14
 ## Ground triangles steeper than this (normal's y) are walls: the sides of buildings, gate
 ## booths, retaining walls, rock faces.
 const STEEP := 0.5
-## _inside: the corridors' lookup cell (m), and how far along a slice (either way) and
-## above or below it a point counts as beside it.
-const CORRIDOR_CELL := 16.0
-const CORRIDOR_ALONG := 4.0
-const CORRIDOR_RISE := 4.0
+## How far (m) past the fences a car off the road may get before the race puts it back
+## (TrackPath.lost_margin), as on the procedural track, which has no walls either.
+const LOST_MARGIN := 120.0
 ## Opaque scenery at least this big (m across, and high) keeps the chase camera out.
 const CAMERA_BLOCK_SIZE := Vector2(6.0, 2.5)
+## A cut-out texture's triangle is solid when less than this share of the texels it shows
+## is clear: the stonework of a church or a monument cut from a page with its arches' and
+## crosses' outlines, where foliage shows a fifth or more of clear.
+const SOLID_CLEAR := 0.1
+## _clear_share: the samples along each side of a triangle's UVs.
+const CLEAR_SAMPLES := 8
 
 enum { PASS_OPAQUE, PASS_FX, PASS_GLASS }
 
@@ -56,6 +59,7 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 		root.add_child(bd)
 	for bd in [road, terrain]:
 		TrackSurface.set_images(bd, t.images)
+	var alphas := {}   # cut-out image -> [its alpha bytes, width, height], for _add_solid
 
 	for ci in t.chunks.size():
 		var c: Dictionary = t.chunks[ci]
@@ -64,7 +68,7 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 		var ground := _split_steep(c.pieces[Nfs5Track.Kind.GROUND])
 		_add_ground(terrain, ground[0], SURFACE_GROUND)
 		_add_faces(scenery, ground[1])
-		_add_solid(scenery, cam_block, c.pieces[Nfs5Track.Kind.SCENERY], see_through)
+		_add_solid(scenery, cam_block, c.pieces[Nfs5Track.Kind.SCENERY], see_through, alphas, t.images)
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
 	_add_ground(terrain, t.backdrop[Nfs5Track.Kind.GROUND], SURFACE_GROUND)
 
@@ -77,97 +81,15 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 	for side_road: Array in t.side_roads:
 		for vr: Nfs3Track.VRoad in side_road:
 			path.add_side_slice(vr.pos, vr.right.normalized(), vr.left_wall, vr.right_wall)
-	var corridors := _corridors(t)
-	var gaps := _gaps(t, corridors)
-	var walls := Nfs3TrackBuilder.make_walls(path, gaps)
-	_side_walls(t, corridors, walls)
-	root.add_child(walls)
-	# The gaps closed for the AI only (its cars don't take the shortcuts).
-	for side in 2:
-		for i in gaps[side].size():
-			gaps[side][i] = 1 - gaps[side][i]
-	var ai_walls := Nfs3TrackBuilder.make_walls(path, gaps)
+	# No walls for the player: the car goes wherever the ground and the solid scenery let it,
+	# and the race only puts it back far out (LOST_MARGIN). The AI, the traffic and the cops
+	# keep to the lap between walls of their own (their cars don't take the shortcuts).
+	path.lost_margin = LOST_MARGIN
+	var ai_walls := Nfs3TrackBuilder.make_walls(path)
 	ai_walls.name = "AiWalls"
 	ai_walls.collision_layer = Nfs3TrackBuilder.AI_WALL_LAYER
 	root.add_child(ai_walls)
 	return path
-
-
-## Every road's slices by XZ cell (CORRIDOR_CELL): [road (-1 the lap, else a side road's
-## index), slice, its walls left and right (the lap's fences)], for _inside.
-static func _corridors(t: Nfs5Track) -> Dictionary:
-	var grid := {}
-	var roads := [t.vroad] + t.side_roads
-	for r in roads.size():
-		for k in roads[r].size():
-			var vr: Nfs3Track.VRoad = roads[r][k]
-			var lw: float = t.fences[0][k] if r == 0 else vr.left_wall
-			var rw: float = t.fences[1][k] if r == 0 else vr.right_wall
-			grid.get_or_add(Vector2i(floori(vr.pos.x / CORRIDOR_CELL), floori(vr.pos.z / CORRIDOR_CELL)), []).append([r - 1, vr, lw, rw])
-	return grid
-
-
-## Whether `p` is on a road other than `own` (-1 the lap, else a side road's index): within
-## its walls, beside one of its slices, at about its height.
-static func _inside(corridors: Dictionary, p: Vector3, own: int) -> bool:
-	var c := Vector2i(floori(p.x / CORRIDOR_CELL), floori(p.z / CORRIDOR_CELL))
-	for dx in range(-1, 2):
-		for dz in range(-1, 2):
-			for e: Array in corridors.get(c + Vector2i(dx, dz), []):
-				if e[0] == own:
-					continue
-				var vr: Nfs3Track.VRoad = e[1]
-				var d := p - vr.pos
-				var lat := d.dot(vr.right)
-				if absf(d.dot(vr.forward)) <= CORRIDOR_ALONG and absf(d.y) < CORRIDOR_RISE \
-						and lat > -e[2] - 0.5 and lat < e[3] + 0.5:
-					return true
-	return false
-
-
-## The lap's walls left out where they cross a side road (make_walls' `open`).
-static func _gaps(t: Nfs5Track, corridors: Dictionary) -> Array:
-	var n := t.vroad.size()
-	var out := [PackedByteArray(), PackedByteArray()]
-	for side in 2:
-		out[side].resize(n)
-		for i in n:
-			var a: Nfs3Track.VRoad = t.vroad[i]
-			var b: Nfs3Track.VRoad = t.vroad[(i + 1) % n]
-			var sg := 1.0 if side == 1 else -1.0
-			var fa := a.pos + a.right * t.fences[side][i] * sg
-			var fb := b.pos + b.right * t.fences[side][(i + 1) % n] * sg
-			out[side][i] = int(_inside(corridors, (fa + fb) * 0.5, -1))
-	return out
-
-
-## Each side road's own walls, into `body`, but where they'd stand across the lap's road or
-## another side road's.
-static func _side_walls(t: Nfs5Track, corridors: Dictionary, body: StaticBody3D) -> void:
-	var faces := PackedVector3Array()
-	for r in t.side_roads.size():
-		var road: Array = t.side_roads[r]
-		for side in 2:
-			var sg := 1.0 if side == 1 else -1.0
-			for k in road.size() - 1:
-				var a: Nfs3Track.VRoad = road[k]
-				var b: Nfs3Track.VRoad = road[k + 1]
-				var fa := a.pos + a.right * (a.right_wall if side == 1 else a.left_wall) * sg
-				var fb := b.pos + b.right * (b.right_wall if side == 1 else b.left_wall) * sg
-				if _inside(corridors, (fa + fb) * 0.5, r):
-					continue
-				var down := Vector3.DOWN * Nfs3TrackBuilder.WALL_DEPTH
-				var up := Vector3.UP * Nfs3TrackBuilder.WALL_HEIGHT
-				faces.append_array([fa + down, fb + down, fb + up, fa + down, fb + up, fa + up])
-	if faces.is_empty():
-		return
-	var shape := ConcavePolygonShape3D.new()
-	shape.set_faces(faces)
-	shape.backface_collision = true
-	var cs := CollisionShape3D.new()
-	cs.name = "SideRoads"
-	cs.shape = shape
-	body.add_child(cs)
 
 
 static func _body(body_name: String, layer: int) -> StaticBody3D:
@@ -325,14 +247,17 @@ static func _add_faces(body: StaticBody3D, faces: PackedVector3Array) -> void:
 
 
 ## The opaque scenery triangles as solid scenery; those of it big enough keep the camera out
-## too. Cut-outs (foliage) and see-through ones are left passable.
+## too. Cut-outs (foliage) and see-through ones are left passable, but for the cut-out
+## triangles that show next to no clear texels (see SOLID_CLEAR).
 static func _add_solid(scenery: StaticBody3D, cam_block: StaticBody3D, pc: Nfs5Track.Piece,
-		see_through: PackedByteArray) -> void:
+		see_through: PackedByteArray, alphas: Dictionary, images: Array) -> void:
 	var faces := PackedVector3Array()
 	for tri in pc.tex.size():
-		if see_through[pc.tex[tri]] != 0:
-			continue
 		var i := tri * 3
+		var tex := pc.tex[tri]
+		if see_through[tex] == 2 or see_through[tex] == 1 \
+				and _clear_share(alphas, images, tex, pc.uv[i], pc.uv[i + 1], pc.uv[i + 2]) >= SOLID_CLEAR:
+			continue
 		faces.append_array([pc.pos[i], pc.pos[i + 1], pc.pos[i + 2]])
 	if faces.is_empty():
 		return
@@ -343,3 +268,36 @@ static func _add_solid(scenery: StaticBody3D, cam_block: StaticBody3D, pc: Nfs5T
 		var cs := CollisionShape3D.new()
 		cs.shape = shape
 		bd.add_child(cs)
+
+
+## The share of clear texels (alpha under 26, as _see_through counts them) of image `tex`
+## that a triangle with these UVs shows (repeating), sampled over it.
+static func _clear_share(alphas: Dictionary, images: Array, tex: int, a: Vector2, b: Vector2,
+		c: Vector2) -> float:
+	if not alphas.has(tex):
+		var im: Image = images[tex]
+		if im.get_format() != Image.FORMAT_RGBA8:
+			im = im.duplicate()
+			im.convert(Image.FORMAT_RGBA8)
+		var d := im.get_data()
+		var al := PackedByteArray()
+		al.resize(d.size() / 4)
+		for k in al.size():
+			al[k] = d[k * 4 + 3]
+		alphas[tex] = [al, im.get_width(), im.get_height()]
+	var e: Array = alphas[tex]
+	var al: PackedByteArray = e[0]
+	var w: int = e[1]
+	var h: int = e[2]
+	var clear := 0
+	var n := 0
+	for i in CLEAR_SAMPLES + 1:
+		for j in CLEAR_SAMPLES + 1 - i:
+			var uv := (a * (i + 1.0 / 3.0) + b * (j + 1.0 / 3.0) + c * (CLEAR_SAMPLES - i - j + 1.0 / 3.0)) \
+				/ (CLEAR_SAMPLES + 1.0)
+			var x := mini(int(fposmod(uv.x, 1.0) * w), w - 1)
+			var y := mini(int(fposmod(uv.y, 1.0) * h), h - 1)
+			n += 1
+			if al[y * w + x] < 26:
+				clear += 1
+	return float(clear) / n

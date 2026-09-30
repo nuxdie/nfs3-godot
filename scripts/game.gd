@@ -64,6 +64,7 @@ var laps := 2
 var opponents := 3
 var upgrades := {}          # car id -> High Stakes upgrade level 1..3 (Car.UPGRADES); absent is stock
 var paints := {}            # car id -> which of its paint colours (FCE colour list); absent is the first
+var driver := 0             # who drives your Porsche Unleashed cars (1..10, Nfs5Car's); 0 the car's own
 var rival_upgrades := 0     # 0 stock, 1 as upgraded as yours, 2 fully upgraded
 var rival_class := 0        # 0 rivals of your car's class (nearest classes if too few), 1 any
 var intro_flyby := true     # the track's fly-by round the grid before the countdown
@@ -437,14 +438,15 @@ func _sorted_dirs(path: String) -> PackedStringArray:
 	return out
 
 
-## Loaded car data (cached). `path` == "" means a procedural car preset.
-func load_car(path: String, preset := 0) -> Object:
-	var key := path if path != "" else "preset%d" % preset
+## Loaded car data (cached). `path` == "" means a procedural car preset. `who` puts that
+## driver in a Porsche Unleashed car (0: its own).
+func load_car(path: String, preset := 0, who := 0) -> Object:
+	var key := _car_key(path, preset, who)
 	if not _car_cache.has(key):
 		if path == "":
 			_car_cache[key] = ProceduralCar.make(preset)
 		else:
-			var car: Nfs3Car = Nfs5Car.load_car(pu_root, _pu_cars[path]) if is_pu_path(path) else Nfs3Car.load_dir(path)
+			var car: Nfs3Car = Nfs5Car.load_car(pu_root, _pu_cars[path], who) if is_pu_path(path) else Nfs3Car.load_dir(path)
 			if car.error != "" or car.body_parts.is_empty():
 				# A damaged car file: race a stand-in rather than an invisible car.
 				push_warning("Car %s failed to load (%s), using a stand-in" % [path, car.error])
@@ -454,6 +456,22 @@ func load_car(path: String, preset := 0) -> Object:
 			else:
 				_car_cache[key] = car
 	return _car_cache[key]
+
+
+func _car_key(path: String, preset: int, who: int) -> String:
+	if path == "":
+		return "preset%d" % preset
+	return path + "#driver%d" % who if who > 0 and is_pu_path(path) else path
+
+
+## Car `i` as you drive it: with your driver.
+func own_car(i: int) -> Object:
+	return load_car(cars[i].path, i, driver)
+
+
+## Whether own_car(i) is loaded already.
+func own_car_loaded(i: int) -> bool:
+	return _car_cache.has(_car_key(cars[i].path, i, driver))
 
 
 ## Just the car's name and carp.txt (no mesh or skin), for menus that list every car:
@@ -656,8 +674,7 @@ func rival_pool(n: int) -> Array:
 
 
 func player_car_data() -> Object:
-	var c: Dictionary = cars[car_index]
-	return load_car(c.path, car_index)
+	return own_car(car_index)
 
 
 # ------------------------------------------------------------------ settings
@@ -678,6 +695,7 @@ func save_settings() -> void:
 	cf.set_value("game", "opponents", opponents)
 	cf.set_value("game", "upgrades", upgrades)
 	cf.set_value("game", "paints", paints)
+	cf.set_value("game", "driver", driver)
 	cf.set_value("game", "rival_upgrades", rival_upgrades)
 	cf.set_value("game", "rival_class", rival_class)
 	cf.set_value("game", "intro", intro_flyby)
@@ -748,6 +766,7 @@ func _load_settings() -> void:
 		for k in pts:
 			if pts[k] is int:
 				paints[str(k)] = clampi(pts[k], 0, 15)
+	driver = clampi(_int(cf, "driver", driver), 0, 10)
 	intro_flyby = _bool(cf, "intro", intro_flyby)
 	hud_style = clampi(_int(cf, "hud", hud_style), 0, 2)
 	hud_on = _bool(cf, "hud_on", hud_on)
@@ -881,8 +900,10 @@ func apply_quality(vp: Viewport, sun: DirectionalLight3D) -> void:
 			sun.directional_shadow_max_distance = 80.0
 			RenderingServer.directional_shadow_atlas_set_size(4096, true)
 			vp.scaling_3d_scale = 1.0
+			# MSAA smooths only the triangles' edges; SMAA on top catches the rest (the cars'
+			# alpha cut-outs, the lines drawn in the low-res skins and textures).
 			vp.msaa_3d = Viewport.MSAA_2X
-			vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+			vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_SMAA
 
 
 # ------------------------------------------------------------------ input

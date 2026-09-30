@@ -4,7 +4,8 @@ extends SubViewportContainer
 ## over the track's picture.
 ##   the stage     a dark gloss floor that fades out into the picture, the car mirrored in it
 ##                 (a copy of its meshes under the floor), a soft shadow under it, and a dark
-##                 studio of softboxes that only shows in the paint's reflections
+##                 studio of softboxes that only shows in the paint's reflections, the
+##                 track's picture (set_backdrop()) wrapped round it at the horizon
 ##   the camera    a director cutting between close-ups, each a slow move on one part of the
 ##                 car: the grille, a headlamp, the wheels, a tail lamp, the flank on a long
 ##                 lens, the roof from above. Most show something working as the camera's on
@@ -97,6 +98,9 @@ var rain := false                 # the wipers going and the top up (the menu's 
 
 var _vp: SubViewport
 var _world: Node3D
+var _sky_mat: ShaderMaterial
+var _backdrop: Texture2D
+var _backdrop_tw: Tween
 var _rig: Node3D                  # the lights, turned with the camera so the car stays lit the same
 var _cam: Camera3D
 var _shadow: MeshInstance3D
@@ -187,10 +191,34 @@ func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HE
 	_build_mirrors()
 
 
+## Cuts to the shot of the driver at the wheel, where the car has one.
+func show_driver() -> void:
+	if car and _head != Vector3.INF:
+		_cut_to("driver")
+
+
 ## The car on the stage in another paint, without dropping it in again.
 func repaint(tint: Color) -> void:
 	if car:
 		car.set_paint(tint)
+
+
+## The picture behind the stage (the track's), for the paint to reflect: wrapped round the
+## studio at the horizon, its top row carried up the sky and its bottom one down the floor.
+## A new one fades in over the old.
+func set_backdrop(tex: Texture2D) -> void:
+	if tex == _backdrop:
+		return
+	_sky_mat.set_shader_parameter("photo_from", _backdrop)
+	_sky_mat.set_shader_parameter("has_from", 1.0 if _backdrop else 0.0)
+	_sky_mat.set_shader_parameter("photo_to", tex)
+	_sky_mat.set_shader_parameter("has_to", 1.0 if tex else 0.0)
+	_sky_mat.set_shader_parameter("fade", 0.0)
+	_backdrop = tex
+	if _backdrop_tw:
+		_backdrop_tw.kill()
+	_backdrop_tw = create_tween()
+	_backdrop_tw.tween_property(_sky_mat, "shader_parameter/fade", 1.0, 0.4)
 
 
 func shown_id() -> int:
@@ -394,10 +422,10 @@ func _build_studio() -> void:
 	# A dark studio with softboxes, that only shows up in reflections and the fill light (the
 	# backdrop stays transparent): lit panels mirror crisp highlight shapes and the sides fall
 	# into shade, where an even grey dome and fill light made the paint look like porcelain.
-	var sky_mat := ShaderMaterial.new()
-	sky_mat.shader = _studio_shader()
+	_sky_mat = ShaderMaterial.new()
+	_sky_mat.shader = _studio_shader()
 	env.sky = Sky.new()
-	env.sky.sky_material = sky_mat
+	env.sky.sky_material = _sky_mat
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 1.0
@@ -729,6 +757,20 @@ static func _studio_shader() -> Shader:
 	var s := Shader.new()
 	s.code = """
 shader_type sky;
+uniform sampler2D photo_from : source_color, filter_linear, repeat_disable;
+uniform sampler2D photo_to : source_color, filter_linear, repeat_disable;
+uniform float has_from = 0.0;
+uniform float has_to = 0.0;
+uniform float fade = 1.0;
+// The picture round the horizon: across it once each way round (so it meets itself nose
+// and tail), from a little below the horizon to well up; above and below, its top and
+// bottom rows smeared out, the ground darkening toward straight down.
+vec4 photo(sampler2D t, float has, vec3 d) {
+	float u = abs(atan(d.x, -d.z)) / PI;
+	float v = clamp((0.55 - d.y) / 0.8, 0.02, 0.98);
+	vec3 c = textureLod(t, vec2(u, v), 0.0).rgb * mix(0.3, 1.0, smoothstep(-0.7, -0.2, d.y));
+	return vec4(c * has, has);
+}
 // Soft-edged panel: 1 inside |p| < half, fading out over `soft`.
 float panel(vec2 p, vec2 half, float soft) {
 	vec2 q = smoothstep(half + soft, half - soft, abs(p));
@@ -748,7 +790,11 @@ void sky() {
 	float el = d.y;
 	c += vec3(1.5, 1.55, 1.7) * panel(vec2(abs(az) - 1.3, el - 0.2), vec2(0.05, 0.25), 0.03);
 	c += vec3(1.1, 1.0, 0.9) * panel(vec2(az - 2.9, el - 0.12), vec2(0.35, 0.05), 0.03);
-	COLOR = c;
+	// The track's picture over the walls, the softboxes still catching in it.
+	vec4 a = photo(photo_from, has_from, d);
+	vec4 b = photo(photo_to, has_to, d);
+	vec4 p = mix(a, b, fade);
+	COLOR = mix(c, p.rgb / max(p.a, 1e-4) * 0.8 + c * 0.5, p.a);
 }
 """
 	return s

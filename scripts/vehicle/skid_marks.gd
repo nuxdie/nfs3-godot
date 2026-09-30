@@ -8,6 +8,29 @@ const WIDTH := 0.24
 const LIFT := 0.03   # above the road, against z-fighting
 
 var _next := 0
+var _warned := false
+
+
+## Debug: the instances that aren't a plausible mark (too big, not finite, or further than
+## `reach` from every point in `near`), as printable lines, and how many are laid.
+func odd_marks(near: Array, reach := 1000.0) -> Array:
+	var out := []
+	var laid := 0
+	for i in multimesh.instance_count:
+		var xf := multimesh.get_instance_transform(i)
+		var sx := xf.basis.x.length()
+		var sz := xf.basis.z.length()
+		if sx == 0.0 and sz == 0.0:
+			continue
+		laid += 1
+		var far := true
+		for p: Vector3 in near:
+			far = far and xf.origin.distance_to(p) > reach
+		if not (sx < 1.0 and sz < 4.0 and xf.basis.y.length() < 1.1 and xf.origin.is_finite()) or far:
+			out.append("  skid #%d  x %s  y %s  z %s  at %s  colour %s" % [i, xf.basis.x, xf.basis.y,
+				xf.basis.z, xf.origin, multimesh.get_instance_color(i)])
+	out.push_front("  skid marks laid %d of %d, odd %d" % [laid, multimesh.instance_count, out.size()])
+	return out
 
 
 ## `atlas`: the four NFS3 skid textures side by side (Nfs3Sfx.skid_atlas), or null for
@@ -43,6 +66,13 @@ func add(a: Vector3, b: Vector3, n: Vector3, alpha: float, variant := 0, width :
 	var along := b - a
 	var side := n.cross(along).normalized() * width
 	var xf := Transform3D(Basis(side, n, along), (a + b) * 0.5 + n * LIFT)
+	# (Debug: after big dark discs drawn by the marks; one bad segment says where from.)
+	if not (xf.basis.is_finite() and xf.origin.is_finite()) or along.length() > 4.0 or width > 1.0 \
+			or absf(n.length() - 1.0) > 0.01:
+		if not _warned:
+			_warned = true
+			push_warning("SkidMarks: bad segment a %s b %s n %s width %s" % [a, b, n, width])
+		return
 	multimesh.set_instance_transform(_next, xf)
 	multimesh.set_instance_color(_next, Color(1, 1, 1, alpha))
 	multimesh.set_instance_custom_data(_next, Color(variant, 0, 0, 0))

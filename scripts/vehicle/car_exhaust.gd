@@ -69,7 +69,8 @@ func _process(dt: float) -> void:
 		s.emitting = on and density > 0.05
 		if s.emitting:
 			s.global_position = global_transform * pipes[i]
-			s.direction = (back + Vector3(0, -0.15, 0)).normalized()
+			# (Up out of a stack high on the body, as the Kenworth's; back and down out of a pipe.)
+			s.direction = _car.global_basis.y if pipes[i].y > 0.3 else (back + Vector3(0, -0.15, 0)).normalized()
 			s.initial_velocity_min = 1.0
 			s.initial_velocity_max = 2.0
 			s.color = Color(1, 1, 1, density)

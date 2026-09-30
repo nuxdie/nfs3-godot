@@ -73,6 +73,7 @@ var _rival_class: OptionRow
 var _traffic: OptionRow
 var _paint_row: OptionRow        # the car's paint, by the names its fedata gives them, remembered per car
 var _upgrade_row: OptionRow      # High Stakes' upgrades for the chosen car, remembered per car
+var _driver_row: OptionRow       # who drives your Porsche Unleashed cars (Game.driver)
 var _pick_paint: OptionRow       # the same for the car on show in the picker (and the paint in the garage)
 var _pick_trim: OptionRow
 var _left: Array = []            # the left column: [heading, [controls]]; y of each heading set by _layout_hub()
@@ -263,6 +264,10 @@ func _build_hub() -> void:
 	_upgrade_row = OptionRow.new("Upgrades", PackedStringArray(Car.UPGRADE_NAMES))
 	_upgrade_row.index = Game.upgrade_of(_car_i)
 	_upgrade_row.changed.connect(func(i: int): _set_trim(_car_i, i))
+	_driver_row = OptionRow.new("Driver", _driver_names())
+	_driver_row.index = Game.driver
+	_driver_row.disabled_text = "The car's own"
+	_driver_row.changed.connect(_set_driver)
 	# The same two in the car picker (the paint in the garage too), under the car on show.
 	_pick_paint = OptionRow.new("Paint", PackedStringArray(["Factory"]))
 	_pick_paint.caption_w = 64.0
@@ -274,7 +279,7 @@ func _build_hub() -> void:
 	add_child(_pick_trim)
 	_left = [["", [_mode_row]], ["", [_track_card, _layout_row, _time_row, _weather]],
 		["RACE", [_laps, _opp, _rival_cars, _rival_class, _traffic]]]
-	_right = [["CAR", [_car_card, _paint_row, _upgrade_row]]]
+	_right = [["CAR", [_car_card, _paint_row, _upgrade_row, _driver_row]]]
 	for col in [_left, _right]:
 		for s in col:
 			for c: Control in s[1]:
@@ -450,13 +455,13 @@ func _layout_hub() -> void:
 	# The car, from the bottom up, above the footer.
 	var cw := _car_panel_w()
 	var x := size.x - M - cw
-	y = size.y - FOOT - 16 - 2 * ROW_H - 12 - 56 - 14 - PickCard.H
+	y = size.y - FOOT - 16 - 3 * ROW_H - 12 - 56 - 14 - PickCard.H
 	_right[0].resize(2)
 	_right[0].append(y)
 	_car_card.position = Vector2(x, y)
 	_car_card.size = Vector2(cw, PickCard.H)
 	y += PickCard.H + 14 + 56 + 12
-	for c: OptionRow in [_paint_row, _upgrade_row]:
+	for c: OptionRow in [_paint_row, _upgrade_row, _driver_row]:
 		c.position = Vector2(x, y)
 		c.size = Vector2(cw, ROW_H)
 		y += ROW_H
@@ -719,6 +724,13 @@ func _refresh_car_rows() -> void:
 	var names := _paint_names(_car_i)
 	_paint_row.swatches = _paint_swatches(_car_i)
 	_paint_row.set_items(names, mini(Game.paint_of(_car_i), names.size() - 1))
+	# Only a Porsche Unleashed car has drivers to choose from (once its model is in).
+	var count := 0
+	if Game.own_car_loaded(_car_i):
+		var data: Object = Game.own_car(_car_i)
+		count = int(data.get("driver_count")) if "driver_count" in data else 0
+	_driver_row.disabled = count == 0
+	_driver_row.max_index = count
 	_refresh_car_card()
 
 
@@ -980,10 +992,9 @@ func _paint_names(i: int) -> PackedStringArray:
 func _paint_swatches(i: int) -> Array[Color]:
 	var out: Array[Color] = []
 	# Only once its model is in (loading it for every car browsed past would stall the list).
-	var key: String = Game.cars[i].path if Game.cars[i].path != "" else "preset%d" % i
-	if not Game._car_cache.has(key):
+	if not Game.own_car_loaded(i):
 		return out
-	var data: Object = Game.load_car(Game.cars[i].path, i)
+	var data: Object = Game.own_car(i)
 	for c: Color in data.colours:
 		out.append(Color(minf(c.r * 0.5, 1.0), minf(c.g * 0.5, 1.0), minf(c.b * 0.5, 1.0)))
 	if out.size() != _paint_names(i).size():
@@ -1008,12 +1019,31 @@ func _preview_car_later(i: int) -> void:
 func _set_paint(i: int, p: int) -> void:
 	Game.paints[Game.cars[i].id] = p
 	if _showroom.shown_id() == i:
-		var data: Object = Game.load_car(Game.cars[i].path, i)
+		var data: Object = Game.own_car(i)
 		_showroom.repaint(Game.paint_tint(i, data))
 	if i == _car_i:
 		_paint_row.set_items(_paint_row.items, p)
 	if i == _car_shown:
 		_pick_paint.set_items(_pick_paint.items, p)
+
+
+## The Driver row's choices: the car's own, then Porsche Unleashed's ten by number (1 and 6
+## in race suit and helmet, the rest in their own clothes).
+func _driver_names() -> PackedStringArray:
+	var out := PackedStringArray(["Auto"])
+	for d in range(1, 11):
+		out.append(str(d))
+	return out
+
+
+## Your driver (in every Porsche Unleashed car): the car on show is loaded again with him
+## at the wheel, and the camera goes to him.
+func _set_driver(d: int) -> void:
+	Game.driver = d
+	var i := _showroom.shown_id() if _showroom else -1
+	if i >= 0:
+		_show_car_now(i)
+		_showroom.show_driver()
 
 
 ## Car `i` with its upgrades at `level` (remembered per car): its figures follow.
@@ -1051,7 +1081,7 @@ func _car_conditions() -> void:
 func _show_car_now(i: int) -> void:
 	_car_shown = i
 	_car_pending = -1
-	var data: Object = Game.load_car(Game.cars[i].path, i)
+	var data: Object = Game.own_car(i)
 	_stats.set_car(data, Game.units_kmh, _upgrade_shown(i))
 	_showroom.show_car(data, Game.paint_tint(i, data), _upgrade_shown(i), i)
 	# Its colours are known now.
@@ -1077,6 +1107,7 @@ func _show_backdrop(animate: bool) -> void:
 	_photo_back.modulate.a = _photo_front.modulate.a
 	_photo_front.texture = tex
 	_photo_front.modulate.a = 0.0
+	_showroom.set_backdrop(tex)
 	if tex:
 		create_tween().tween_property(_photo_front, "modulate:a", 1.0, 0.35 if animate else 0.9)
 	create_tween().tween_property(_photo_back, "modulate:a", 0.0, 0.45)

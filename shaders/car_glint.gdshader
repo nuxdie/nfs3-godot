@@ -34,6 +34,8 @@ void vertex() {
 
 void fragment() {
 	vec4 t = texture(glint_tex, UV);
-	ALBEDO = t.rgb * vec3(1.0, 0.97, 0.9) * strength * 1.6;
-	ALPHA = t.a * clamp(strength * 2.0, 0.0, 1.0);
+	// Light in the alpha, not the colour, as car_lamp.gdshader: keeps a transparent viewport clear.
+	float l = max(max(t.r, t.g), max(t.b, 1e-4));
+	ALBEDO = t.rgb / l * vec3(1.0, 0.97, 0.9) * strength * 1.6;
+	ALPHA = t.a * l * clamp(strength * 2.0, 0.0, 1.0);
 }
