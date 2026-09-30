@@ -9,7 +9,7 @@ extends Control
 
 signal finished
 
-const M := 48.0
+const M := 40.0
 const TIPS := [
 	["", "F1 hides the HUD. Settings → HUD picks which parts of it show."],
 	["", "C cycles the cameras, the trackside TV cameras among them."],
@@ -26,6 +26,10 @@ const TIPS := [
 	["pursuit", "Speed past a parked cruiser and it comes after you, lights and siren."],
 	["tournament", "Win every circuit of a tournament to open the next ones."],
 	["tournament", "A knockout drops the last car home after every race."],
+	["tournament", "After the first race the grid lines up by the standings: lead them and start on pole."],
+	["tournament", "Damage stays with the car until it's repaired: between races, or in the garage."],
+	["tournament", "Upgrades are bought in the garage, a level at a time. Selling a car gets back part of what it cost."],
+	["tournament", "Finish a circuit in the top three for a trophy. Win a Pro Cup and its bonus car is yours."],
 ]
 
 ## What the menu's loading screen left for the race scene's to pick up, so the two join up
@@ -38,13 +42,15 @@ var _over := ""                 # the mode, or the tournament and race
 var _over_col := UiKit.ACCENT
 var _facts := ""
 var _car := ""
+var _car_kick := ""             # "Your car · Porsche · class B"
+var _car_line := ""             # its figures: "160 bhp · 227 km/h · 1,030 kg"
 var _tip := ""
 var _map: TrackMap
 var _time := 0.0
 var _progress := 0.0            # shown
 var _target := 0.0
 var _cap := 0.0                 # the current stage creeps toward this while it runs
-var _stage := ""
+var _stage := "Getting ready"
 var _done := false
 
 
@@ -76,32 +82,37 @@ func _read_game() -> void:
 					run.race + 1, c.races.size()]
 		tips.append("tournament")
 	var facts := PackedStringArray()
-	if Game.is_hs_track(id):
-		facts.append("HIGH STAKES")
+	if Game.is_pu_track(id):
+		_over += "  ·  PORSCHE UNLEASHED"
+	elif Game.is_hs_track(id):
+		_over += "  ·  HIGH STAKES"
 	elif id != Game.PROCEDURAL_TRACK:
-		facts.append("NEED FOR SPEED III")
+		_over += "  ·  NEED FOR SPEED III"
 	if Game.layout > 0:
-		facts.append(Game.LAYOUTS[Game.layout].to_upper())
+		facts.append(Game.LAYOUTS[Game.layout])
 	if m != Game.Mode.FREE_ROAM:
-		facts.append("%d LAP%s" % [Game.laps, "" if Game.laps == 1 else "S"])
+		if Game.is_sprint(id):
+			facts.append("Point to point")
+		else:
+			facts.append("%d lap%s" % [Game.laps, "" if Game.laps == 1 else "s"])
 	if m == Game.Mode.SINGLE_RACE or m == Game.Mode.SPECTATE or m == Game.Mode.HOT_PURSUIT:
 		var n := Game.opponents
-		facts.append("%d RIVAL%s" % [n, "" if n == 1 else "S"])
-	facts.append("NIGHT" if Game.night else "DAY")
+		facts.append("%d rival%s" % [n, "" if n == 1 else "s"])
+	facts.append("Night" if Game.night else "Day")
 	if Game.weather:
 		var dir := Game.track_dir(id)
 		var snow := dir != "" and Nfs3Horizon.peek_precip(dir) == Nfs3Horizon.Precip.SNOW
-		facts.append("SNOW" if snow else "RAIN")
+		facts.append("Snow" if snow else "Rain")
 	if m != Game.Mode.TIME_TRIAL and Game.traffic:
-		facts.append("TRAFFIC")
-	_facts = "   ·   ".join(facts)
+		facts.append("Traffic")
+	_facts = "  ·  ".join(facts)
 	if Game.car_index < Game.cars.size():
-		_car = str(Game.cars[Game.car_index].name).to_upper()
+		_read_car(Game.car_index)
 	var pts := ProceduralTrack.outline() if id == Game.PROCEDURAL_TRACK else Nfs3Track.peek_outline(Game.track_dir(id))
 	if Game.layout_mirrored():
 		for i in pts.size():
 			pts[i].x = -pts[i].x
-	_map.set_outline(pts, _handoff.is_empty())
+	_map.set_outline(pts, _handoff.is_empty(), Game.is_sprint(id))
 	var pool := TIPS.filter(func(t: Array) -> bool: return t[0] in tips)
 	_tip = pool[randi() % pool.size()][1]
 	if not _handoff.is_empty():
@@ -118,7 +129,7 @@ func hand_over() -> void:
 ## A stage of the loading has begun: `label` says what, the bar goes to `from` and creeps
 ## toward `to` until the next stage.
 func stage(label: String, from: float, to: float) -> void:
-	_stage = label.to_upper()
+	_stage = label
 	_target = maxf(_target, from)
 	_cap = to
 	queue_redraw()
@@ -129,7 +140,7 @@ func finish() -> void:
 	if _done:
 		return
 	_done = true
-	_stage = "READY"
+	_stage = "Ready"
 	_target = 1.0
 	var tw := create_tween()
 	tw.tween_interval(0.2)
@@ -137,10 +148,37 @@ func finish() -> void:
 	tw.tween_callback(func(): finished.emit(); queue_free())
 
 
+## Your car's lockup: its name, what it is, and its figures as the game has them.
+func _read_car(i: int) -> void:
+	var spec := Game.car_spec(i)
+	var info: Dictionary = spec.info if "info" in spec else {}
+	_car = str(Game.cars[i].name).to_upper()
+	var kick := PackedStringArray(["Your car"])
+	var cls := int(spec.carp_value(1, -1.0)) if "carp" in spec and spec.carp.has(1) else -1
+	if cls >= 0 and cls <= 2:
+		kick.append("class " + "ABC"[cls])
+	var up := Game.upgrade_of(i) if Game.circuit_run.is_empty() else Game.garage_upgrade(i)
+	if up > 0:
+		kick.append(Car.UPGRADE_NAMES[up].to_lower() + " upgrades")
+	_car_kick = "  ·  ".join(kick)
+	var fig := PackedStringArray()
+	var power := str(info.get("power", "")).to_lower()
+	if power.contains("bhp"):
+		fig.append(power.split("bhp")[0].strip_edges() + " bhp")
+	var kmh: float = spec.carp_value(15, 70.0) * 3.6 * Car.upgrade_mults(up).w
+	fig.append(("%d km/h" % roundi(kmh)) if Game.units_kmh else ("%d mph" % roundi(kmh / 1.609)))
+	var t := CarStats.zero_to_100(spec, up)
+	if t > 0.0:
+		fig.append(("0-100 %.1f s" if Game.units_kmh else "0-62 %.1f s") % t)
+	var kg: float = spec.carp_value(2, 1400.0)
+	fig.append(UiKit.money(roundi(kg if Game.units_kmh else kg * 2.2046)).trim_prefix("$") + (" kg" if Game.units_kmh else " lb"))
+	_car_line = " · ".join(fig)
+
+
 func _layout() -> void:
-	var w := minf(300.0, size.x * 0.24)
-	_map.size = Vector2(w, w * 0.72)
-	_map.position = Vector2(size.x - M - w, maxf(size.y * 0.5 - _map.size.y - 20.0, 110.0))
+	var w := minf(340.0, size.x * 0.26)
+	_map.size = Vector2(w, w * 0.8)
+	_map.position = Vector2(size.x - M - w, 110.0)
 
 
 func _process(dt: float) -> void:
@@ -164,48 +202,40 @@ func _draw() -> void:
 		draw_texture_rect(_tex, Rect2((size - d) * Vector2(0.5, 0.45), d), false, Color(0.62, 0.62, 0.66))
 	_grad(Rect2(0, 0, W * 0.7, H), Color(UiKit.BG, 0.85), Color(UiKit.BG, 0.0), true)
 	_grad(Rect2(0, H * 0.45, W, H * 0.55), Color(UiKit.BG, 0.0), Color(UiKit.BG, 0.95), false)
-	_grad(Rect2(0, 0, W, 130), Color(UiKit.BG, 0.6), Color(UiKit.BG, 0.0), false)
-	# Logo.
+	_grad(Rect2(0, 0, W, 140), Color(UiKit.BG, 0.8), Color(UiKit.BG, 0.0), false)
+	UiKit.shade(self, Rect2(_map.position - Vector2(120, 90), _map.size + Vector2(240, 300)), 0.55)
+	# The logo, as the menu's bar has it.
 	var lf := UiKit.font("display")
-	draw_string(lf, Vector2(M, 58), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 40, UiKit.ACCENT)
-	var lw := lf.get_string_size("NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
-	draw_string(UiKit.font("cond_med", 6), Vector2(M + lw + 10, 57), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, UiKit.INK)
-	UiKit.draw_slant(self, Rect2(M, 68, 132, 3), UiKit.ACCENT, 0.9)
-	# The map and your car, right.
+	draw_string(lf, Vector2(M, 44), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, UiKit.ACCENT)
+	var lw := lf.get_string_size("NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30).x
+	draw_string(UiKit.font("cond_med", 5), Vector2(M + lw + 8, 43), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 19, UiKit.INK)
+	# The map (open start to flag on a point-to-point run) and your car, right.
 	var mx := _map.position.x
 	var mw := _map.size.x
-	var cf := UiKit.font("cond", 3)
-	draw_string(cf, Vector2(mx, _map.position.y - 10), "TRACK", HORIZONTAL_ALIGNMENT_LEFT, mw, 12, UiKit.ACCENT)
+	var bf := UiKit.font("body")
 	if _map.length_m > 0.0:
 		var km := _map.length_m / 1000.0
-		var len := "%.1f KM LAP" % km if Game.units_kmh else "%.1f MI LAP" % (km / 1.609)
-		draw_string(cf, Vector2(mx, _map.position.y - 10), len, HORIZONTAL_ALIGNMENT_RIGHT, mw, 12, UiKit.INK_DIM)
-	var cy := _map.position.y + _map.size.y + 40
+		UiKit.kicker(self, Vector2(mx, _map.position.y - 12), "Route" if _map.open else "The lap", mw)
+		draw_string(bf, Vector2(mx, _map.position.y - 12), UiKit.dist(km), HORIZONTAL_ALIGNMENT_RIGHT, mw, 15, UiKit.INK_DIM)
 	if _car != "":
-		draw_string(cf, Vector2(mx, cy), "YOUR CAR", HORIZONTAL_ALIGNMENT_RIGHT, mw, 12, UiKit.ACCENT)
-		var fs := 30
-		while fs > 16 and lf.get_string_size(_car, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > mw + 60:
-			fs -= 2
-		draw_string(lf, Vector2(W - M - 400, cy + 34), _car, HORIZONTAL_ALIGNMENT_RIGHT, 400, fs, UiKit.INK)
-	# What's being raced, bottom left.
-	var bar_y := H - 44.0
-	var tip_y := bar_y - 44.0
-	var facts_y := tip_y - 44.0
+		var cy := _map.position.y + _map.size.y + 34
+		PickCard.draw_lockup(self, Vector2(mx, cy), mw, _car_kick, _car, _car_line, 30)
+	# What's being raced, bottom left: the kicker, the track's name large, its facts.
+	var bar_y := H - 40.0
+	var tip_y := bar_y - 46.0
+	var facts_y := tip_y - 40.0
 	var name_y := facts_y - 30.0
-	var fs := 84
-	var max_w := W * 0.62
-	while fs > 40 and lf.get_string_size(_title, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > max_w:
-		fs -= 4
-	draw_string(cf, Vector2(M, name_y - fs * 0.86 - 14), _over, HORIZONTAL_ALIGNMENT_LEFT, max_w, 15, _over_col)
+	var max_w := W - M * 3 - mw
+	var fs := UiKit.fit("display", _title, max_w, 96, 40)
+	UiKit.kicker(self, Vector2(M, name_y - fs * 0.86 - 16), _over, max_w, _over_col)
 	draw_string(lf, Vector2(M - 3, name_y), _title, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, UiKit.INK)
-	draw_string(UiKit.font("cond", 2), Vector2(M, facts_y), _facts, HORIZONTAL_ALIGNMENT_LEFT, W - M * 2, 15, UiKit.INK_DIM)
+	draw_string(bf, Vector2(M, facts_y), _facts, HORIZONTAL_ALIGNMENT_LEFT, max_w, 18, Color(UiKit.INK, 0.85))
 	# A tip.
-	var kw := UiKit.draw_key(self, Vector2(M, tip_y - 5), "TIP", 12, UiKit.ACCENT)
-	draw_string(UiKit.font("body"), Vector2(M + kw + 12, tip_y), _tip, HORIZONTAL_ALIGNMENT_LEFT, W - M * 2 - kw - 12, 15,
-		Color(UiKit.INK, 0.8))
-	# The bar, with the stage over it and a sheen running along what's done.
-	var br := Rect2(M, bar_y, W - M * 2, 4)
-	draw_rect(br, Color(1, 1, 1, 0.12))
+	UiKit.kicker(self, Vector2(M, tip_y), "Tip", 40)
+	draw_string(bf, Vector2(M + 40, tip_y), _tip, HORIZONTAL_ALIGNMENT_LEFT, W - M * 2 - 40, 15, UiKit.INK_DIM)
+	# The progress: what's being done and how far, over a thin line with a sheen.
+	var br := Rect2(M, bar_y, W - M * 2, 3)
+	draw_rect(br, Color(1, 1, 1, 0.14))
 	var fw := br.size.x * clampf(_progress, 0.0, 1.0)
 	draw_rect(Rect2(br.position, Vector2(fw, br.size.y)), UiKit.ACCENT)
 	var sx := br.position.x + fmod(_time * 260.0, maxf(fw + 120.0, 1.0)) - 60.0
@@ -214,10 +244,10 @@ func _draw() -> void:
 		var b := clampf(sx + 60.0 - br.position.x, 0.0, fw)
 		if b > a:
 			draw_rect(Rect2(br.position.x + a, br.position.y, b - a, br.size.y), Color(1, 0.95, 0.75, 0.8))
-	var dots := ".".repeat(int(_time * 3.0) % 4) if not _done else ""
-	draw_string(cf, Vector2(M, bar_y - 12), _stage + dots, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, UiKit.INK_DIM)
-	draw_string(UiKit.font("cond", 2, true), Vector2(M, bar_y - 12), "%d%%" % roundi(_progress * 100.0),
-		HORIZONTAL_ALIGNMENT_RIGHT, br.size.x, 13, UiKit.INK)
+	var dots := "…" if not _done else ""
+	draw_string(bf, Vector2(M, bar_y - 12), _stage + dots, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, UiKit.INK_DIM)
+	draw_string(UiKit.font("cond", 1, true), Vector2(M, bar_y - 12), "%d%%" % roundi(_progress * 100.0),
+		HORIZONTAL_ALIGNMENT_RIGHT, br.size.x, 14, UiKit.INK)
 
 
 func _grad(r: Rect2, from: Color, to: Color, horizontal: bool) -> void:

@@ -31,12 +31,18 @@ const TYPE_CAR_RACE := 2
 ## (as open), or a car lent for it (none of yours).
 enum { CLASS, CLASS_AND_UNDER, OPEN, MODEL, MANUFACTURER, OPEN_MODEL, LOANER }
 const CLASS_NAMES := ["AAA", "AA", "A", "B"]
-## A car race's prize (its first "prize", 1..8) as the serial of the car won; -1 none.
-const AWARD_CARS := [41, 42, -1, -1, 4, 35, 31, 16]
+## A car race's prize (its first "prize", 1..9) as the serial of the car won; -1 none. A
+## tournament circuit whose first prize is as small (the Pro Cups: 1, 2, 9) gives that car
+## to its winner instead of money. The ninth, La Niña's cup, isn't in the program's table:
+## La Niña is taken to be its car.
+const AWARD_CARS := [41, 42, -1, -1, 4, 35, 31, 16, 39]
+## Below this a circuit's first "prize" is an AWARD_CARS number, not dollars.
+const AWARD_MAX := 100.0
 
 var tournaments: Array[Dictionary] = []   # {id, name, open, circuits: [id], unlocks: [id]}
 ## id -> {id, type, fee, races: [{track, reverse, mirror, night, weather}], opponents, laps,
-## restriction, value, prizes: [$], award (serial or -1), pace, mam: [3 row indices]}
+## restriction, value, prizes: [$], award (serial of the car the winner gets, or -1), pace,
+## mam: [3 row indices]}
 var circuits := {}
 var mam: Array[Vector3i] = []             # mam.dat's rows, {min, mid, max}
 var makes := PackedStringArray()          # man.dat's lines
@@ -77,9 +83,12 @@ static func load_dir(text_dir: String) -> HsCareer:
 				"mirror": circ.decode_s32(q + 8) != 0, "night": circ.decode_s32(q + 12) != 0,
 				"weather": circ.decode_s32(q + 16) != 0})
 		var award := -1
-		if type == TYPE_CAR_RACE:
-			var k := roundi(circ.decode_float(p + 32)) - 1
+		var first := circ.decode_float(p + 32)
+		if type == TYPE_CAR_RACE or (first > 0.0 and first < AWARD_MAX):
+			var k := roundi(first) - 1
 			award = AWARD_CARS[k] if k >= 0 and k < AWARD_CARS.size() else -1
+			if type != TYPE_CAR_RACE:
+				prizes[0] = 0.0
 		var rows := []
 		for k in 3:
 			rows.append(circ.decode_s32(p + 96 + k * 4))

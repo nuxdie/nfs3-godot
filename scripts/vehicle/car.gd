@@ -43,6 +43,10 @@ static var body_sway := true
 ## Beyond this (m) from the camera nobody sees the wheels turn, the body sway or the tyre
 ## effects: the car skips them (see `far`).
 const DETAIL_RANGE := 140.0
+## Porsche Unleashed's Carreras raise their rear spoiler above this speed (m/s, 80 km/h)
+## and lower it again below the second (15 km/h), as the real cars do.
+const SPOILER_UP := 22.2
+const SPOILER_DOWN := 4.2
 const REST_AFTER := 1.0   # s an AI car is held motionless before it sleeps
 ## Whether brake and reversing lamps cast real light (Low quality: just the glowing lamps).
 static var lamp_lights := true
@@ -174,6 +178,10 @@ var _brake_lights: Array[Node3D] = []
 var _lamps: Array[Node3D] = []   # head and running tail glows, shown while the headlights are on
 var _head_glows: Array[Node3D] = []
 var _popups: Array[Node3D] = []   # pop-up headlamps, raised while the headlights are on
+var _popup_covers: Array[Node3D] = []   # Porsche Unleashed: the same lamps down, shown while they're off
+var _spoiler_down: Array[Node3D] = []   # Porsche Unleashed: the Carrera's rear spoiler lowered...
+var _spoiler_up: Array[Node3D] = []     # ... and raised, above SPOILER_UP until below SPOILER_DOWN
+var _spoiler_raised := false
 var _plates: Array[Node3D] = []   # the licence plate (High Stakes cars)
 var _dash_data := {}              # the car file's in-car view (High Stakes), built on first use
 var _dash: Node3D                 # ...its dashboard, seats and doors, shown instead of the body
@@ -184,7 +192,7 @@ var _dash_lit: Array[Node3D] = []
 var _dash_mats: Array[Material] = []   # the needles' materials: [by day, lit]
 var _dash_lit_on := false
 var _paint := Color.WHITE
-var _steer_mat: ShaderMaterial      # High Stakes: the body's material, turning the driver's wheel
+var _steer_mats: Array[ShaderMaterial] = []   # the materials turning the steering wheel and the driver's hands
 var _steer_shown := 0.0
 var _reverse_lights: Array[Node3D] = []
 var _reverse_xf: Transform3D     # where the reversing lamps' light cone starts, local
@@ -269,6 +277,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		var sm := ShaderMaterial.new()
 		sm.shader = Game.shader("res://shaders/car.gdshader")
 		sm.set_shader_parameter("albedo_tex", data.texture)
+		if data.damage_texture:
+			sm.set_shader_parameter("damage_tex", data.damage_texture)
 		var paint := tint
 		if paint.a == 0.0:
 			paint = data.colours[0] if data.colours.size() > 0 else Color.WHITE
@@ -279,6 +289,13 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		wheel_mat = sm.duplicate()
 		wheel_mat.set_shader_parameter("wheel", true)
 	var glass_mat: Material = null
+	# The people inside: cloth and skin, not paint (car_driver.gdshader).
+	var driver_mat: ShaderMaterial = null
+	if data.texture:
+		driver_mat = ShaderMaterial.new()
+		driver_mat.shader = Game.shader("res://shaders/car_driver.gdshader")
+		driver_mat.set_shader_parameter("albedo_tex", data.texture)
+		driver_mat.set_shader_parameter("paint", _paint)
 	for p in data.body_parts:
 		var mi := MeshInstance3D.new()
 		mi.mesh = p.mesh
@@ -292,15 +309,25 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 				glass_mat = gm
 			mi.material_override = glass_mat
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		elif p.get("driver", false) and driver_mat:
+			mi.material_override = driver_mat
 		elif mat:
 			mi.material_override = mat
-		if p.has("steering") and mat is ShaderMaterial:
-			_steer_mat = mat
-			_steer_mat.set_shader_parameter("steer_pivot", p.steering.pivot)
-			_steer_mat.set_shader_parameter("steer_axis", p.steering.axis)
+		var part_mat := mi.material_override as ShaderMaterial
+		if p.has("steering") and part_mat and not part_mat in _steer_mats:
+			part_mat.set_shader_parameter("steer_pivot", p.steering.pivot)
+			part_mat.set_shader_parameter("steer_axis", p.steering.axis)
+			_steer_mats.append(part_mat)
 		# Where each vertex goes in the model's own damaged copy, for CarDamage.
 		if p.has("damaged"):
 			mi.set_meta("damaged", p.damaged)
+		if p.get("popup_closed", false):
+			_popup_covers.append(mi)
+		match p.get("spoiler", ""):
+			"down": _spoiler_down.append(mi)
+			"up":
+				_spoiler_up.append(mi)
+				mi.visible = false
 		_body_tilt.add_child(mi)
 		_body_meshes.append(mi)
 	for p in data.popup_lights:
@@ -688,6 +715,30 @@ func set_headlight_beam(allowed: bool, per_lamp := false) -> void:
 	set_headlights(headlights_on)
 
 
+func _set_spoiler(up: bool) -> void:
+	_spoiler_raised = up
+	var inside := _dash != null and _dash.visible
+	for mi in _spoiler_up:
+		mi.visible = up and not inside
+	for mi in _spoiler_down:
+		mi.visible = not up and not inside
+
+
+## Repaints the car where it stands (the menu's paint choice): every part in the skin's
+## material takes `tint` (alpha 0: the car's first colour), as setup() gave it.
+func set_paint(tint: Color) -> void:
+	var c := tint
+	if c.a == 0.0:
+		c = car_data.colours[0] if car_data and car_data.colours.size() > 0 else Color.WHITE
+	_paint = c
+	var done := {}
+	for n in find_children("*", "MeshInstance3D", true, false):
+		var m := (n as MeshInstance3D).material_override as ShaderMaterial
+		if m and not done.has(m) and m.get_shader_parameter("paint") != null:
+			m.set_shader_parameter("paint", c)
+			done[m] = true
+
+
 func set_headlights(on: bool) -> void:
 	headlights_on = on
 	for i in _beams.size():
@@ -696,6 +747,8 @@ func set_headlights(on: bool) -> void:
 		l.visible = on
 	for l in _popups:
 		l.visible = on and not (_dash and _dash.visible)
+	for l in _popup_covers:
+		l.visible = not on and not (_dash and _dash.visible)
 
 
 func set_high_beam(on: bool) -> void:
@@ -1345,7 +1398,8 @@ func set_cockpit(on: bool) -> bool:
 	if _dash:
 		_dash.visible = on
 	for mi in _body_meshes + _popups:
-		mi.visible = not on and (headlights_on or not (mi in _popups))
+		mi.visible = not on and (headlights_on or not (mi in _popups)) and not (headlights_on and mi in _popup_covers) \
+			and not (mi in _spoiler_up and not _spoiler_raised) and not (mi in _spoiler_down and _spoiler_raised)
 	for p in _plates:
 		p.visible = not on
 	for w in _wheels:
@@ -1362,6 +1416,7 @@ func _build_dash() -> void:
 	mat.shader = Game.shader("res://shaders/car.gdshader")
 	mat.set_shader_parameter("albedo_tex", _dash_data.texture)
 	mat.set_shader_parameter("paint", _paint)
+	mat.set_shader_parameter("interior", true)
 	# The dials' night faces: their markings lit, whatever the light.
 	var lit_mat := StandardMaterial3D.new()
 	lit_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1477,10 +1532,15 @@ func _process(dt: float) -> void:
 			w[0].visible = _flash_lit(w[1], _siren_t)
 	if _dash and _dash.visible:
 		_update_dash()
+	if not _spoiler_up.is_empty():
+		var v := absf(speed)
+		if v > SPOILER_UP and not _spoiler_raised or v < SPOILER_DOWN and _spoiler_raised:
+			_set_spoiler(not _spoiler_raised)
 	# The driver turns his wheel as far as the in-car view's.
-	if _steer_mat and wheel_turn() != _steer_shown:
+	if not _steer_mats.is_empty() and wheel_turn() != _steer_shown:
 		_steer_shown = wheel_turn()
-		_steer_mat.set_shader_parameter("steer_angle", _steer_shown)
+		for m in _steer_mats:
+			m.set_shader_parameter("steer_angle", _steer_shown)
 	# Far off (or parked asleep) the wheels and body keep the pose they had.
 	if far or freeze or resting:
 		return

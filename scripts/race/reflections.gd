@@ -5,8 +5,11 @@ extends Node3D
 ##   lamps glint on it in long streaks; on High it mirrors the scene itself, drawn by a second
 ##   camera from under the road (only while the road is wet);
 ## - the procedural track's road (lit, unlike the NFS3 one) gets smoother as it gets wet;
-## - car paint reflects the track around the player's car through a reflection probe riding
-##   with it (not on Low: it's six extra renders of the scene).
+## - on High, the player's car paint reflects the track through a reflection probe riding
+##   with it (six extra renders of the scene a frame). The box hugs that car: the probe sees
+##   the track from where it sits, so any other car reaching into it would mirror it from the
+##   wrong place, and a car half in the box shows a hard seam between the probe and the sky.
+##   Everything else, and every car on Medium and Low, reflects the sky.
 
 const MAX_LAMPS := 16             # MAX_LAMPS in track.gdshader
 const LAMPS := [6, 12, 16]        # by Game.quality
@@ -17,9 +20,10 @@ const MIRROR_SCALE := 0.5         # of the main view's 3D resolution
 const MIRROR_DISTANCE := 300.0
 ## Wetness below which the road is drawn dry and the mirror camera sleeps.
 const DRY := 0.02
-## A probe that updates in slices (Medium) is moved this often; its box is big enough that
-## the car stays inside meanwhile.
-const PROBE_STEP := 1.0
+## The probe's box around the player's car (m, car-local), and how far inside its faces it
+## fades out to the sky.
+const PROBE_SIZE := Vector3(5.0, 4.0, 7.5)
+const PROBE_BLEND := 1.2
 
 var path: TrackPath
 
@@ -31,8 +35,6 @@ var _mirror_mat: ShaderMaterial
 var _vp: SubViewport
 var _cam: Camera3D
 var _probe: ReflectionProbe
-var _probe_car: Car
-var _probe_t := 0.0
 var _node := -1
 var _wet := -1.0
 
@@ -51,38 +53,27 @@ func setup(track_root: Node3D, p_path: TrackPath, env: Environment, track_mat: S
 		_build_mirror(track_root)
 
 
-## Hangs the paint's reflection probe on `car`.
+## Hangs the paint's reflection probe on `car` (High quality only).
 func follow(car: Car) -> void:
-	if Game.quality == Game.Quality.LOW:
+	if Game.quality != Game.Quality.HIGH:
 		return
-	_probe_car = car
 	_probe = ReflectionProbe.new()
 	# The track and scenery: not the cars (it sits inside one), the mirror's copies or the rain.
 	_probe.cull_mask = 1
 	_probe.max_distance = 250.0
 	_probe.enable_shadows = false
-	if Game.quality == Game.Quality.HIGH:
-		_probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
-		_probe.size = Vector3(40.0, 16.0, 40.0)
-		_probe.position = Vector3.UP
-		car.add_child(_probe)
-	else:
-		# Moving a probe starts its update over, so it only moves every PROBE_STEP.
-		_probe.update_mode = ReflectionProbe.UPDATE_ONCE
-		_probe.size = Vector3(110.0, 30.0, 110.0)
-		add_child(_probe)
-		_probe.global_position = car.global_position + Vector3.UP
+	_probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
+	_probe.size = PROBE_SIZE
+	_probe.blend_distance = PROBE_BLEND
+	# Captured from the roof, so the road fills the lower half of what the paint mirrors.
+	_probe.position = Vector3.UP
+	car.add_child(_probe)
 
 
 ## Moves the probe onto another car (spectating switches cars mid-race).
 func retarget(car: Car) -> void:
-	if _probe == null:
-		return
-	_probe_car = car
-	if _probe.update_mode == ReflectionProbe.UPDATE_ALWAYS:
+	if _probe:
 		_probe.reparent(car, false)
-	else:
-		_probe_t = 0.0
 
 
 func _build_mirror(track_root: Node3D) -> void:
@@ -118,7 +109,7 @@ func _build_mirror(track_root: Node3D) -> void:
 	_track_mat.set_shader_parameter("mirror_tex", _vp.get_texture())
 
 
-func _process(dt: float) -> void:
+func _process(_dt: float) -> void:
 	var eye_cam := get_viewport().get_camera_3d()
 	if eye_cam == null:
 		return
@@ -128,11 +119,6 @@ func _process(dt: float) -> void:
 	elif _road_mat and absf(wet - _wet) > 0.005:
 		_road_mat.set_shader_parameter("wetness", wet)
 	_wet = wet
-	if _probe and _probe.update_mode == ReflectionProbe.UPDATE_ONCE and is_instance_valid(_probe_car):
-		_probe_t -= dt
-		if _probe_t <= 0.0:
-			_probe_t = PROBE_STEP
-			_probe.global_position = _probe_car.global_position + Vector3.UP
 
 
 func _update_track(eye_cam: Camera3D, wet: float) -> void:

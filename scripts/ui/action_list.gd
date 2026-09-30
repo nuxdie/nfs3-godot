@@ -1,8 +1,9 @@
 class_name ActionList
 extends Control
-## A column (or row) of big slanted menu actions: up/down (left/right when
-## horizontal) moves, accept activates, the mouse hovers and clicks. Used by the
-## pause and results screens. Handles its own input while visible.
+## A column (or row) of menu actions: up/down (left/right when horizontal) moves, accept
+## activates, the mouse hovers and clicks. The one in focus is filled with the accent. Used by
+## the pause and results screens. Set as big type; the one in focus bright, with the accent's
+## wash behind it and a chevron. Handles its own input while visible.
 
 signal activated(index: int)
 
@@ -12,8 +13,8 @@ var focus := 0
 var item_size := Vector2(300, 50)
 var gap := 8.0
 
-## Vertical lists step each item right so the column follows the slant.
-const STAIR := 0.22
+## Vertical lists could step each item right (0: a straight column).
+const STAIR := 0.0
 
 var _t: Array[float] = []     # per-item animated highlight
 var _hover := -1
@@ -99,15 +100,16 @@ func _process(dt: float) -> void:
 
 func _draw() -> void:
 	var f := UiKit.font("display")
-	var fs := int(item_size.y * 0.52)
+	var fs := int(item_size.y * 0.56)
 	for i in items.size():
 		var r := _item_rect(i)
 		var t := _t[i]
-		UiKit.draw_slant(self, r, Color(1, 1, 1, 0.06))
-		if t > 0.01:
-			var hr := Rect2(r.position, Vector2(lerpf(12.0, r.size.x, t), r.size.y))
-			UiKit.draw_slant(self, hr, Color(UiKit.ACCENT, t))
-		UiKit.draw_slant(self, Rect2(r.position, Vector2(6, r.size.y)), UiKit.ACCENT)
-		var col := UiKit.INK.lerp(UiKit.BG, t)
-		var x := r.position.x + r.size.y * UiKit.SLANT + 18 + 8 * t
-		draw_string(f, Vector2(x, r.get_center().y + fs * 0.36), items[i].to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
+		UiKit.glow(self, r, t)
+		if i == _hover and t < 0.5:
+			UiKit.glow(self, r, 0.4, UiKit.INK, false)
+		var col := UiKit.INK_DIM.lerp(UiKit.INK, t)
+		var x := r.position.x + 18 + 6 * t
+		draw_string(f, Vector2(x, r.get_center().y + fs * 0.36), items[i].to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
+			r.size.x - 50, fs, col)
+		if t > 0.05:
+			UiKit.chevron(self, Vector2(r.end.x - 22 - 6 * (1.0 - t), r.get_center().y), 1, Color(UiKit.ACCENT, t), 6.0, 2.5)

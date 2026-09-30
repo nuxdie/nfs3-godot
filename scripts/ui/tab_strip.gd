@@ -1,8 +1,9 @@
 class_name TabStrip
 extends Control
-## A row of choices with one picked: the big mode tabs across the top of the menu (TABS)
-## or small filter chips in the browsers (CHIPS). Every choice is visible and a click
-## away; the owner steps it from the keyboard or pad with step().
+## A row of choices with one picked: page tabs (TABS: words, the picked one white with an
+## accent line under it, and optional key caps either side for the keys that step them) or
+## filters (CHIPS: smaller words, the picked one in the accent). Every choice is visible and a click away; the owner
+## steps it from the keyboard or pad with step().
 
 signal changed(index: int)
 
@@ -13,6 +14,9 @@ var index := 0
 var style := Style.TABS
 ## Key caps drawn either side of TABS ("Q", "E"): the keys that step it.
 var keys := PackedStringArray()
+## A short value drawn after a tab's name, in the accent ("$5,340"); "" for none.
+var badges := PackedStringArray()
+var font_size := 0              # 0: the style's own
 
 var _rects: Array[Rect2] = []
 var _hover := -1
@@ -38,6 +42,13 @@ func set_items(p_items: PackedStringArray, p_index := 0) -> void:
 	_sel = _rects[index] if index < _rects.size() else Rect2()
 
 
+func set_badges(b: PackedStringArray) -> void:
+	if b == badges:
+		return
+	badges = b
+	_measure()
+
+
 func select(i: int) -> void:
 	i = clampi(i, 0, items.size() - 1)
 	if i == index:
@@ -58,25 +69,33 @@ func content_width() -> float:
 
 
 func _font() -> Font:
-	return UiKit.font("display") if style == Style.TABS else UiKit.font("cond", 2)
+	return UiKit.font("cond", 2) if style == Style.TABS else UiKit.font("cond", 1)
 
 
 func _font_size() -> int:
-	return 22 if style == Style.TABS else 13
+	if font_size > 0:
+		return font_size
+	return 17 if style == Style.TABS else 14
+
+
+func _badge(i: int) -> String:
+	return badges[i] if i < badges.size() else ""
 
 
 func _measure() -> void:
 	_rects.clear()
 	var f := _font()
 	var fs := _font_size()
-	var pad := 16.0 if style == Style.TABS else 11.0
-	var gap := 2.0 if style == Style.TABS else 6.0
+	var pad := 14.0 if style == Style.TABS else 8.0
+	var gap := 6.0 if style == Style.TABS else 4.0
 	_key_w = 0.0
 	if style == Style.TABS and keys.size() == 2:
-		_key_w = UiKit.text_width("cond", keys[0], 13, 1) + 12.0 + 10.0
+		_key_w = UiKit.key_width(keys[0], 12) + 10.0
 	var x := _key_w
-	for it in items:
-		var w := f.get_string_size(it.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + pad * 2.0
+	for i in items.size():
+		var w := f.get_string_size(items[i].to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + pad * 2.0
+		if _badge(i) != "":
+			w += UiKit.text_width("cond", _badge(i), fs - 2, 1, true) + 10.0
 		_rects.append(Rect2(x, 0, w, size.y))
 		x += w + gap
 	custom_minimum_size.x = content_width()
@@ -91,7 +110,7 @@ func _process(dt: float) -> void:
 	var to := _rects[index]
 	if _sel.position.distance_to(to.position) + absf(_sel.size.x - to.size.x) < 0.3:
 		return
-	var k := 1.0 - exp(-18.0 * dt)
+	var k := 1.0 - exp(-20.0 * dt)
 	_sel = Rect2(_sel.position.lerp(to.position, k), _sel.size.lerp(to.size, k))
 	queue_redraw()
 
@@ -133,26 +152,27 @@ func _notification(what: int) -> void:
 func _draw() -> void:
 	var f := _font()
 	var fs := _font_size()
+	var cy := size.y * 0.5
 	if style == Style.TABS:
-		if keys.size() == 2:
-			UiKit.draw_key(self, Vector2(0, size.y * 0.5), keys[0], 13, UiKit.INK_DIM)
-			UiKit.draw_key(self, Vector2(_rects[-1].end.x + 10.0, size.y * 0.5), keys[1], 13, UiKit.INK_DIM)
-		# Picked: a lit slab behind it with an accent bar underneath.
-		UiKit.draw_slant(self, _sel, Color(1, 1, 1, 0.08), 0.18)
-		UiKit.draw_slant(self, Rect2(_sel.position.x, size.y - 3, _sel.size.x, 3), UiKit.ACCENT, 0.5)
+		if keys.size() == 2 and not _rects.is_empty():
+			UiKit.draw_key(self, Vector2(0, cy), keys[0], 12, UiKit.INK_FAINT)
+			UiKit.draw_key(self, Vector2(_rects[-1].end.x + 10.0, cy), keys[1], 12, UiKit.INK_FAINT)
+		UiKit.box(self, Rect2(_sel.position.x + 10, size.y - 3, _sel.size.x - 20, 3), UiKit.ACCENT, 1)
 		for i in items.size():
 			var r := _rects[i]
-			var col := UiKit.INK if i == index else (UiKit.ACCENT if i == _hover else UiKit.INK_DIM)
-			draw_string(f, Vector2(r.position.x, r.get_center().y + fs * 0.36), items[i].to_upper(),
-				HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, col)
+			var col := UiKit.INK if i == index or i == _hover else UiKit.INK_DIM
+			var label := items[i].to_upper()
+			var x := r.position.x + 14.0
+			draw_string(f, Vector2(x, cy + fs * 0.36), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
+			if _badge(i) != "":
+				x += f.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + 10.0
+				draw_string(UiKit.font("cond", 1, true), Vector2(x, cy + fs * 0.36), _badge(i), HORIZONTAL_ALIGNMENT_LEFT, -1,
+					fs - 2, UiKit.ACCENT if i == index else Color(UiKit.ACCENT, 0.75))
 	else:
+		# Filters: words, the picked one in the accent with a line under it.
+		draw_rect(Rect2(_sel.position.x + 8, size.y - 4, _sel.size.x - 16, 2), UiKit.ACCENT)
 		for i in items.size():
 			var r := _rects[i]
-			if i != index:
-				UiKit.draw_slant(self, r, Color(1, 1, 1, 0.14 if i == _hover else 0.06), 0.3)
-		UiKit.draw_slant(self, _sel, UiKit.ACCENT, 0.3)
-		for i in items.size():
-			var r := _rects[i]
-			var col := UiKit.BG if i == index else (UiKit.INK if i == _hover else UiKit.INK_DIM)
-			draw_string(f, Vector2(r.position.x, r.get_center().y + fs * 0.36), items[i].to_upper(),
+			var col := UiKit.ACCENT if i == index else (UiKit.INK if i == _hover else UiKit.INK_DIM)
+			draw_string(f, Vector2(r.position.x, cy + fs * 0.36), items[i].to_upper(),
 				HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, col)

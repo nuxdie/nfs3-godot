@@ -12,6 +12,7 @@ var track_mat: ShaderMaterial  # NFS3 track only: takes the night tint and headl
 var horizon: Nfs3Horizon       # set by light(); null without one
 var env: Environment
 var sun: DirectionalLight3D
+var mirrored := false          # laid out mirrored: the sun and the horizon's panorama go with it
 
 var _nodes: Array[Node] = []   # what light() added, so it can be lit again
 
@@ -24,12 +25,16 @@ static func load_track(track_id: String, night := false, layout := 0) -> TrackWo
 	w.id = track_id
 	w.root = Node3D.new()
 	w.root.name = "Track"
+	w.mirrored = Game.layout_mirrored(layout) and Game.track_dir(track_id) != ""
 	if Game.track_dir(track_id) != "":
 		var t := Nfs3Track.load_dir(Game.track_dir(track_id), night)
 		if t.error == "" and Game.layout_mirrored(layout):
+			var remake := Game.hs_remake(track_id)
+			if remake != "":
+				t.borrow_mirror_images(Fsh.load_file(Game.find_ci(Game.track_dir(remake), "tr0.qfs")))
 			t.mirror_world()
 		if t.error == "" and t.vroad.size() > 10:
-			w.path = Nfs3TrackBuilder.build(t, w.root)
+			w.path = Nfs5TrackBuilder.build(t, w.root) if t is Nfs5Track else Nfs3TrackBuilder.build(t, w.root)
 			w.track_mat = w.root.get_meta("track_material")
 			w.track = t
 		else:
@@ -78,7 +83,7 @@ func light(parent: Node, night: bool, weather: bool, vp: Viewport = null) -> voi
 	we.environment = e
 	env = e
 	sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, -35, 0)
+	sun.rotation_degrees = Vector3(-55, 35 if mirrored else -35, 0)
 	sun.light_energy = 1.1
 	sun.shadow_enabled = true
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
@@ -177,6 +182,7 @@ func _apply_horizon(h: Nfs3Horizon, e: Environment, sky: Sky, night: bool, weath
 		mat.set_shader_parameter("panorama", ImageTexture.create_from_image(h.panorama))
 		mat.set_shader_parameter("has_panorama", true)
 		mat.set_shader_parameter("mirror", h.mirror)
+		mat.set_shader_parameter("flip", mirrored)
 		mat.set_shader_parameter("pano_rotation", deg_to_rad(h.rotation))
 		mat.set_shader_parameter("pano_top", sin(atan2(h.pixmap_top, h.radius)))
 		mat.set_shader_parameter("pano_bottom", sin(atan2(h.pixmap_bottom, h.radius)))

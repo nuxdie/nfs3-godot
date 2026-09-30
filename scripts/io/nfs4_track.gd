@@ -82,13 +82,15 @@ static func load_dir(dir: String, night := false) -> Nfs3Track:
 		t.error = "missing texture archive"
 		return t
 	# Texture ids count the archive's entries leaving out the "<mirrored>" copies of lettered
-	# textures (signs), which only the mirrored tracks use. Glows, fire and light rays are
+	# textures (signs), which only the mirrored tracks use (mirror_images). Glows, fire and light rays are
 	# tagged "<additive>" (on one of Hometown's, "additive").
 	var additive := PackedByteArray()
 	for i in fsh.images.size():
 		if fsh.tags[i] != "<mirrored>":
 			t.images.append(fsh.images[i])
 			additive.append(int("additive" in fsh.tags[i]))
+	for c: Array in Nfs3Track.mirrored_copies(fsh.names, fsh.images, fsh.tags):
+		t.mirror_images[t.images.find(fsh.images[c[0]])] = fsh.images[c[1]]
 	for ti in t.textures:
 		if not ti.is_lane and ti.qfs_index < t.images.size():
 			var img := t.images[ti.qfs_index]

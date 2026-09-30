@@ -30,16 +30,17 @@ func _on_node_added(n: Node) -> void:
 		n.changed.connect(func(_i: int) -> void: play(CLICK))
 	elif n is TabStrip:
 		n.changed.connect(func(_i: int) -> void: play(CLICK))
-	elif n is StepBar:
-		n.chosen.connect(func(_i: int) -> void: play(CLICK))
+	elif n is PickCard:
+		n.pressed.connect(func() -> void: play(SELECT))
 	elif n is BigButton:
 		n.pressed.connect(func() -> void: play(SELECT))
-	elif n is MenuList:
-		n.focus_changed.connect(func(_i: int) -> void: play(TICK))
-		n.activated.connect(func(_i: int) -> void: play(SELECT))
 	elif n is TournamentPanel:
 		n.focus_changed.connect(func() -> void: play(TICK))
 		n.chosen.connect(func(_t: Dictionary, _c: int) -> void: play(SELECT))
+	elif n is GaragePanel:
+		n.focus_changed.connect(func(_i: int) -> void: play(TICK))
+		n.transacted.connect(func() -> void: play(SELECT))
+		n.chosen.connect(func(_i: int) -> void: play(SELECT))
 	elif n is ActionList:
 		n.activated.connect(func(_i: int) -> void: play(SELECT))
 	elif n is BrowserBase:

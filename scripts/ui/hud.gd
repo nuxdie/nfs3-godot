@@ -9,7 +9,6 @@ const RED := UiKit.COP_RED
 const GO := Color(0.35, 1.0, 0.5)
 const M := 36.0
 # An unlit ticket / heat pip: dark, so it reads over sky and road alike.
-const EMPTY_PIP := Color(0.05, 0.055, 0.07, 0.4)
 
 var race: Node
 var player: Car:
@@ -126,6 +125,12 @@ func _apply_hud() -> void:
 	if _classic:
 		_classic.visible = Game.hud_shows("speed")
 		_classic.placement = Game.hud_style - 1
+	# Now playing sits top right, under High Stakes' dials when they're up there.
+	if Game.music:
+		var np := Game.music.now_playing
+		np.reset_place()
+		if _classic and _classic.visible and _classic.placement == ClassicGauges.Placement.TOP:
+			np.top = ClassicGauges.dial_height(_root.size.y if _root.size.y > 0 else 720.0) + 30.0
 	_mirror.visible = Game.hud_shows("mirror")
 
 
@@ -238,8 +243,11 @@ func update_results(rows: Array) -> void:
 ## `rows`: [{name, time, best, you?, t?}] in finishing order.
 ## `actions`: [[label, Callable]] in place of "Race again" and "Main menu" (a tournament's
 ## next race).
-func show_results(title: String, rows: Array, extra: String, actions: Array = []) -> void:
-	_results_data = {"title": title, "rows": rows, "extra": extra}
+## A tournament's race also has `circuit`: {caption, standings: [{name, you, race (place, 0
+## not in it), gained, points, out}], and at the end of the circuit tour (the tournament's
+## id, for its trophy's design), trophy (1..3, 0 none), lines (what it won, in order)}.
+func show_results(title: String, rows: Array, extra: String, actions: Array = [], circuit := {}) -> void:
+	_results_data = {"title": title, "rows": rows, "extra": extra, "circuit": circuit}
 	_results_t = 0.0
 	_results = Control.new()
 	_results.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -252,18 +260,34 @@ func show_results(title: String, rows: Array, extra: String, actions: Array = []
 	_results.add_child(deco)
 	if actions.is_empty():
 		actions = [["Race again", _restart], ["Main menu", _quit]]
-	_results_list = ActionList.new(PackedStringArray(actions.map(func(a: Array) -> String: return a[0])), true)
-	_results_list.set_item_size(Vector2(240, 54))
-	_results_list.activated.connect(func(i: int): (actions[i][1] as Callable).call())
-	_results.add_child(_results_list)
-	_results_list.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_results_list.position = Vector2(48, _root.size.y - 40 - 54 - 36)
+	set_result_actions(actions)
 	_results_list.modulate.a = 0.0
 	create_tween().tween_property(_results_list, "modulate:a", 1.0, 0.3).set_delay(0.6)
 	_set_mouse_look(false)
 	_mirror.visible = false
 	# The results title says it all; don't let a lingering banner overlap it.
 	_msg_t = 0.0
+
+
+## Puts `actions` ([[label, Callable]]) under the results in place of those there, the
+## focus kept where it was (paying for a repair takes its button away).
+func set_result_actions(actions: Array, focus := 0) -> void:
+	var a := 1.0
+	if _results_list:
+		a = _results_list.modulate.a
+		_results_list.queue_free()
+	_results_list = ActionList.new(PackedStringArray(actions.map(func(x: Array) -> String: return x[0])), true)
+	_results_list.set_item_size(Vector2(240, 54))
+	_results_list.activated.connect(func(i: int): (actions[i][1] as Callable).call())
+	_results_list.focus = clampi(focus, 0, actions.size() - 1)
+	_results_list.modulate.a = a
+	_results.add_child(_results_list)
+	_results_list.position = Vector2(48, _root.size.y - 40 - 54 - 36)
+
+
+## Changes the results' line under the table.
+func set_result_extra(extra: String) -> void:
+	_results_data.extra = extra
 
 
 static func fmt_time(t: float) -> String:
@@ -307,7 +331,7 @@ func _unhandled_input(e: InputEvent) -> void:
 ## The settings over the paused race (the pause menu out of the way, so the HUD's changes show).
 func _open_settings() -> void:
 	_pause.visible = false
-	_settings.open(1)
+	_settings.open(SettingsPanel.PAGE_HUD)
 
 
 func _resume() -> void:
@@ -478,6 +502,17 @@ func _on_draw_static() -> void:
 	if _pause.visible or _results:
 		return
 	var size := _static.size
+	# Soft dark pools behind each cluster, so its type reads over bright sky and road without
+	# a box round it.
+	if Game.hud_on and Game.mode != Game.Mode.FREE_ROAM:
+		if Game.hud_shows("standings"):
+			var top := M + (ClassicGauges.dial_height(size.y) - 8.0 if _classic and _classic.visible \
+				and _classic.placement == ClassicGauges.Placement.TOP else 0.0)
+			UiKit.shade(_static, Rect2(-150, top - 110, 600, race.racers.size() * 26 + 260), 0.5)
+	if Game.hud_shows("map") or Game.hud_shows("lap"):
+		UiKit.shade(_static, Rect2(-150, size.y - M - 330, 500, 480), 0.5)
+	if _classic == null and Game.hud_shows("speed"):
+		UiKit.shade(_static, Rect2(size.x - 420, size.y - 340, 540, 460), 0.45)
 	if _mirror.visible:
 		var mr := _mirror.get_rect()
 		_static.draw_rect(mr.grow(1), Color(1, 1, 1, 0.35), false, 1.0)
@@ -595,49 +630,90 @@ func _draw_info(size: Vector2) -> void:
 		return
 	# Lap counter and progress, over the minimap (or where it would be).
 	var map_y := size.y - M - 190
-	var lap := clampi(r.lap + 1, 1, Game.laps)
-	_str("LAP", Vector2(M, map_y - 52), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
-	_str(str(lap), Vector2(M - 2, map_y - 12), "display", 40, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
-	var lw := UiKit.text_width("display", str(lap), 40)
-	_str("/%d" % Game.laps, Vector2(M + lw + 2, map_y - 12), "display", 20, UiKit.INK_DIM)
+	if not race.path.closed:
+		_draw_sprint_progress(r, map_y)
+		return
+	var lap := clampi(r.lap + 1, 1, Game.race_laps())
+	_kicker("LAP", Vector2(M, map_y - 54))
+	_str(str(lap), Vector2(M - 2, map_y - 12), "display", 42, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
+	var lw := UiKit.text_width("display", str(lap), 42, 0, true)
+	_str("/ %d" % Game.race_laps(), Vector2(M + lw + 6, map_y - 12), "display", 22, UiKit.INK_DIM)
 	if r.best < INF:
-		_str("BEST  " + fmt_time(r.best), Vector2(M, map_y - 12), "cond", 15, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_RIGHT, 190, 1, true)
-	var pr := Rect2(M, map_y - 4, 190, 3)
+		_str("BEST", Vector2(M, map_y - 32), "cond", 12, UiKit.INK_DIM, HORIZONTAL_ALIGNMENT_RIGHT, 190 - 74, 2)
+		_str(fmt_time(r.best), Vector2(M, map_y - 12), "cond", 18, UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, 190, 1, true)
+	var pr := Rect2(M, map_y - 2, 190, 3)
 	var frac := clampf(float(r.node) / maxf(race.path.size(), 1.0), 0.0, 1.0) if r.lap >= 0 else 0.0
-	_rect(pr, Color(1, 1, 1, 0.15))
+	_rect(pr, Color(1, 1, 1, 0.18))
 	_rect(Rect2(pr.position, Vector2(pr.size.x * frac, pr.size.y)), UiKit.ACCENT)
+
+
+## A kicker: the small amber caps over a figure, as the menus have them.
+func _kicker(t: String, pos: Vector2, col := UiKit.ACCENT) -> void:
+	_str(t, pos, "cond", 13, col, HORIZONTAL_ALIGNMENT_LEFT, -1, 2)
+
+
+## A point-to-point run's in place of the lap counter: how far is left to the finish, and a
+## bar from the start line to it.
+func _draw_sprint_progress(r: Dictionary, map_y: float) -> void:
+	var path: TrackPath = race.path
+	var total := path.cumulative[path.finish_node] - path.cumulative[path.start_node]
+	var done := clampf(path.cumulative[r.node] - path.cumulative[path.start_node], 0.0, total) if r.lap >= 0 else 0.0
+	var left := (total - done) / 1000.0
+	_kicker("TO THE FINISH", Vector2(M, map_y - 54))
+	var v := "%.1f" % (left if Game.units_kmh else left / 1.609)
+	_str(v, Vector2(M - 2, map_y - 12), "display", 42, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 0, true)
+	var lw := UiKit.text_width("display", v, 42, 0, true)
+	_str("KM" if Game.units_kmh else "MI", Vector2(M + lw + 6, map_y - 12), "display", 22, UiKit.INK_DIM)
+	var pr := Rect2(M, map_y - 2, 190, 3)
+	_rect(pr, Color(1, 1, 1, 0.18))
+	_rect(Rect2(pr.position, Vector2(pr.size.x * done / maxf(total, 1.0), pr.size.y)), UiKit.ACCENT)
 
 
 ## Timing tower: every racer in order, the leader with the race clock, the rest with their
 ## gap to the leader. Returns the y below it.
 func _draw_tower(at: Vector2) -> float:
-	var w := 290.0
-	var h := 26.0
+	var w := 300.0
+	var h := 27.0
 	var L: float = race.path.length
 	var lead: Dictionary = race.racers[0]
 	var y := at.y
 	for i in race.racers.size():
 		var rr: Dictionary = race.racers[i]
 		var you: bool = rr.car == player
-		var ink := UiKit.BG if you else UiKit.INK
+		var base := y + h - 8
 		if you:
-			_slant(Rect2(at.x - 8, y, w + 16, h - 2), UiKit.ACCENT, 0.3)
-		var base := y + h - 7
-		_str(str(i + 1), Vector2(at.x, base), "display", 20, ink, HORIZONTAL_ALIGNMENT_RIGHT, 22, 0, true)
-		var nm: String = rr.name.to_upper()
-		if nm.length() > 16:
-			nm = nm.left(15) + "."
-		_str(nm, Vector2(at.x + 34, base), "cond", 16, ink, HORIZONTAL_ALIGNMENT_LEFT, -1, 1)
+			# As a menu's focus: a wash of the accent fading out, a bar down its edge.
+			var r := Rect2(at.x - 12, y, w + 24, h - 1)
+			var a := Color(UiKit.ACCENT, 0.42)
+			var b := Color(UiKit.ACCENT, 0.0)
+			_tri_quad(r, a, b)
+			_rect(Rect2(r.position.x, r.position.y, 3, r.size.y), UiKit.ACCENT)
+		_str(str(i + 1), Vector2(at.x, base), "display", 21, UiKit.ACCENT if you else UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, 22,
+			0, true)
 		var gap := _gap(rr, lead, L)
 		if rr.finished:
 			# The race runs on past the winner until you're home: show each finisher's time and flag them.
 			gap = fmt_time(rr.time)
-			_str("FIN", Vector2(at.x, base), "cond", 13, UiKit.BG if you else UiKit.ACCENT,
-				HORIZONTAL_ALIGNMENT_RIGHT, w - 76, 2)
-		_str(gap, Vector2(at.x, base), "cond", 16, Color(ink, 1.0 if i == 0 or you else 0.7),
+		var gw := UiKit.text_width("cond", gap, 16, 0, true)
+		var fin_w := 34.0 if rr.finished else 0.0
+		var nw := w - 34 - gw - fin_w - 12
+		var nm: String = rr.name.to_upper()
+		_str(nm, Vector2(at.x + 34, base), "cond", UiKit.fit("cond", nm, nw, 16, 12, 1), UiKit.INK if i == 0 or you else \
+			Color(UiKit.INK, 0.86), HORIZONTAL_ALIGNMENT_LEFT, nw, 1)
+		if rr.finished:
+			_str("FIN", Vector2(at.x, base), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_RIGHT, w - gw - 8, 2)
+		_str(gap, Vector2(at.x, base), "cond", 16, UiKit.INK if i == 0 or you else UiKit.INK_DIM,
 			HORIZONTAL_ALIGNMENT_RIGHT, w, 0, true)
 		y += h
 	return y
+
+
+## A rectangle shaded from `a` at its left to `b` at its right, into this frame's batch.
+func _tri_quad(r: Rect2, a: Color, b: Color) -> void:
+	var base := _tri_pts.size()
+	_tri_pts.append_array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
+	_tri_cols.append_array([a, b, b, a])
+	_tri_idx.append_array([base, base + 1, base + 2, base, base + 2, base + 3])
 
 
 func _gap(rr: Dictionary, lead: Dictionary, L: float) -> String:
@@ -664,20 +740,20 @@ func _draw_cop_block(y: float) -> void:
 	if pursuit:
 		var on := fmod(_time * 4.0, 2.0) < 1.0
 		_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
-		_str("PURSUIT", Vector2(M + 14, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+		_kicker("IN PURSUIT", Vector2(M + 14, y), UiKit.INK)
 		y += 22
 		_pips("HEAT", y, 3, race.heat)
 		y += 22
 	_pips("TICKETS", y, race.MAX_TICKETS, race.tickets)
 	if player and player.tyres_flat():
-		_str("FLAT TYRES", Vector2(M, y + 22), "cond", 13, RED, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+		_kicker("FLAT TYRES", Vector2(M, y + 22), RED)
 
 
 ## A label and a row of `n` slanted pips, the first `lit` of them red.
 func _pips(label: String, y: float, n: int, lit: int) -> void:
-	_str(label, Vector2(M, y), "cond", 13, UiKit.INK, HORIZONTAL_ALIGNMENT_LEFT, -1, 3)
+	_kicker(label, Vector2(M, y), UiKit.INK_DIM)
 	for k in n:
-		_slant(Rect2(M + 84 + k * 26, y - 11, 22, 10), RED if k < lit else EMPTY_PIP, 0.5)
+		_rect(Rect2(M + 84 + k * 24, y - 9, 18, 6), RED if k < lit else Color(1, 1, 1, 0.22))
 
 
 ## While chased: a thin light bar along the top edge, red and blue halves taking turns.
@@ -688,31 +764,35 @@ func _draw_pursuit(size: Vector2) -> void:
 	_rect(Rect2(h, 0, h, 3), Color(UiKit.COP_BLUE, 0.15 if on else 0.85))
 
 
+## A message across the middle as a broadcast graphic: a dark band fading out at its ends, a
+## line of the kind's colour above and below it drawing out from the centre, the words over it.
 func _draw_banner(size: Vector2) -> void:
 	if _msg_t <= 0.0 or _msg == "":
 		return
 	var age := _msg_len - _msg_t
-	var grow := clampf(age / 0.18, 0.0, 1.0)
+	var grow := clampf(age / 0.22, 0.0, 1.0)
 	grow = 1.0 - pow(1.0 - grow, 3.0)
 	var fade := clampf(_msg_t / 0.3, 0.0, 1.0)
-	var fs := 40
+	var fs := 42
 	var f := UiKit.font("display", 1)
 	var tw := f.get_string_size(_msg, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-	var w := (tw + 80) * grow
-	var r := Rect2(size.x * 0.5 - w * 0.5, 190, w, 58)
 	var col := UiKit.ACCENT
-	var ink := UiKit.BG
 	match _msg_kind:
-		"alert":
-			col = RED
-			ink = UiKit.INK
-		"go":
-			col = GO
-	_slant(Rect2(r.position + Vector2(6, 6), r.size), Color(0, 0, 0, 0.3 * fade))
-	_slant(r, Color(col, fade))
-	if grow > 0.6:
-		_text(f, Vector2(size.x * 0.5 - tw * 0.5, r.position.y + 44), _msg, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
-			Color(ink, fade * (grow - 0.6) / 0.4))
+		"alert": col = RED
+		"go": col = GO
+	var cx := size.x * 0.5
+	var half := (tw * 0.5 + 160.0) * grow
+	var band := Rect2(cx - half, 188, half * 2.0, 62)
+	var dark := Color(0, 0, 0, 0.55 * fade)
+	var clear := Color(0, 0, 0, 0.0)
+	_tri_quad(Rect2(band.position, Vector2(half, band.size.y)), clear, dark)
+	_tri_quad(Rect2(cx, band.position.y, half, band.size.y), dark, clear)
+	var lw := (tw * 0.5 + 40.0) * grow
+	_rect(Rect2(cx - lw, band.position.y, lw * 2.0, 2), Color(col, fade))
+	_rect(Rect2(cx - lw, band.end.y - 2, lw * 2.0, 2), Color(col, fade))
+	if grow > 0.5:
+		_text(f, Vector2(cx - tw * 0.5, band.position.y + 46), _msg, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
+			Color(UiKit.INK if _msg_kind == "" else col.lerp(UiKit.INK, 0.35), fade * (grow - 0.5) / 0.5), 5, Color(0, 0, 0, 0.3 * fade))
 
 
 func _draw_countdown(size: Vector2) -> void:
@@ -738,8 +818,10 @@ func _draw_hints(size: Vector2) -> void:
 		size.y -= ClassicGauges.dial_height(size.y) + 14.0
 	if _cam_toast_t > 0.0:
 		var a := clampf(_cam_toast_t / 0.3, 0.0, 1.0)
-		var txt := "CAMERA  ·  " + _cam_name.to_upper()
-		_str(txt, Vector2(0, size.y - M - 4), "cond", 16, Color(UiKit.INK, a), HORIZONTAL_ALIGNMENT_CENTER, size.x, 3)
+		var cw := UiKit.text_width("cond", _cam_name.to_upper(), 18, 1) + 80
+		UiKit.shade(_draw, Rect2(size.x * 0.5 - cw * 0.5 - 60, size.y - M - 50, cw + 120, 80), 0.6 * a)
+		_str("CAMERA", Vector2(0, size.y - M - 26), "cond", 12, Color(UiKit.ACCENT, a), HORIZONTAL_ALIGNMENT_CENTER, size.x, 2)
+		_str(_cam_name.to_upper(), Vector2(0, size.y - M - 4), "cond", 18, Color(UiKit.INK, a), HORIZONTAL_ALIGNMENT_CENTER, size.x, 1)
 		return
 	if _hint_t <= 0.0:
 		return
@@ -750,7 +832,7 @@ func _draw_hints(size: Vector2) -> void:
 	for h in hints:
 		w += UiKit.text_width("cond", h[0], 13, 1) + 12 + 7 + UiKit.text_width("cond", h[1], 13, 2) + 22
 	var a := clampf(_hint_t / 0.6, 0.0, 1.0)
-	_draw.draw_rect(Rect2(size.x * 0.5 - w * 0.5 - 12, size.y - M - 20, w + 12, 30), Color(0, 0, 0, 0.35 * a))
+	UiKit.shade(_draw, Rect2(size.x * 0.5 - w * 0.5 - 90, size.y - M - 46, w + 180, 84), 0.6 * a)
 	UiKit.draw_hints(_draw, Vector2(size.x * 0.5 - w * 0.5, size.y - M - 5), hints, 13, a)
 
 
@@ -765,10 +847,17 @@ func _draw_map_outline(rect: Rect2) -> void:
 	var path: TrackPath = race.path
 	_static.draw_polyline(_map_pts, Color(0, 0, 0, 0.45), 7, true)
 	_static.draw_polyline(_map_pts, Color(1, 1, 1, 0.8), 3, true)
-	# Start/finish: a short bar across the track, perpendicular to its direction at node 0.
-	var s0 := _to_map(path.points[0])
-	var across := (_to_map(path.points[1]) - s0).normalized().orthogonal() * 7.0
+	# Start/finish: a short bar across the track, perpendicular to its direction at the start
+	# (node 0 of a lap). A point-to-point run's finish is a chequered flag at its far end.
+	var a := path.start_node if not path.closed else 0
+	var s0 := _to_map(path.points[a])
+	var dir := _to_map(path.points[path.idx(a + 1)]) - s0
+	if dir.length() < 0.01:
+		dir = s0 - _to_map(path.points[path.idx(a - 1)])
+	var across := dir.normalized().orthogonal() * 7.0
 	_static.draw_line(s0 - across, s0 + across, UiKit.ACCENT, 3)
+	if not path.closed:
+		UiKit.route_ends(_static, s0, dir, _to_map(path.points[path.finish_node]), 1.1, UiKit.ACCENT)
 
 
 ## The cars on the map, over its outline.
@@ -814,7 +903,11 @@ func _map_layout(rect: Rect2) -> void:
 		_map_pts = PackedVector2Array()
 		for i in range(0, path.size(), 2):
 			_map_pts.append(_to_map(path.points[i]))
-		_map_pts.append(_map_pts[0])
+		# A lap closes on itself; an open road runs from end to end.
+		if path.closed:
+			_map_pts.append(_map_pts[0])
+		elif (path.size() - 1) % 2 != 0:
+			_map_pts.append(_to_map(path.points[path.size() - 1]))
 
 
 # ------------------------------------------------------------------ pause / results
@@ -832,9 +925,11 @@ func _draw_pause(c: Control) -> void:
 		if Game.mode != Game.Mode.FREE_ROAM and not r.is_empty():
 			if Game.mode != Game.Mode.TIME_TRIAL:
 				stats.append(["POSITION", "%d / %d" % [race.position_of(player), race.racers.size()]])
-			stats.append(["LAP", "%d / %d" % [clampi(r.lap + 1, 1, Game.laps), Game.laps]])
+			if race.path.closed:
+				stats.append(["LAP", "%d / %d" % [clampi(r.lap + 1, 1, Game.race_laps()), Game.race_laps()]])
 			stats.append(["TIME", fmt_time(race.race_time)])
-			stats.append(["BEST LAP", fmt_time(r.best)])
+			if race.path.closed:
+				stats.append(["BEST LAP", fmt_time(r.best)])
 		var x := W - 48.0
 		for i in range(stats.size() - 1, -1, -1):
 			var vw := maxf(UiKit.text_width("display", stats[i][1], 36, 0, true) + 4.0, 90.0)
@@ -850,11 +945,15 @@ func _draw_results(c: Control) -> void:
 	var t := _results_t
 	var title: String = _results_data.title
 	var rows: Array = _results_data.rows
+	var circuit: Dictionary = _results_data.get("circuit", {})
+	var standings: Array = circuit.get("standings", [])
 	var arrested := title == "ARRESTED"
 	var ease := func(x: float) -> float: return 1.0 - pow(1.0 - clampf(x, 0.0, 1.0), 3.0)
 	# Headline: "FINISHED 2nd" becomes a giant "2ND" with a small caption.
 	var big := title
 	var caption: String = Game.track_name(Game.track_id).to_upper() + "  ·  " + Game.MODE_NAMES[Game.mode].to_upper()
+	if circuit.has("caption"):
+		caption = circuit.caption
 	if title.begins_with("FINISHED "):
 		big = title.trim_prefix("FINISHED ").to_upper()
 		caption = "FINISHED  ·  " + caption
@@ -863,11 +962,40 @@ func _draw_results(c: Control) -> void:
 	c.draw_string(UiKit.font("cond", 3), Vector2(48, 110), caption, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(col, k))
 	c.draw_string(UiKit.font("display"), Vector2(46 - 30 * (1.0 - k), 200), big, HORIZONTAL_ALIGNMENT_LEFT, -1,
 		96 if big.length() <= 4 else 72, Color(UiKit.INK, k))
-	# Leaderboard.
+	# A circuit's end: its trophy, and what it won beside it.
+	var trophy: int = circuit.get("trophy", 0)
+	var lines: Array = circuit.get("lines", [])
+	if trophy > 0 or not lines.is_empty():
+		var a: float = ease.call((t - 0.5) / 0.5)
+		var cup_h := 170.0
+		var cx := W - 48.0 - cup_h * 0.5
+		if trophy > 0:
+			# Rises into place, with a glow behind.
+			var rise := 30.0 * (1.0 - a)
+			for r in 4:
+				c.draw_circle(Vector2(cx, 150 + rise), 70.0 + r * 16.0, Color(UiKit.trophy_colour(trophy), 0.05 * a))
+			# High Stakes' own, turning (its 16 frames at 10 a second).
+			UiKit.draw_trophy(c, Vector2(cx, 235 + rise), cup_h, trophy, a, circuit.get("tour", 0), t * 10.0)
+		var tx := cx - (cup_h * 0.5 + 16.0 if trophy > 0 else -60.0)
+		var ly := 96.0
+		if trophy > 0:
+			c.draw_string(UiKit.font("cond", 3), Vector2(0, ly), UiKit.TROPHY_NAMES[trophy - 1] + " TROPHY", HORIZONTAL_ALIGNMENT_RIGHT,
+				tx, 14, Color(UiKit.trophy_colour(trophy), a))
+			ly += 34
+		for i in lines.size():
+			var la: float = ease.call((t - 0.7 - i * 0.15) / 0.3)
+			c.draw_string(UiKit.font("display"), Vector2(0, ly), str(lines[i]).to_upper(), HORIZONTAL_ALIGNMENT_RIGHT, tx,
+				26 if i == 0 else 20, Color(UiKit.INK if i == 0 else UiKit.INK_DIM, la))
+			ly += 30 if i == 0 else 26
+	# Leaderboard (a tournament's beside its standings).
 	var x0 := 48.0
 	var tw := minf(W - 96, 820.0)
+	if not standings.is_empty():
+		tw = minf((W - 96) * 0.56, 820.0)
 	var cols := [[0.0, "POS"], [70.0, "DRIVER"], [tw - 330, "TIME"], [tw - 210, "BEST LAP"], [tw - 90, "GAP"]]
 	var y := 250.0
+	if not standings.is_empty():
+		c.draw_string(UiKit.font("cond", 3), Vector2(x0 + 16, y - 26), "THIS RACE", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(UiKit.ACCENT, k))
 	for cdef in cols:
 		c.draw_string(UiKit.font("cond", 3), Vector2(x0 + cdef[0] + 16, y), cdef[1], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, UiKit.INK_DIM)
 	y += 12
@@ -877,7 +1005,8 @@ func _draw_results(c: Control) -> void:
 	# Rows shrink to fit between the header and the buttons (a full grid of 8 is tall).
 	var extra: String = _results_data.extra
 	var bottom := H - 40 - 54 - 36 - 28 - (34.0 if extra != "" else 0.0)
-	var rh := clampf((bottom - y) / maxf(rows.size(), 1.0) - 4.0, 26.0, 40.0)
+	var n_rows := maxf(rows.size(), standings.size())
+	var rh := clampf((bottom - y) / maxf(n_rows, 1.0) - 4.0, 26.0, 40.0)
 	var k2 := rh / 40.0
 	for i in rows.size():
 		var row: Dictionary = rows[i]
@@ -886,17 +1015,21 @@ func _draw_results(c: Control) -> void:
 			continue
 		var you: bool = row.get("you", false) or str(row.name).ends_with("(you)")
 		var rr := Rect2(x0 - 24 * (1.0 - a), y + i * (rh + 4), tw, rh)
-		UiKit.draw_slant(c, rr, Color(UiKit.ACCENT, 0.9 * a) if you else Color(1, 1, 1, 0.07 * a), 0.12)
-		var ink := Color(UiKit.BG if you else UiKit.INK, a)
-		var dim := Color(UiKit.BG if you else UiKit.INK_DIM, a * (0.8 if you else 1.0))
+		# Your row as a menu's focus: the accent's wash and a bar; the rest on hairlines.
+		if you:
+			UiKit.glow(c, rr, a * 1.6)
+		c.draw_rect(Rect2(rr.position.x, rr.end.y + 1, rr.size.x, 1), Color(1, 1, 1, 0.08 * a))
+		var ink := Color(UiKit.INK, a)
+		var dim := Color(UiKit.INK if you else UiKit.INK_DIM, a)
 		var by := rr.position.y + rh * 0.5 + 8.0 * k2
 		var tf := UiKit.font("cond", 1, true)
-		c.draw_string(UiKit.font("display", 0, true), Vector2(rr.position.x + cols[0][0] + 16, by + 2), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, int(28 * k2), ink)
+		c.draw_string(UiKit.font("display", 0, true), Vector2(rr.position.x + cols[0][0] + 16, by + 2), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, int(28 * k2),
+			Color(UiKit.ACCENT, a) if you else ink)
 		var nm := str(row.name).trim_suffix("  (you)").to_upper()
 		c.draw_string(UiKit.font("display"), Vector2(rr.position.x + cols[1][0] + 16, by), nm, HORIZONTAL_ALIGNMENT_LEFT, cols[2][0] - cols[1][0] - 20, int(22 * k2), ink)
 		if you:
 			var nw := minf(UiKit.text_width("display", nm, int(22 * k2)), cols[2][0] - cols[1][0] - 70)
-			UiKit.draw_key(c, Vector2(rr.position.x + cols[1][0] + 16 + nw + 10, by - 7 * k2), "YOU", 11, UiKit.BG)
+			UiKit.kicker(c, Vector2(rr.position.x + cols[1][0] + 16 + nw + 12, by - 1), "YOU", -1, Color(UiKit.ACCENT, a))
 		c.draw_string(tf, Vector2(rr.position.x + cols[2][0] + 16, by - 1), str(row.time), HORIZONTAL_ALIGNMENT_LEFT, -1, int(19 * k2), ink)
 		c.draw_string(tf, Vector2(rr.position.x + cols[3][0] + 16, by - 1), str(row.best), HORIZONTAL_ALIGNMENT_LEFT, -1, int(19 * k2), dim)
 		var gap := ""
@@ -904,9 +1037,61 @@ func _draw_results(c: Control) -> void:
 		if i > 0 and rt is float and rt < INF and lead_t < INF:
 			gap = "+%.2f" % (rt - lead_t)
 		c.draw_string(tf, Vector2(rr.position.x + cols[4][0] + 16, by - 1), gap, HORIZONTAL_ALIGNMENT_LEFT, -1, int(19 * k2), dim)
+	if not standings.is_empty():
+		_draw_standings(c, Vector2(x0 + tw + 40, y - 12), W - 48 - (x0 + tw + 40), standings, rh, k2, t, ease)
 	if extra != "":
-		var ey := y + rows.size() * (rh + 4) + 26
-		c.draw_string(UiKit.font("cond", 2), Vector2(x0 + 16, ey), extra.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, 16,
-			Color(RED, ease.call((t - 0.5) / 0.3)))
+		var ey := y + n_rows * (rh + 4) + 26
+		c.draw_string(UiKit.font("body"), Vector2(x0 + 16, ey), extra, HORIZONTAL_ALIGNMENT_LEFT, W - 96 - 16, 17,
+			Color(RED if arrested else UiKit.INK_DIM, ease.call((t - 0.5) / 0.3)))
 	_results_list.position = Vector2(48, H - 40 - 54 - 36)
 	UiKit.draw_hints(c, Vector2(48, H - 40 - 8), [["←→", "SELECT"], ["ENTER", "CONFIRM"]])
+
+
+## A tournament's standings after the race, at `at` (the column heads' baseline), `w` wide:
+## place, driver, where each finished this race and the points it took, the total. Those
+## knocked out are listed last, struck out.
+func _draw_standings(c: Control, at: Vector2, w: float, standings: Array, rh: float, k2: float, t: float, ease: Callable) -> void:
+	var cols := [[0.0, "POS"], [54.0, "STANDINGS"], [w - 196, "RACE"], [w - 128, "+PTS"], [w - 60, "PTS"]]
+	var k: float = ease.call((t - 0.3) / 0.4)
+	c.draw_string(UiKit.font("cond", 3), Vector2(at.x + 16, at.y - 26), _results_data.circuit.get("standings_caption", "STANDINGS"),
+		HORIZONTAL_ALIGNMENT_LEFT, w - 16, 13, Color(UiKit.ACCENT, k))
+	for cdef in cols:
+		c.draw_string(UiKit.font("cond", 3), Vector2(at.x + cdef[0] + 16, at.y), "" if cdef[1] == "STANDINGS" else cdef[1],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 12, UiKit.INK_DIM)
+	var y := at.y + 12
+	var tf := UiKit.font("cond", 1, true)
+	for i in standings.size():
+		var s: Dictionary = standings[i]
+		var a: float = ease.call((t - 0.6 - i * 0.07) / 0.3)
+		if a <= 0.0:
+			continue
+		var you: bool = s.get("you", false)
+		var out: bool = s.get("out", false)
+		var rr := Rect2(at.x + 24 * (1.0 - a), y + i * (rh + 4), w, rh)
+		if you:
+			UiKit.glow(c, rr, a * 1.6)
+		c.draw_rect(Rect2(rr.position.x, rr.end.y + 1, rr.size.x, 1), Color(1, 1, 1, 0.08 * a))
+		var ink := Color(UiKit.INK_FAINT if out else UiKit.INK, a)
+		var dim := Color(UiKit.INK if you else UiKit.INK_DIM, a * (0.5 if out else 1.0))
+		var by := rr.position.y + rh * 0.5 + 8.0 * k2
+		c.draw_string(UiKit.font("display", 0, true), Vector2(rr.position.x + cols[0][0] + 16, by + 2), str(i + 1),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, int(28 * k2), ink)
+		var nm := str(s.name).to_upper()
+		var nw: float = cols[2][0] - cols[1][0] - 20
+		c.draw_string(UiKit.font("display"), Vector2(rr.position.x + cols[1][0] + 16, by), nm, HORIZONTAL_ALIGNMENT_LEFT, nw,
+			int(22 * k2), ink)
+		if out:
+			var sw := minf(UiKit.text_width("display", nm, int(22 * k2)), nw)
+			c.draw_line(Vector2(rr.position.x + cols[1][0] + 14, by - 7 * k2), Vector2(rr.position.x + cols[1][0] + 18 + sw, by - 7 * k2),
+				ink, 2.0)
+		var race: int = s.get("race", 0)
+		var race_txt := ordinal(race).to_upper() if race > 0 else "—"
+		if out and race == 0:
+			race_txt = "OUT"
+		c.draw_string(tf, Vector2(rr.position.x + cols[2][0] + 16, by - 1), race_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, int(19 * k2),
+			Color(RED, a) if out and not you else dim)
+		var gained: int = s.get("gained", 0)
+		c.draw_string(tf, Vector2(rr.position.x + cols[3][0] + 16, by - 1), "+%d" % gained if gained > 0 else "", HORIZONTAL_ALIGNMENT_LEFT,
+			-1, int(19 * k2), Color(UiKit.BG, a) if you else Color(GO, a * 0.9))
+		c.draw_string(UiKit.font("display", 0, true), Vector2(rr.position.x + cols[4][0] + 16, by + 1), str(s.get("points", 0)),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, int(24 * k2), ink)

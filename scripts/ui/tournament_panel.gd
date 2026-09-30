@@ -2,17 +2,20 @@ class_name TournamentPanel
 extends Control
 ## High Stakes' tournaments (HsCareer), a screen of the front end: the tournaments down the
 ## left (won, locked, one-make), the chosen one's circuits on the right with how they're run
-## (laps, rivals, entry fee, first prize, your best result), and the focused circuit's races
-## as postcards. Choosing a circuit goes on to the car; winning every circuit of a
-## tournament opens the next ones.
+## (laps, rivals, entry fee, first prize, your best result and its trophy), and the focused
+## circuit's races as postcards. Choosing a circuit goes on to the garage to pick (or buy)
+## the car; winning every circuit of a tournament wins its trophy and opens the next ones.
 
 signal chosen(tournament: Dictionary, circuit: int)
 signal focus_changed
+signal garage
 signal back
+signal changed                # the money or the cars changed (a new career)
 
-const LIST_W := 330.0
+const LIST_W := 300.0
 const T_ROW := 42.0
-const C_ROW := 56.0
+const C_ROW := 58.0
+const C_TOP := 118.0
 const KINDS := ["CIRCUIT", "KNOCKOUT", "CAR RACE"]
 
 ## (track id, night) -> Texture2D or null, for the races' pictures.
@@ -88,6 +91,8 @@ func blocked() -> String:
 		return "Nothing to enter"
 	if not Game.tournament_open(t):
 		return "Locked"
+	if Game.career_broke():
+		return "No car, and not enough money for one: N starts a new career"
 	if Game.career_money < c.fee:
 		return "Entry fee $%s: not enough money" % money(c.fee)
 	for r: Dictionary in c.races:
@@ -140,16 +145,21 @@ func _move_tournament(dir: int) -> void:
 # ------------------------------------------------------------------ layout
 
 func _t_rect(i: int) -> Rect2:
-	return Rect2(0, 8 + i * T_ROW, LIST_W, T_ROW - 4)
+	return Rect2(0, 4 + i * T_ROW, LIST_W - 8, T_ROW - 4)
 
 
 func _right_x() -> float:
-	return LIST_W + 36.0
+	return LIST_W + 16.0 + 32.0
+
+
+## The right edge of the tournament's details.
+func _right_end() -> float:
+	return size.x
 
 
 func _c_rect(k: int) -> Rect2:
 	var x := _right_x()
-	return Rect2(x, 104 + k * C_ROW, size.x - x, C_ROW - 4)
+	return Rect2(x, C_TOP + k * C_ROW, _right_end() - x, C_ROW - 6)
 
 
 # ------------------------------------------------------------------ input
@@ -210,11 +220,29 @@ func _unhandled_input(e: InputEvent) -> void:
 	elif (key and key.pressed and not key.echo and not key.alt_pressed and key.physical_keycode in [KEY_ENTER, KEY_KP_ENTER]) \
 			or (e is InputEventJoypadButton and e.pressed and e.button_index == JOY_BUTTON_A):
 		choose()
+	elif key and key.pressed and not key.echo and key.physical_keycode == KEY_G:
+		garage.emit()
+	elif key and key.pressed and not key.echo and key.physical_keycode == KEY_N:
+		new_career()
 	elif e.is_action_pressed("ui_cancel"):
 		back.emit()
 	else:
 		return
 	get_viewport().set_input_as_handled()
+
+
+## Once asked: everything won, the cars and the money go.
+func new_career() -> void:
+	ConfirmDialog.ask(get_parent() as Control, "Career", "Start a new career?",
+		"Your money, your cars and every trophy you've won are lost.", "Start over", "Keep playing", _new_career)
+
+
+func _new_career() -> void:
+	Game.new_career()
+	_say("New career: %s to buy a car with in the garage" % UiKit.money(Game.career_money))
+	_message_t = 5.0
+	focus_changed.emit()
+	changed.emit()
 
 
 func _process(dt: float) -> void:
@@ -228,13 +256,13 @@ func _process(dt: float) -> void:
 # ------------------------------------------------------------------ drawing
 
 func _draw() -> void:
-	var cf := UiKit.font("cond", 2)
+	var cf := UiKit.font("cond", 1)
 	var df := UiKit.font("display")
+	var bf := UiKit.font("body")
 	# The tournaments.
-	draw_rect(Rect2(-12, 0, LIST_W + 24, size.y), Color(0.04, 0.045, 0.06, 0.9))
-	draw_rect(Rect2(-12, 0, LIST_W + 24, 3), UiKit.ACCENT)
+	draw_line(Vector2(LIST_W + 16, 8), Vector2(LIST_W + 16, size.y - 8), UiKit.LINE, 1.0)
 	if _tours.is_empty():
-		draw_string(UiKit.font("body"), Vector2(_right_x(), 40), "The tournaments come with a High Stakes install (see README).",
+		draw_string(bf, Vector2(_right_x(), 40), "The tournaments come with a High Stakes install (see README).",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UiKit.INK_DIM)
 		return
 	for i in _tours.size():
@@ -243,52 +271,54 @@ func _draw() -> void:
 		var open := Game.tournament_open(t)
 		var now := i == _ti
 		if now:
-			UiKit.draw_slant(self, r, Color(1, 1, 1, 0.1), 0.1)
-			UiKit.draw_slant(self, Rect2(r.position, Vector2(4, r.size.y)), UiKit.ACCENT, 0.1)
+			UiKit.glow(self, r, 1.0)
 		elif i == _hover_t:
-			UiKit.draw_slant(self, r, Color(1, 1, 1, 0.05), 0.1)
+			UiKit.glow(self, r, 0.4, UiKit.INK, false)
 		var won := _won(t)
 		var col := UiKit.INK if now else (Color(UiKit.INK, 0.85) if open else UiKit.INK_FAINT)
 		if not open:
-			_lock(Vector2(r.position.x + 22, r.get_center().y), UiKit.INK_FAINT)
-		elif won == t.circuits.size():
-			_tick(Vector2(r.position.x + 22, r.get_center().y), UiKit.ACCENT)
-		draw_string(df, Vector2(r.position.x + 40, r.get_center().y + 7), t.name.to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
-			r.size.x - 120, 20, col)
-		var note := "%d / %d" % [won, t.circuits.size()] if open else ""
-		draw_string(cf, Vector2(r.position.x, r.get_center().y + 5), note, HORIZONTAL_ALIGNMENT_RIGHT, r.size.x - 14, 13,
-			UiKit.ACCENT if now else UiKit.INK_DIM)
-	# The chosen tournament.
+			UiKit.lock(self, Vector2(r.position.x + 18, r.get_center().y), UiKit.INK_FAINT)
+		elif Game.tournament_won(t):
+			UiKit.draw_trophy(self, Vector2(r.position.x + 18, r.get_center().y + 13), 26, 1, 1.0, t.id)
+		var name: String = t.name.to_upper()
+		draw_string(df, Vector2(r.position.x + 34, r.get_center().y + 7), name, HORIZONTAL_ALIGNMENT_LEFT,
+			r.size.x - 96, UiKit.fit("display", name, r.size.x - 96, 19, 14), col)
+		if open:
+			draw_string(UiKit.font("cond", 1, true), Vector2(r.position.x, r.get_center().y + 5), "%d/%d" % [won, t.circuits.size()],
+				HORIZONTAL_ALIGNMENT_RIGHT, r.size.x - 12, 14, UiKit.ACCENT if won == t.circuits.size() else UiKit.INK_DIM)
+	# The chosen tournament, on a surface of its own.
 	var t := tournament()
 	var x := _right_x()
-	var w := size.x - x
+	var w := _right_end() - x
 	var open := Game.tournament_open(t)
-	draw_string(cf, Vector2(x, 20), "MONEY", HORIZONTAL_ALIGNMENT_RIGHT, w - 120, 13, UiKit.INK_DIM)
-	draw_string(UiKit.font("display", 0, true), Vector2(x, 24), "$" + money(Game.career_money), HORIZONTAL_ALIGNMENT_RIGHT, w,
-		26, UiKit.ACCENT)
-	draw_string(df, Vector2(x, 44), t.name.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, w - 260, 38, UiKit.INK)
+	_draw_purse(Vector2(_right_end(), 38))
+	UiKit.kicker(self, Vector2(x, 14), "Tournament %d of %d" % [_ti + 1, _tours.size()], w - 330)
+	draw_string(df, Vector2(x - 2, 52), t.name.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, w - 330,
+		UiKit.fit("display", t.name.to_upper(), w - 330, 42, 22), UiKit.INK)
 	var sub := PackedStringArray()
-	sub.append("%d CIRCUIT%s" % [t.circuits.size(), "" if t.circuits.size() == 1 else "S"])
+	sub.append("%d circuit%s" % [t.circuits.size(), "" if t.circuits.size() == 1 else "s"])
 	if not open:
 		var by := _opened_by(t)
-		sub.append("LOCKED: WIN EVERY CIRCUIT OF %s TO OPEN IT" % by.to_upper() if by != "" else "LOCKED")
+		sub.append("Locked: win every circuit of %s to open it" % by if by != "" else "Locked")
+	elif Game.tournament_won(t):
+		sub.append("Trophy won")
 	else:
-		sub.append("%d WON" % _won(t))
+		sub.append("%d won" % _won(t))
 	if not t.unlocks.is_empty():
 		var names := PackedStringArray()
 		for u in t.unlocks:
 			for o in _tours:
 				if o.id == u:
 					names.append(o.name)
-		sub.append("OPENS " + " & ".join(names).to_upper())
-	draw_string(cf, Vector2(x, 72), "   ·   ".join(sub), HORIZONTAL_ALIGNMENT_LEFT, w, 13,
-		UiKit.INK_DIM if open else UiKit.COP_RED.lerp(UiKit.INK, 0.3))
+		sub.append("Winning it opens " + " & ".join(names))
+	draw_string(bf, Vector2(x, 78), "  ·  ".join(sub), HORIZONTAL_ALIGNMENT_LEFT, w, 15,
+		UiKit.INK_DIM if open else UiKit.COP_RED.lerp(UiKit.INK, 0.35))
 	# Its circuits.
-	var cols := [0.0, 0.42, 0.58, 0.72, 0.86]
-	var heads := ["", "LAPS · RIVALS", "ENTRY", "FIRST PRIZE", "BEST"]
+	var cols := [0.0, 0.5, 0.63, 0.76, 0.89]
+	var heads := ["CIRCUIT", "LAPS · RIVALS", "ENTRY", "FIRST PRIZE", "BEST"]
 	for k in heads.size():
-		draw_string(UiKit.font("cond", 3), Vector2(x + 16 + (w - 16) * cols[k], 98), heads[k], HORIZONTAL_ALIGNMENT_LEFT, -1, 11,
-			UiKit.INK_FAINT)
+		draw_string(cf, Vector2(x + 16 + (w - 16) * cols[k], C_TOP - 8), heads[k], HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
+			UiKit.INK_DIM)
 	var circuits: Dictionary = Game.career_data().circuits
 	for k in t.circuits.size():
 		var c: Dictionary = circuits.get(t.circuits[k], {})
@@ -296,41 +326,56 @@ func _draw() -> void:
 			continue
 		var r := _c_rect(k)
 		var now: bool = k == _ci
-		UiKit.draw_slant(self, r, Color(1, 1, 1, 0.1 if now else (0.06 if k == _hover_c else 0.035)), 0.08)
 		if now:
-			UiKit.draw_slant(self, Rect2(r.position, Vector2(4, r.size.y)), UiKit.ACCENT, 0.08)
-		var col := (UiKit.INK if now else Color(UiKit.INK, 0.8)) if open else UiKit.INK_FAINT
+			UiKit.glow(self, r, 1.0)
+		elif k == _hover_c:
+			UiKit.glow(self, r, 0.4, UiKit.INK, false)
+		draw_line(Vector2(r.position.x, r.end.y + 3), Vector2(r.end.x, r.end.y + 3), UiKit.LINE, 1.0)
+		var col := (UiKit.INK if now else Color(UiKit.INK, 0.85)) if open else UiKit.INK_FAINT
 		var cx := r.position.x + 16
 		var cw := r.size.x - 16
-		var only := Game.career_data().restriction_text(c).to_upper()
-		draw_string(df, Vector2(cx, r.position.y + 25), "%d  %s%s" % [k + 1, KINDS[clampi(c.type, 0, 2)], "  ·  " + only if only != "" else ""], HORIZONTAL_ALIGNMENT_LEFT,
-			cw * cols[1] - 10, 20, UiKit.ACCENT if now and open else col)
-		draw_string(cf, Vector2(cx, r.position.y + 44), _races_text(c), HORIZONTAL_ALIGNMENT_LEFT, cw * cols[1] - 10, 12,
+		var kind: String = KINDS[clampi(c.type, 0, 2)].capitalize()
+		var only := Game.career_data().restriction_text(c)
+		var title := "%s %d" % [kind, k + 1]
+		draw_string(df, Vector2(cx, r.position.y + 23), title.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, cw * cols[1] - 12, 19,
+			UiKit.ACCENT if now and open else col)
+		if only != "":
+			var tw := df.get_string_size(title.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, 19).x
+			draw_string(bf, Vector2(cx + tw + 10, r.position.y + 22), only, HORIZONTAL_ALIGNMENT_LEFT, cw * cols[1] - tw - 22, 13,
+				UiKit.INK_DIM)
+		draw_string(bf, Vector2(cx, r.position.y + 42), _races_text(c), HORIZONTAL_ALIGNMENT_LEFT, cw * cols[1] - 12, 13,
 			UiKit.INK_DIM if open else UiKit.INK_FAINT)
-		var fee := "$" + money(c.fee) if c.fee > 0.0 else "FREE"
-		var prize := "$" + money(c.prizes[0]) if c.type != HsCareer.TYPE_CAR_RACE and not c.prizes.is_empty() \
-			else (Game.serial_name(c.award).to_upper() if c.award >= 0 and Game.serial_name(c.award) != "" else "THE CAR")
+		var fee := UiKit.money(c.fee) if c.fee > 0.0 else "Free"
+		var prize := UiKit.money(c.prizes[0]) if c.award < 0 and not c.prizes.is_empty() and c.prizes[0] > 0.0 \
+			else (Game.serial_name(c.award) if c.award >= 0 and Game.serial_name(c.award) != "" else "The win")
 		var best := _result(c.id)
+		var cup := Game.circuit_trophy(c.id) if c.type != HsCareer.TYPE_CAR_RACE else 0
 		var cells := ["%d · %d" % [c.laps, c.opponents], fee, prize, best if best != "" else "—"]
-		for j in cells.size():
-			var won := j == 3 and best == "WON"
-			draw_string(UiKit.font("display", 0, true), Vector2(cx + cw * cols[j + 1], r.position.y + 33), cells[j],
-				HORIZONTAL_ALIGNMENT_LEFT, cw * 0.14, 20,
-				UiKit.ACCENT if won else (UiKit.COP_RED if j == 1 and now and Game.career_money < c.fee else col))
+		for j2 in cells.size():
+			var won := j2 == 3 and best == "WON"
+			var cell_x: float = cx + cw * cols[j2 + 1]
+			var cell_w: float = cw * ((cols[j2 + 2] if j2 + 2 < cols.size() else 1.0) - cols[j2 + 1]) - 8
+			if j2 == 3 and cup > 0:
+				UiKit.draw_trophy(self, Vector2(cell_x + 12, r.position.y + 44), 34, cup, 1.0, t.id)
+				cell_x += 30
+				cell_w -= 30
+			var poor: bool = j2 == 1 and now and Game.career_money < c.fee
+			draw_string(UiKit.font("display", 0, true), Vector2(cell_x, r.position.y + 33), cells[j2].to_upper(),
+				HORIZONTAL_ALIGNMENT_LEFT, cell_w, UiKit.fit("display", cells[j2].to_upper(), cell_w, 19, 13),
+				UiKit.ACCENT if won else (UiKit.COP_RED if poor else col))
 	# The focused circuit's races, as postcards.
 	var c := circuit()
 	if c.is_empty():
 		return
-	var y := _c_rect(t.circuits.size()).position.y + 18
-	draw_string(UiKit.font("cond", 3), Vector2(x, y), "RACES", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.ACCENT)
-	draw_line(Vector2(x + 64, y - 5), Vector2(size.x, y - 5), UiKit.INK_FAINT, 1.0)
+	var y := _c_rect(t.circuits.size()).position.y + 22
+	UiKit.kicker(self, Vector2(x, y), "The races of circuit %d" % (_ci + 1), w)
 	y += 14
 	var n: int = c.races.size()
-	var gap := 12.0
-	var tw := minf(200.0, (w - gap * (n - 1)) / maxf(n, 1))
+	var gap := 14.0
+	var tw := minf(220.0, (w - gap * (n - 1)) / maxf(n, 1))
 	var th := tw * 9.0 / 16.0
-	if y + th + 40 > size.y:
-		th = maxf(size.y - y - 40, 30.0)
+	if y + th + 56 > size.y:
+		th = maxf(size.y - y - 56, 30.0)
 		tw = minf(tw, th * 16.0 / 9.0)
 	for i in n:
 		var race: Dictionary = c.races[i]
@@ -340,15 +385,45 @@ func _draw() -> void:
 		if tex:
 			draw_texture_rect(tex, img, false, Color(1, 1, 1) if open else Color(0.5, 0.5, 0.5))
 		else:
-			draw_rect(img, Color(0.08, 0.09, 0.11))
-		draw_rect(img, Color(1, 1, 1, 0.15), false, 1.0)
-		UiKit.draw_slant(self, Rect2(img.position + Vector2(6, 6), Vector2(22, 20)), UiKit.ACCENT, 0.15)
+			UiKit.box(self, img, Color(0.08, 0.09, 0.11), 4)
+		UiKit.box(self, img, Color(0, 0, 0, 0), 4, Color(1, 1, 1, 0.15))
+		UiKit.box(self, Rect2(img.position + Vector2(6, 6), Vector2(22, 20)), UiKit.ACCENT, 3)
 		draw_string(df, img.position + Vector2(6, 22), str(i + 1), HORIZONTAL_ALIGNMENT_CENTER, 22, 16, UiKit.BG)
 		var name := Game.track_name(id).to_upper() if id != "" else "NOT INSTALLED"
 		draw_string(df, Vector2(img.position.x, img.end.y + 20), name, HORIZONTAL_ALIGNMENT_LEFT, tw, 17, UiKit.INK)
-		draw_string(cf, Vector2(img.position.x, img.end.y + 36), _tags(race), HORIZONTAL_ALIGNMENT_LEFT, tw, 11, UiKit.INK_DIM)
+		draw_string(bf, Vector2(img.position.x, img.end.y + 37), _tags(race), HORIZONTAL_ALIGNMENT_LEFT, tw, 13, UiKit.INK_DIM)
 	if _message != "":
-		draw_string(UiKit.font("cond", 2), Vector2(x, size.y - 6), _message.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, w, 15, UiKit.COP_RED)
+		draw_string(UiKit.font("body_bold"), Vector2(x, size.y - 14), _message, HORIZONTAL_ALIGNMENT_LEFT, w, 15, UiKit.COP_RED)
+
+
+## Top right: the money, and under it the circuit trophies won, gold, silver and bronze (each
+## shown as the first tournament's it was won in).
+func _draw_purse(right: Vector2) -> void:
+	var n := [0, 0, 0]
+	var design := [1, 1, 1]
+	for t in _tours:
+		for cid in t.circuits:
+			var p := Game.circuit_trophy(int(cid))
+			if p > 0 and Game.career_data().circuits.get(int(cid), {}).get("type", 0) != HsCareer.TYPE_CAR_RACE:
+				if n[p - 1] == 0:
+					design[p - 1] = t.id
+				n[p - 1] += 1
+	var mf := UiKit.font("display", 0, true)
+	var m := UiKit.money(Game.career_money)
+	draw_string(mf, Vector2(right.x - 400, right.y + 8), m, HORIZONTAL_ALIGNMENT_RIGHT, 400, 30, UiKit.ACCENT)
+	var mw := mf.get_string_size(m, HORIZONTAL_ALIGNMENT_LEFT, -1, 30).x
+	draw_string(UiKit.font("body"), Vector2(right.x - mw - 130, right.y + 5), "Money", HORIZONTAL_ALIGNMENT_RIGHT, 120, 14,
+		UiKit.INK_DIM)
+	var x := right.x
+	var y := right.y + 34
+	for k in [2, 1, 0]:
+		var num := str(n[k])
+		x -= UiKit.text_width("display", num, 16, 0)
+		draw_string(UiKit.font("display", 0, true), Vector2(x, y + 1), num, HORIZONTAL_ALIGNMENT_LEFT, -1, 16,
+			UiKit.INK if n[k] > 0 else UiKit.INK_FAINT)
+		x -= 18
+		UiKit.draw_trophy(self, Vector2(x + 7, y + 5), 22, k + 1, 1.0 if n[k] > 0 else 0.3, design[k])
+		x -= 16
 
 
 func _won(t: Dictionary) -> int:
@@ -366,21 +441,12 @@ func _opened_by(t: Dictionary) -> String:
 	return ""
 
 
-func _lock(c: Vector2, col: Color) -> void:
-	draw_rect(Rect2(c + Vector2(-6, -2), Vector2(12, 9)), col)
-	draw_arc(c + Vector2(0, -3), 4.0, PI, TAU, 10, col, 2.0, true)
-
-
-func _tick(c: Vector2, col: Color) -> void:
-	draw_polyline(PackedVector2Array([c + Vector2(-6, 0), c + Vector2(-2, 4), c + Vector2(6, -5)]), col, 2.5, true)
-
-
 static func _tags(r: Dictionary) -> String:
 	var tags := PackedStringArray()
 	for k in ["reverse", "mirror", "night", "weather"]:
 		if r[k]:
 			tags.append({"reverse": "reversed", "mirror": "mirrored", "night": "night", "weather": "wet"}[k])
-	return " · ".join(tags).to_upper() if not tags.is_empty() else "FORWARD · DAY"
+	return (" · ".join(tags) if not tags.is_empty() else "forward · day").capitalize()
 
 
 ## "Celtic Ruins · Dolphin Cove · Kindiak Park" for the circuit's races.
@@ -389,7 +455,7 @@ static func _races_text(c: Dictionary) -> String:
 	for r: Dictionary in c.races:
 		var id := HsCareer.track_id(r.track)
 		out.append(Game.track_name(id) if id != "" else "?")
-	return " · ".join(out).to_upper()
+	return " · ".join(out)
 
 
 static func _result(cid: int) -> String:

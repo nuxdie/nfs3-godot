@@ -1,6 +1,6 @@
 extends Node
 ## Photographs cars in a plain studio, parked on their springs:
-##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops] [id ...] [--lights] [--big] [--low]
+##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|pu] [id ...] [--lights] [--big] [--low]
 ##       [--yaw=DEG ...] [--dist=M] [--wire] [--track=ID [--at=LAP FRACTION] [--night] [--weather]]
 ##       [--tag=NAME] [--siren] [--steer=-1..1]
 ## Each car is shot from the front and rear three-quarters (or from each --yaw, 0 = dead
@@ -49,10 +49,17 @@ func _run() -> void:
 		"hstraffic": paths = Game.hs_traffic_cars
 		"heli": paths = [Game.hs_helicopter] if Game.hs_helicopter != "" else []
 		"cars": paths = Game.cars.map(func(c): return c.path)
+		"pu": paths = Game.cars.filter(func(c): return Game.is_pu_path(c.path)).map(func(c): return c.path)
+		"pucops": paths = Game.pu_cop_cars
+		"putraffic": paths = Game.pu_traffic_cars
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)
 	if not ids.is_empty():
-		paths = paths.filter(func(p: String) -> bool: return p.get_file() in ids)
+		# Porsche Unleashed cars go by their car id (pu_993coupe36), the others by folder.
+		var id_of := {}
+		for c in Game.cars:
+			id_of[c.path] = c.id
+		paths = paths.filter(func(p: String) -> bool: return p.get_file() in ids or id_of.get(p, "") in ids)
 	var lights := "--lights" in args
 	var big := "--big" in args
 	var low := "--low" in args

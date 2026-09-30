@@ -21,13 +21,15 @@ func _init() -> void:
 	title = "TRACKS"
 	noun = "tracks"
 	grid = true
-	head_h = 158.0
+	head_h = 140.0
 	total = Game.tracks.size()
 	var chips := PackedStringArray(["ALL"])
-	var has_hs := Game.tracks.any(func(id: String) -> bool: return Game.is_hs_track(id))
-	var has_nfs3 := Game.tracks.any(func(id: String) -> bool: return not Game.is_hs_track(id) and id != Game.PROCEDURAL_TRACK)
-	if has_hs and has_nfs3:
-		chips.append_array(["NFS III", "HIGH STAKES"])
+	var games := PackedStringArray()
+	for g in Game.GAME_NAMES.size():
+		if Game.tracks.any(func(id: String) -> bool: return id != Game.PROCEDURAL_TRACK and Game.track_game(id) == g):
+			games.append(Game.GAME_NAMES[g])
+	if games.size() > 1:
+		chips.append_array(games)
 	filters.set_items(chips, 0)
 
 
@@ -38,6 +40,8 @@ func hints() -> Array:
 func section(id: String) -> String:
 	if id == Game.PROCEDURAL_TRACK:
 		return "GENERATED"
+	if Game.is_pu_track(id):
+		return "PORSCHE UNLEASHED · POINT TO POINT" if Game.is_sprint(id) else "PORSCHE UNLEASHED · CIRCUITS"
 	if not Game.is_hs_track(id):
 		return "NEED FOR SPEED III"
 	if id.trim_prefix(Game.HS_PREFIX) in REMAKES:
@@ -65,7 +69,8 @@ func map_of(id: String) -> Dictionary:
 				var p := Vector2(pts[i].x, pts[i].z)
 				lo = lo.min(p)
 				hi = hi.max(p)
-				len_m += pts[i].distance_to(pts[(i + 1) % pts.size()])
+				if i + 1 < pts.size() or not Game.is_sprint(id):
+					len_m += pts[i].distance_to(pts[(i + 1) % pts.size()])
 			var s := maxf(hi.x - lo.x, hi.y - lo.y)
 			for p3 in pts:
 				out.append((Vector2(p3.x, p3.z) - lo) / s)
@@ -78,8 +83,10 @@ func _build_entries() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
 	var last := ""
 	# Sections in a fixed order, tracks in the game's order within them.
-	for sec in ["NEED FOR SPEED III", "HIGH STAKES", "HIGH STAKES · NFS III REMAKES", "GENERATED"]:
-		if (game == "NFS III" and sec != "NEED FOR SPEED III") or (game == "HIGH STAKES" and not sec.begins_with("HIGH")):
+	for sec in ["NEED FOR SPEED III", "HIGH STAKES", "HIGH STAKES · NFS III REMAKES",
+			"PORSCHE UNLEASHED · POINT TO POINT", "PORSCHE UNLEASHED · CIRCUITS", "GENERATED"]:
+		if (game == "NFS III" and sec != "NEED FOR SPEED III") or (game == "HIGH STAKES" and not sec.begins_with("HIGH")) \
+				or (game == "PORSCHE" and not sec.begins_with("PORSCHE")):
 			continue
 		for i in Game.tracks.size():
 			var id := Game.tracks[i]
@@ -101,7 +108,7 @@ func _columns(w: float) -> int:
 
 func _layout_entries(w: float) -> float:
 	var cols := _columns(w)
-	var cw := (w - PAD * 2 - 8 - GAP * (cols - 1)) / cols
+	var cw := (w - 14 - GAP * (cols - 1)) / cols
 	var ch := cw * 9.0 / 16.0 + 46.0
 	var y := 0.0
 	var col := 0
@@ -113,7 +120,7 @@ func _layout_entries(w: float) -> float:
 			e.rect = Rect2(0, y, w, 38)
 			y += 38 + 6
 		else:
-			e.rect = Rect2(PAD + col * (cw + GAP), y, cw, ch)
+			e.rect = Rect2(col * (cw + GAP), y, cw, ch)
 			col += 1
 			if col == cols:
 				col = 0
@@ -131,9 +138,9 @@ func _draw_entry(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered
 	if tex:
 		ci.draw_texture_rect(tex, img, false, Color(lit, lit, lit))
 	else:
-		ci.draw_rect(img, Color(0.08, 0.09, 0.11))
-		ci.draw_string(UiKit.font("cond", 2), Vector2(img.position.x, img.get_center().y + 5), "RENDERING…",
-			HORIZONTAL_ALIGNMENT_CENTER, img.size.x, 12, UiKit.INK_FAINT)
+		UiKit.box(ci, img, Color(0.08, 0.09, 0.11), 4)
+		ci.draw_string(UiKit.font("cond", 1), Vector2(img.position.x, img.get_center().y + 5), "RENDERING…",
+			HORIZONTAL_ALIGNMENT_CENTER, img.size.x, 13, UiKit.INK_DIM)
 	# The outline in the corner, over a dark wash.
 	var m := map_of(id)
 	var pts: PackedVector2Array = m.pts
@@ -147,29 +154,33 @@ func _draw_entry(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered
 		var sp := PackedVector2Array()
 		for p in pts:
 			sp.append(off + p * s)
-		sp.append(sp[0])
+		var open := Game.is_sprint(id)
+		if not open:
+			sp.append(sp[0])
 		ci.draw_polyline(sp, Color(0, 0, 0, 0.55), 4.0, true)
 		ci.draw_polyline(sp, UiKit.ACCENT if focused else Color(1, 1, 1, 0.85), 1.6, true)
-	if e.item == current:
-		var tf := UiKit.font("cond", 2)
-		var tw := tf.get_string_size("SELECTED", HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x + 12
-		ci.draw_rect(Rect2(img.position + Vector2(8, 8), Vector2(tw, 18)), UiKit.ACCENT)
-		ci.draw_string(tf, img.position + Vector2(14, 21), "SELECTED", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, UiKit.BG)
+		if open:
+			UiKit.route_ends(ci, sp[0], sp[1] - sp[0], sp[-1], 0.6)
+	if e.item == picked:
+		var tf := UiKit.font("cond", 1)
+		var tw := tf.get_string_size("IN USE", HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x + 14
+		UiKit.box(ci, Rect2(img.position + Vector2(8, 8), Vector2(tw, 20)), UiKit.ACCENT, 10)
+		ci.draw_string(tf, img.position + Vector2(15, 22), "IN USE", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, UiKit.BG)
 	if focused:
-		ci.draw_rect(img.grow(1), UiKit.ACCENT, false, 3.0)
+		UiKit.box(ci, img.grow(2), Color(0, 0, 0, 0), 5, UiKit.ACCENT, 3)
 	elif hovered:
-		ci.draw_rect(img, Color(1, 1, 1, 0.5), false, 1.0)
+		UiKit.box(ci, img.grow(1), Color(0, 0, 0, 0), 4, Color(1, 1, 1, 0.5), 1)
 	# Caption.
 	var name := Game.track_name(id).to_upper()
 	var nf := UiKit.font("display")
-	var fs := 20
-	while fs > 14 and nf.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > r.size.x:
-		fs -= 1
+	var fs := UiKit.fit("display", name, r.size.x, 19, 14)
 	ci.draw_string(nf, Vector2(r.position.x, img.end.y + 22), name, HORIZONTAL_ALIGNMENT_LEFT, r.size.x, fs,
 		UiKit.ACCENT if focused else UiKit.INK)
 	var km: float = m.km
-	var sub := ("%.1f KM" % km if Game.units_kmh else "%.1f MI" % (km / 1.609)) if km > 0 else ""
+	var sub := UiKit.dist(km) if km > 0 else ""
+	if Game.is_sprint(id):
+		sub += "  ·  point to point" if sub != "" else "Point to point"
 	if precip(id) == Nfs3Horizon.Precip.SNOW:
-		sub += "  ·  SNOW"
-	ci.draw_string(UiKit.font("cond", 2), Vector2(r.position.x, img.end.y + 40), sub, HORIZONTAL_ALIGNMENT_LEFT, r.size.x, 12,
+		sub += "  ·  snow"
+	ci.draw_string(UiKit.font("body"), Vector2(r.position.x, img.end.y + 40), sub, HORIZONTAL_ALIGNMENT_LEFT, r.size.x, 13,
 		UiKit.INK_DIM)

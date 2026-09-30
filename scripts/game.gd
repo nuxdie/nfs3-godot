@@ -30,11 +30,25 @@ const HS_SLIDES := {
 	"gt1": 7, "gt2": 8, "gt3": 9, "hometown": 10, "redrock": 11, "atlantic": 12, "rockypas": 13,
 	"country": 14, "lostcany": 15, "aquatica": 16, "summit": 17, "empire": 18,
 }
+## Porsche Unleashed tracks (GameData/Track/<name>.crp) in the game's order, with their
+## names; ids are PU_PREFIX + the name.
+const PU_PREFIX := "pu_"
+const PU_TRACK_NAMES := {
+	"farmland": "Normandie", "forest": "Schwarzwald", "foothills": "Corsica",
+	"coastal": "Côte d'Azur", "canyon": "Pyrénées", "alps": "Alps", "castle": "Auvergne",
+	"autobahn": "Autobahn", "industrial": "Zone Industrielle",
+	"monaco1": "Monte Carlo 1", "monaco2": "Monte Carlo 2", "monaco3": "Monte Carlo 3",
+	"monaco4": "Monte Carlo 4", "monaco5": "Monte Carlo 5", "skidpad": "Skid Pad",
+}
 const PROCEDURAL_TRACK := "procedural"
 const SETTINGS_PATH := "user://settings.cfg"
 
 var data_root := ""          # folder containing gamedata/
 var hs_root := ""            # High Stakes Data/ folder (containing tracks/ and gameart/), or ""
+var pu_root := ""            # Porsche Unleashed GameData/ folder (containing Track/ and Carmodel/), or ""
+var _pu_cars := {}           # car path "pu:<n>" -> its FeData/Data/nfs5.car record (Nfs5Car.car_table)
+var pu_cop_cars: Array[String] = []      # Porsche Unleashed's police and traffic ("pu:<n>"), for its tracks
+var pu_traffic_cars: Array[String] = []
 var tracks: Array[String] = []   # track ids (folder names), plus PROCEDURAL_TRACK
 var cars: Array[Dictionary] = [] # {id, name, path}; High Stakes ones after NFS3's, ids HS_PREFIX + folder
 var cop_cars: Array[String] = []
@@ -69,6 +83,7 @@ var units_kmh := true
 var night := false
 var weather := false      # the track's rain or snow
 var damage := true        # crashes dent the cars and cost power (not in the original)
+var tops_down := true     # Porsche Unleashed's cabriolets with the hood folded (Nfs5Car.hood_down)
 var quality := Quality.HIGH   # replaced by default_quality() until the player picks one
 var camera_mode := 0      # index into ChaseCamera.MODES, kept from race to race
 var fullscreen := false
@@ -155,6 +170,19 @@ func candidate_hs_roots() -> PackedStringArray:
 	])
 
 
+## Where a Need for Speed: Porsche Unleashed install's GameData folder may be, first match wins.
+func candidate_pu_roots() -> PackedStringArray:
+	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var home := OS.get_environment("HOME")
+	var lutris := "need-for-speed-porsche-unleashed/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Porsche Unleashed/GameData"
+	return PackedStringArray([
+		OS.get_environment("NFS5_DATA"),
+		res.get_base_dir().path_join("OpenNFS/resources/NFS_5/GameData"),
+		res.get_base_dir().path_join(lutris),
+		home.path_join("Games").path_join(lutris),
+	])
+
+
 func scan_data() -> void:
 	tracks.clear()
 	cars.clear()
@@ -194,6 +222,7 @@ func scan_data() -> void:
 				if c.is_valid_int() and find_ci(traffic_dir.path_join(c), "car.viv") != "":
 					traffic_cars.append(traffic_dir.path_join(c))
 	_scan_hs()
+	_scan_pu()
 	tracks.append(PROCEDURAL_TRACK)
 	if cars.is_empty():
 		for i in ProceduralCar.PRESETS.size():
@@ -229,6 +258,46 @@ func _scan_hs() -> void:
 		if not HS_TRACK_NAMES.has(t):
 			tracks.append(HS_PREFIX + t)
 	_scan_hs_cars(find_ci(hs_root, "cars"))
+
+
+## Adds the Porsche Unleashed tracks, in the game's order.
+func _scan_pu() -> void:
+	var roots := PackedStringArray([pu_root]) + candidate_pu_roots()
+	pu_root = ""
+	for r in roots:
+		if r != "" and find_ci(r, "track") != "" and find_ci(r, "carmodel") != "":
+			pu_root = r
+			break
+	if pu_root == "":
+		return
+	var tdir := find_ci(pu_root, "track")
+	for t in PU_TRACK_NAMES:
+		if find_ci(tdir, t + ".crp") != "" and find_ci(tdir, t + ".fsh") != "":
+			tracks.append(PU_PREFIX + t)
+	# Its cars, in the car table's order (by era), leaving out the Factory Driver's copies of
+	# three of them; its police cars and traffic are kept for its tracks.
+	_pu_cars.clear()
+	pu_cop_cars.clear()
+	pu_traffic_cars.clear()
+	var cdir := find_ci(pu_root, "carmodel")
+	for rec in Nfs5Car.car_table(pu_root):
+		var m: String = rec.model.to_lower()
+		if rec.name.begins_with("Cop"):
+			# The 356 cruisers' records name the plain 356 B; theirs is cop356 (with its light bar).
+			if m == "356b":
+				rec.model = "cop356_german" if rec.name.contains("German") else "cop356"
+				rec.style = 0
+				m = rec.model
+		if m in ["fboxster", "f901", "f996"] or find_ci(cdir, m + ".crp") == "":
+			continue
+		var path := "pu:%d" % rec.index
+		_pu_cars[path] = rec
+		if rec.name.begins_with("Cop"):
+			pu_cop_cars.append(path)
+		elif rec.sim == "":
+			pu_traffic_cars.append(path)
+		else:
+			cars.append({"id": PU_PREFIX + rec.sim.to_lower(), "name": Nfs5Car._display_name(rec.name), "path": path})
 
 
 ## High Stakes cars join the list after NFS3's; one NFS3 also has ("Ferrari 550 Maranello")
@@ -268,6 +337,8 @@ func _scan_hs_cars(cdir: String) -> void:
 ## The police cars for the chosen track: High Stakes' on its tracks, NFS3's on the others
 ## (either game's when the other has none).
 func cop_models() -> Array[String]:
+	if is_pu_track(track_id) and not pu_cop_cars.is_empty():
+		return pu_cop_cars
 	if (is_hs_track(track_id) or cop_cars.is_empty()) and not hs_cop_cars.is_empty():
 		return hs_cop_cars
 	return cop_cars
@@ -276,6 +347,11 @@ func cop_models() -> Array[String]:
 ## The traffic for the chosen track, as cop_models(). High Stakes' snowplow only turns out
 ## on its snowy track.
 func traffic_models() -> Array[String]:
+	if is_pu_track(track_id) and not pu_traffic_cars.is_empty():
+		# Its snowplough (EAS4) only turns out in the Alps.
+		if track_id == PU_PREFIX + "alps":
+			return pu_traffic_cars
+		return pu_traffic_cars.filter(func(p: String) -> bool: return _pu_cars[p].model.to_lower() != "eas4")
 	if (is_hs_track(track_id) or traffic_cars.is_empty()) and not hs_traffic_cars.is_empty():
 		if track_id == HS_PREFIX + "snowy":
 			return hs_traffic_cars
@@ -295,21 +371,49 @@ func is_hs_track(id: String) -> bool:
 	return id.begins_with(HS_PREFIX)
 
 
+## High Stakes' remake of NFS3 track `id` (its id), or "" (its signs' mirrored copies
+## serve the NFS3 track's mirrored layout).
+func hs_remake(id: String) -> String:
+	var folder: Variant = MusicPlayer.HS_REMAKES.find_key(id)
+	return HS_PREFIX + folder if folder != null and hs_root != "" else ""
+
+
+func is_pu_track(id: String) -> bool:
+	return id.begins_with(PU_PREFIX)
+
+
+## Whether the track is a point-to-point run (Porsche Unleashed's, but for the Monte Carlo
+## circuits and the skid pad), raced once from start to finish.
+func is_sprint(id: String) -> bool:
+	return is_pu_track(id) and not id.trim_prefix(PU_PREFIX).begins_with("monaco") and id != PU_PREFIX + "skidpad"
+
+
+## Laps of the race on the chosen track: one on a point-to-point run.
+func race_laps() -> int:
+	return 1 if is_sprint(track_id) else laps
+
+
 func track_name(id: String) -> String:
 	if id == PROCEDURAL_TRACK:
 		return ProcPlaces.names(ProceduralTrack.SEED).town
 	if is_hs_track(id):
 		var folder := id.trim_prefix(HS_PREFIX)
 		return HS_TRACK_NAMES.get(folder, folder.capitalize())
+	if is_pu_track(id):
+		var pu := id.trim_prefix(PU_PREFIX)
+		return PU_TRACK_NAMES.get(pu, pu.capitalize())
 	return TRACK_NAMES.get(id, id)
 
 
 ## The track's folder, or "" for the procedural track (or a track whose data is gone).
+## A Porsche Unleashed track's is its .crp file (they share one folder).
 func track_dir(id: String) -> String:
 	if id == PROCEDURAL_TRACK:
 		return ""
 	if is_hs_track(id):
 		return find_ci(find_ci(hs_root, "tracks"), id.trim_prefix(HS_PREFIX))
+	if is_pu_track(id):
+		return find_ci(find_ci(pu_root, "track"), id.trim_prefix(PU_PREFIX) + ".crp")
 	return find_ci(find_ci(data_root, "gamedata/tracks"), id)
 
 
@@ -330,6 +434,17 @@ func _sorted_dirs(path: String) -> PackedStringArray:
 	return out
 
 
+## Porsche Unleashed's cabriolets with their tops down or up: the loaded ones are read again.
+func set_tops_down(down: bool) -> void:
+	if down == tops_down:
+		return
+	tops_down = down
+	Nfs5Car.hood_down = down
+	for key: String in _car_cache.keys():
+		if is_pu_path(key):
+			_car_cache.erase(key)
+
+
 ## Loaded car data (cached). `path` == "" means a procedural car preset.
 func load_car(path: String, preset := 0) -> Object:
 	var key := path if path != "" else "preset%d" % preset
@@ -337,7 +452,7 @@ func load_car(path: String, preset := 0) -> Object:
 		if path == "":
 			_car_cache[key] = ProceduralCar.make(preset)
 		else:
-			var car := Nfs3Car.load_dir(path)
+			var car: Nfs3Car = Nfs5Car.load_car(pu_root, _pu_cars[path]) if is_pu_path(path) else Nfs3Car.load_dir(path)
 			if car.error != "" or car.body_parts.is_empty():
 				# A damaged car file: race a stand-in rather than an invisible car.
 				push_warning("Car %s failed to load (%s), using a stand-in" % [path, car.error])
@@ -357,7 +472,7 @@ func car_spec(i: int) -> Object:
 		return load_car(c.path, i)
 	if not _spec_cache.has(i):
 		_spec_cache[i] = ProceduralCar.make(i % ProceduralCar.PRESETS.size()) if c.path == "" \
-			else Nfs3Car.peek_spec(c.path)
+			else Nfs5Car.peek(pu_root, _pu_cars[c.path]) if is_pu_path(c.path) else Nfs3Car.peek_spec(c.path)
 	return _spec_cache[i]
 
 
@@ -366,6 +481,39 @@ func car_class(i: int) -> int:
 	var spec := car_spec(i)
 	var v: float = spec.carp_value(1, 3.0)
 	return clampi(int(v), 0, 3)
+
+
+## Porsche Unleashed's photos of its tracks: FeData/Trackart/<name>sp.fsh, some names cut short.
+const PU_TRACK_ART := {"canyon": "canysp", "farmland": "farmsp", "foothills": "foothisp", "industrial": "industsp"}
+
+
+## A Porsche Unleashed track's first photo (256 x 192), or null.
+func pu_track_photo(id: String) -> Image:
+	var name := id.trim_prefix(PU_PREFIX)
+	var file: String = PU_TRACK_ART.get(name, name + "sp") + ".fsh"
+	var fsh := Fsh.load_file(find_ci(pu_root.get_base_dir(), "FeData/Trackart/" + file)) if pu_root != "" else null
+	return fsh.images[0] if fsh and fsh.images.size() > 0 else null
+
+
+## Which game a car or track comes from: 0 NFS III (and the stand-ins), 1 High Stakes,
+## 2 Porsche Unleashed.
+const GAME_NAMES := ["NFS III", "HIGH STAKES", "PORSCHE"]
+
+
+func car_game(i: int) -> int:
+	return 2 if is_pu_car(i) else 1 if is_hs_car(i) else 0
+
+
+func track_game(id: String) -> int:
+	return 2 if is_pu_track(id) else 1 if is_hs_track(id) else 0
+
+
+func is_pu_path(path: String) -> bool:
+	return path.begins_with("pu:") and _pu_cars.has(path)
+
+
+func is_pu_car(i: int) -> bool:
+	return str(cars[i].id).begins_with(PU_PREFIX)
 
 
 func is_hs_car(i: int) -> bool:
@@ -523,6 +671,11 @@ func player_car_data() -> Object:
 # ------------------------------------------------------------------ settings
 
 func save_settings() -> void:
+	# Mid-circuit, the player's own race settings, not the circuit's.
+	var circuit := {}
+	if not _before_circuit.is_empty():
+		circuit = _race_settings()
+		_set_race_settings(_before_circuit)
 	var cf := ConfigFile.new()
 	cf.set_value("game", "data_root", data_root)
 	cf.set_value("game", "mode", mode)
@@ -545,6 +698,7 @@ func save_settings() -> void:
 	cf.set_value("game", "night", night)
 	cf.set_value("game", "weather", weather)
 	cf.set_value("game", "damage", damage)
+	cf.set_value("game", "tops_down", tops_down)
 	cf.set_value("game", "quality", quality)
 	cf.set_value("game", "camera", camera_mode)
 	cf.set_value("game", "fullscreen", fullscreen)
@@ -554,6 +708,8 @@ func save_settings() -> void:
 	cf.set_value("game", "sfx_volume", sfx_volume)
 	cf.set_value("game", "voice_volume", voice_volume)
 	cf.save(SETTINGS_PATH)
+	if not circuit.is_empty():
+		_set_race_settings(circuit)
 
 
 ## The game was "NFS3 Revival" until it took in High Stakes, and Godot keeps user:// under
@@ -613,6 +769,8 @@ func _load_settings() -> void:
 	night = _bool(cf, "night", night)
 	weather = _bool(cf, "weather", weather)
 	damage = _bool(cf, "damage", damage)
+	tops_down = _bool(cf, "tops_down", tops_down)
+	Nfs5Car.hood_down = tops_down
 	quality = clampi(_int(cf, "quality", quality), 0, QUALITY_NAMES.size() - 1) as Quality
 	camera_mode = clampi(_int(cf, "camera", camera_mode), 0, ChaseCamera.MODES.size() - 1)
 	fullscreen = _bool(cf, "fullscreen", fullscreen)
@@ -780,21 +938,38 @@ func _bind(action: String, keys: Array, buttons: Array, axis := -1) -> void:
 
 # ------------------------------------------------------------------ tournaments
 
-## High Stakes' tournaments (HsCareer): money won, circuits won, the tournaments opened,
-## kept in user://career.cfg. The upgrades and cars stay free: money is the entry fees and
-## the prizes, a score to climb.
+## High Stakes' tournaments (HsCareer), kept in user://career.cfg: your money, the cars you
+## own (the garage: bought from the dealer at High Stakes' own prices, or won), each one's
+## upgrades and crash damage, the circuits' best results and the tournaments opened. Entry
+## fees, cars, upgrades and repairs cost money; prizes and selling cars bring it in.
 const CAREER_PATH := "user://career.cfg"
 const CAREER_START_MONEY := 25000
 const CIRCUIT_POINTS := [10, 8, 6, 5, 4, 3, 2, 1]
+## Mending a wreck costs this share of the car's price (less damage, less). A car sells for
+## this share of what was paid for it and its upgrades, less what mending it would cost.
+const REPAIR_SHARE := 0.15
+const RESALE_SHARE := 0.6
 
 var career_path := CAREER_PATH   # (tests point this elsewhere)
 var career_money := CAREER_START_MONEY
-var career_won := {}        # circuit id -> best final place (1 = won)
+var career_won := {}        # circuit id -> best final place (1 = won; 1..3 a trophy)
 var career_open := {}       # tournament ids opened by winning others
+var career_garage := {}     # car id -> {upgrade: 0..3, damage: 0..1}, the cars you own
 ## The circuit being raced, between its races: {tournament, circuit, race (index), field
-## (rival car indices), points (key -> points; key "you" or the field index), out (field
-## indices knocked out, in order), you_out}. {} outside a tournament.
-var circuit_run := {}
+## ([{car, upgrade}]), points (key -> points; key "you" or the field index), last (key ->
+## place in the last race), gained (key -> points from it), out (field indices knocked out,
+## in order), you_out}. {} outside a tournament. Ending it puts back the race settings the
+## circuit took over (_before_circuit).
+var circuit_run := {}:
+	set(v):
+		if v.is_empty() and not _before_circuit.is_empty():
+			_set_race_settings(_before_circuit)
+			_before_circuit = {}
+		circuit_run = v
+## The player's own race settings while a circuit has them (_race_settings()), {} otherwise:
+## what save_settings writes in their place, so a circuit's never become the player's.
+var _before_circuit := {}
+var menu_screen := ""       # the front end's screen to come back to after a race ("tournaments")
 var _career: HsCareer
 var _career_loaded := false
 
@@ -812,6 +987,12 @@ func career_data() -> HsCareer:
 			career_won = w if w is Dictionary else {}
 			var o: Variant = cf.get_value("career", "open", {})
 			career_open = o if o is Dictionary else {}
+			var g: Variant = cf.get_value("career", "garage", {})
+			if g is Dictionary:
+				for id in g:
+					if g[id] is Dictionary:
+						career_garage[str(id)] = {"upgrade": clampi(int(g[id].get("upgrade", 0)), 0, Car.UPGRADES.size()),
+							"damage": clampf(float(g[id].get("damage", 0.0)), 0.0, 1.0)}
 	return _career
 
 
@@ -820,11 +1001,33 @@ func save_career() -> void:
 	cf.set_value("career", "money", career_money)
 	cf.set_value("career", "won", career_won)
 	cf.set_value("career", "open", career_open)
+	cf.set_value("career", "garage", career_garage)
 	cf.save(career_path)
+
+
+## Starts the tournaments over: the starting money, no cars, nothing won or opened.
+func new_career() -> void:
+	career_money = CAREER_START_MONEY
+	career_won = {}
+	career_open = {}
+	career_garage = {}
+	circuit_run = {}
+	save_career()
 
 
 func tournament_open(t: Dictionary) -> bool:
 	return t.open or career_open.has(t.id)
+
+
+## Every circuit of tournament `t` won: its trophy.
+func tournament_won(t: Dictionary) -> bool:
+	return not t.circuits.is_empty() and t.circuits.all(func(id) -> bool: return int(career_won.get(id, 99)) == 1)
+
+
+## Circuit `cid`'s trophy: 1 gold, 2 silver, 3 bronze for its best finish; 0 none.
+func circuit_trophy(cid: int) -> int:
+	var p := int(career_won.get(cid, 0))
+	return p if p >= 1 and p <= 3 else 0
 
 
 ## Whether car `i` may enter circuit `c`, by its restriction as High Stakes checks it: its
@@ -860,6 +1063,177 @@ const CHAMPION_SERIALS := [18, 2, 42]
 const CHAMPIONS_CIRCUIT := 32
 
 
+## With High Stakes' cars installed the tournaments deal and sell only those.
+func _hs_cars_only() -> bool:
+	return range(cars.size()).any(func(k: int) -> bool: return is_hs_car(k))
+
+
+# ------------------------------------------------------------------ the garage
+
+func _car_by_id(id: String) -> int:
+	for i in cars.size():
+		if cars[i].id == id:
+			return i
+	return -1
+
+
+func owns(i: int) -> bool:
+	return i >= 0 and i < cars.size() and career_garage.has(cars[i].id)
+
+
+## The cars you own (indices), cheapest first.
+func garage_cars() -> Array:
+	var out := []
+	for id: String in career_garage:
+		var i := _car_by_id(id)
+		if i >= 0:
+			out.append(i)
+	out.sort_custom(func(a: int, b: int) -> bool: return career_price(a) < career_price(b))
+	return out
+
+
+## The cars the dealer sells: those the tournaments deal into their fields (High Stakes'
+## own when installed; not the police's, the bonus cars or the Knockout), cheapest first.
+## The bonus cars are won.
+func dealer_cars() -> Array:
+	var hs_only := _hs_cars_only()
+	var out := []
+	for i in cars.size():
+		if is_pursuit_car(i) or (hs_only and not is_hs_car(i)) or hs_class(i) < 0 or car_serial(i) in BONUS_SERIALS:
+			continue
+		out.append(i)
+	out.sort_custom(func(a: int, b: int) -> bool: return career_price(a) < career_price(b))
+	return out
+
+
+## What the dealer asks for car `i`: High Stakes' price for it (fedata), or for a car
+## without one what High Stakes asks for one rated as it is.
+func career_price(i: int) -> int:
+	var p := int(car_rank(i).get("price", 0))
+	if p > 0:
+		return p
+	return roundi(20000.0 * pow(1.22, car_rating(i) - 3) / 1000.0) * 1000
+
+
+## What upgrade `level` (1..3) of car `i` costs (fedata's figures); 0 if it takes none.
+func upgrade_cost(i: int, level: int) -> int:
+	if not car_rank(i).get("upgradable", false) or level < 1 or level > Car.UPGRADES.size():
+		return 0
+	var costs: Array = car_rank(i).get("upgrade_costs", [])
+	if level - 1 < costs.size() and int(costs[level - 1]) > 0:
+		return int(costs[level - 1])
+	return roundi(career_price(i) * [0.2, 0.25, 0.4][level - 1] / 50.0) * 50
+
+
+func garage_upgrade(i: int) -> int:
+	return int(career_garage[cars[i].id].upgrade) if owns(i) else 0
+
+
+func garage_damage(i: int) -> float:
+	return float(career_garage[cars[i].id].damage) if owns(i) else 0.0
+
+
+func set_garage_damage(i: int, d: float) -> void:
+	if owns(i):
+		career_garage[cars[i].id].damage = clampf(d, 0.0, 1.0)
+
+
+## What mending car `i` costs, to the $10.
+func repair_cost(i: int) -> int:
+	return roundi(garage_damage(i) * career_price(i) * REPAIR_SHARE / 10.0) * 10
+
+
+## What the dealer gives for car `i`, to the $100.
+func resale_value(i: int) -> int:
+	var paid := career_price(i)
+	for level in range(1, garage_upgrade(i) + 1):
+		paid += upgrade_cost(i, level)
+	return maxi(roundi(paid * RESALE_SHARE / 100.0) * 100 - repair_cost(i), 0)
+
+
+## Buys car `i` from the dealer: "" done, else why not.
+func buy_car(i: int) -> String:
+	if owns(i):
+		return "You already own it"
+	if not i in dealer_cars():
+		return "Not for sale: win it"
+	var price := career_price(i)
+	if career_money < price:
+		return "$%s: not enough money" % TournamentPanel.money(price)
+	career_money -= price
+	career_garage[cars[i].id] = {"upgrade": 0, "damage": 0.0}
+	save_career()
+	return ""
+
+
+func sell_car(i: int) -> String:
+	if not owns(i):
+		return "Not yours to sell"
+	career_money += resale_value(i)
+	career_garage.erase(cars[i].id)
+	save_career()
+	return ""
+
+
+## Fits car `i`'s next upgrade.
+func upgrade_car(i: int) -> String:
+	var level := garage_upgrade(i) + 1
+	var cost := upgrade_cost(i, level)
+	if not owns(i):
+		return "Not yours"
+	if cost <= 0:
+		return "No more upgrades for this car" if level > 1 else "This car takes no upgrades"
+	if career_money < cost:
+		return "$%s: not enough money" % TournamentPanel.money(cost)
+	career_money -= cost
+	career_garage[cars[i].id].upgrade = level
+	save_career()
+	return ""
+
+
+func repair_car(i: int) -> String:
+	var cost := repair_cost(i)
+	if cost <= 0:
+		return "Nothing to repair"
+	if career_money < cost:
+		return "$%s: not enough money" % TournamentPanel.money(cost)
+	career_money -= cost
+	set_garage_damage(i, 0.0)
+	save_career()
+	return ""
+
+
+## The car with serial `serial` into the garage (High Stakes' own first); already owning
+## one, its price instead. Returns its index, or -1 if there's no such car.
+func award_car(serial: int) -> int:
+	var found := -1
+	for i in cars.size():
+		if not is_pursuit_car(i) and car_serial(i) == serial and (found < 0 or is_hs_car(i)):
+			found = i
+	if found < 0:
+		return -1
+	if owns(found):
+		career_money += career_price(found)
+	else:
+		career_garage[cars[found].id] = {"upgrade": 0, "damage": 0.0}
+	return found
+
+
+## Nothing to race and not enough money to buy anything: only a new career goes on.
+func career_broke() -> bool:
+	if not career_garage.is_empty():
+		return false
+	var cheapest := dealer_cars()
+	return cheapest.is_empty() or career_money < career_price(cheapest[0])
+
+
+## The player's car's upgrade level in this race: its garage's in a tournament.
+func player_upgrade() -> int:
+	return garage_upgrade(car_index) if not circuit_run.is_empty() else upgrade_of(car_index)
+
+
+# ------------------------------------------------------------------ circuits
+
 ## Circuit `c`'s opponents, [{car, upgrade}], dealt as High Stakes deals them. The cars:
 ## every one the circuit allows at each upgrade level it takes (only High Stakes' own when
 ## they're installed, not the bonus cars, not the Knockout), ranked by their rating there,
@@ -869,9 +1243,9 @@ const CHAMPIONS_CIRCUIT := 32
 ## opponent drives the car it's for; the Tournament of Champions deals its race cars in
 ## order. As in the original the same car can come up more than once.
 func deal_field(c: Dictionary) -> Array:
-	var hs_only := range(cars.size()).any(func(k: int) -> bool: return is_hs_car(k))
+	var hs_only := _hs_cars_only()
 	var champions: bool = c.id == CHAMPIONS_CIRCUIT
-	var mine := car_rating(car_index, upgrade_of(car_index))
+	var mine := car_rating(car_index, garage_upgrade(car_index))
 	var entries := []
 	for i in cars.size():
 		if is_pursuit_car(i) or (hs_only and not is_hs_car(i)):
@@ -880,7 +1254,7 @@ func deal_field(c: Dictionary) -> Array:
 		if champions:
 			if not serial in CHAMPION_SERIALS:
 				continue
-		elif c.award >= 0:
+		elif c.type == HsCareer.TYPE_CAR_RACE and c.award >= 0:
 			if serial != c.award:
 				continue
 		elif serial in BONUS_SERIALS or hs_class(i) < 0 or not circuit_allows(c, i):
@@ -896,7 +1270,7 @@ func deal_field(c: Dictionary) -> Array:
 	var row := _career.mam_row(c.mam[2])
 	for k in c.opponents:
 		if entries.is_empty():
-			field.append({"car": car_index, "upgrade": upgrade_of(car_index)})
+			field.append({"car": car_index, "upgrade": garage_upgrade(car_index)})
 			continue
 		var at := mini(k, entries.size() - 1)
 		if not champions:
@@ -911,23 +1285,26 @@ func deal_field(c: Dictionary) -> Array:
 	return field
 
 
-## Enters circuit `cid` of tournament `t` with the chosen car: pays the fee, deals the
-## field and sets up its first race. "" on success, else why not.
+## Enters circuit `cid` of tournament `t` with the chosen car (one of yours): pays the fee,
+## deals the field and sets up its first race. "" on success, else why not.
 func start_circuit(t: Dictionary, cid: int) -> String:
 	var c: Dictionary = _career.circuits.get(cid, {})
 	if c.is_empty():
 		return "Unknown circuit"
+	if not owns(car_index):
+		return "Buy the car first"
 	if not circuit_allows(c, car_index):
 		var only := _career.restriction_text(c)
 		return "%s only" % only if only != "" else "Not with this car"
 	if career_money < c.fee:
-		return "Entry fee $%d: not enough money" % c.fee
+		return "Entry fee $%s: not enough money" % TournamentPanel.money(c.fee)
 	for r: Dictionary in c.races:
 		if HsCareer.track_id(r.track) == "":
 			return "A track of this circuit isn't installed"
 	career_money -= int(c.fee)
 	var field := deal_field(c)
-	circuit_run = {"tournament": t.id, "circuit": cid, "race": 0, "field": field, "points": {}, "out": [], "you_out": false}
+	circuit_run = {"tournament": t.id, "circuit": cid, "race": 0, "field": field, "points": {}, "last": {}, "gained": {},
+		"out": [], "you_out": false}
 	save_career()
 	_apply_circuit_race()
 	return ""
@@ -942,6 +1319,8 @@ func next_circuit_race() -> void:
 func _apply_circuit_race() -> void:
 	var c: Dictionary = _career.circuits[circuit_run.circuit]
 	var r: Dictionary = c.races[circuit_run.race]
+	if _before_circuit.is_empty():
+		_before_circuit = _race_settings()
 	mode = Mode.SINGLE_RACE
 	track_id = HsCareer.track_id(r.track)
 	layout = int(r.reverse) + 2 * int(r.mirror)
@@ -953,6 +1332,17 @@ func _apply_circuit_race() -> void:
 	opponents = circuit_run.field.size() - circuit_run.out.size()
 
 
+## The race settings a circuit takes over, as _set_race_settings() takes them.
+func _race_settings() -> Dictionary:
+	return {"mode": mode, "track_id": track_id, "layout": layout, "night": night, "weather": weather,
+		"laps": laps, "traffic": traffic, "opponents": opponents}
+
+
+func _set_race_settings(s: Dictionary) -> void:
+	for k: String in s:
+		set(k, s[k])
+
+
 ## The rivals still in: {car (index), upgrade, key (field index)}.
 func circuit_rivals() -> Array:
 	var out := []
@@ -962,55 +1352,113 @@ func circuit_rivals() -> Array:
 	return out
 
 
+## The grid of the circuit's next race, pole first (keys: "you" or field indices). The first
+## race you start at the back, as in High Stakes; after it the standings set the grid, the
+## leader on pole, a tie to whoever beat the other last time.
+func circuit_grid() -> Array:
+	var keys: Array = circuit_rivals().map(func(r: Dictionary) -> int: return r.key)
+	if circuit_run.race == 0:
+		return keys + ["you"]
+	keys.append("you")
+	var pts: Dictionary = circuit_run.points
+	var last: Dictionary = circuit_run.last
+	keys.sort_custom(func(a, b) -> bool:
+		if int(pts.get(a, 0)) != int(pts.get(b, 0)):
+			return int(pts.get(a, 0)) > int(pts.get(b, 0))
+		return int(last.get(a, 99)) < int(last.get(b, 99)))
+	return keys
+
+
 ## The opponents' pace as an AI skill.
 func circuit_skill() -> float:
 	var c: Dictionary = _career.circuits[circuit_run.circuit]
 	return lerpf(0.88, 1.08, clampf((c.pace - 0.4) / 2.5, 0.0, 1.0))
 
 
+## A rival's name in the standings: its car (the field can hold the same car twice).
+func circuit_name(key: Variant) -> String:
+	return "You" if key is String else cars[circuit_run.field[key].car].name
+
+
 ## A race of the circuit is over, `order` its finishing order (keys: "you" or field indices).
 ## Scores it, knocks out the last in a knockout, and when the circuit is over pays the prize
-## and opens what it opens. Returns {standings: [[key, points]], done, place, prize, message}.
+## (or gives the car), opens what it opens. Returns {standings: [{key, points, gained, race
+## (this race's place, 0 not in it), out}] in order, done, place, prize, award (car index
+## or -1), message, trophy (1..3 for a podium at the end, else 0), tournament (the name of
+## the tournament this completes, or ""), opened: [names of the tournaments it opens]}.
 func circuit_race_done(order: Array) -> Dictionary:
 	var c: Dictionary = _career.circuits[circuit_run.circuit]
 	var pts: Dictionary = circuit_run.points
+	circuit_run.last = {}
+	circuit_run.gained = {}
 	for i in order.size():
-		pts[order[i]] = int(pts.get(order[i], 0)) + (CIRCUIT_POINTS[i] if i < CIRCUIT_POINTS.size() else 0)
+		var gain: int = CIRCUIT_POINTS[i] if i < CIRCUIT_POINTS.size() else 0
+		pts[order[i]] = int(pts.get(order[i], 0)) + gain
+		circuit_run.last[order[i]] = i + 1
+		circuit_run.gained[order[i]] = gain
 	var message := ""
 	if c.type == HsCareer.TYPE_KNOCKOUT and order.size() > 1:
 		var last = order[order.size() - 1]
 		if last is String:
 			circuit_run.you_out = true
-			message = "Knocked out"
+			message = "You're knocked out"
 		else:
 			circuit_run.out.append(last)
-			message = "%s knocked out" % cars[circuit_run.field[last].car].name
+			message = "%s knocked out" % circuit_name(last)
 	circuit_run.race += 1
 	var done: bool = circuit_run.race >= c.races.size() or circuit_run.you_out or \
 		(c.type == HsCareer.TYPE_KNOCKOUT and circuit_run.out.size() >= circuit_run.field.size())
-	var keys: Array = ["you"] + range(circuit_run.field.size())
-	keys.sort_custom(func(a, b) -> bool: return int(pts.get(a, 0)) > int(pts.get(b, 0)))
+	# The standings: by points; in a knockout those still in first, then those knocked out,
+	# the later out the higher.
+	var out_order: Array = circuit_run.out.duplicate()
+	if circuit_run.you_out:
+		out_order.append("you")
+	out_order.reverse()
+	var keys: Array = (["you"] + range(circuit_run.field.size())).filter(func(k) -> bool: return not k in out_order)
+	keys.sort_custom(func(a, b) -> bool:
+		if int(pts.get(a, 0)) != int(pts.get(b, 0)):
+			return int(pts.get(a, 0)) > int(pts.get(b, 0))
+		return int(circuit_run.last.get(a, 99)) < int(circuit_run.last.get(b, 99)))
+	keys += out_order
 	var place := keys.find("you") + 1
-	if c.type == HsCareer.TYPE_KNOCKOUT:
-		# Survivors ahead of those knocked out, the later out the better.
-		place = 1 if not circuit_run.you_out else circuit_run.field.size() + 1 - circuit_run.out.size()
 	if c.type == HsCareer.TYPE_CAR_RACE:
 		place = order.find("you") + 1
 	var standings := []
 	for k in keys:
-		standings.append([k, int(pts.get(k, 0))])
-	var prize := 0
-	if done:
-		if place - 1 < c.prizes.size():
-			prize = int(c.prizes[place - 1])
-		career_money += prize
-		career_won[c.id] = mini(int(career_won.get(c.id, 99)), place)
-		# Every circuit of the tournament won: it opens the next ones.
-		for t in _career.tournaments:
-			if t.id == circuit_run.tournament and t.circuits.all(func(id) -> bool: return int(career_won.get(id, 99)) == 1):
-				for u in t.unlocks:
+		standings.append({"key": k, "points": int(pts.get(k, 0)), "gained": int(circuit_run.gained.get(k, 0)),
+			"race": int(circuit_run.last.get(k, 0)), "out": k in out_order})
+	var result := {"standings": standings, "done": done, "place": place, "prize": 0, "award": -1, "message": message,
+		"trophy": 0, "tournament": "", "opened": []}
+	if not done:
+		return result
+	if place - 1 < c.prizes.size():
+		result.prize = int(c.prizes[place - 1])
+	career_money += result.prize
+	if place == 1 and c.award >= 0:
+		result.award = award_car(c.award)
+		if result.award >= 0:
+			message = "%s is yours" % cars[result.award].name
+	var had_trophy := tournament_won_by_id(circuit_run.tournament)
+	career_won[c.id] = mini(int(career_won.get(c.id, 99)), place)
+	result.trophy = place if place <= 3 and c.type != HsCareer.TYPE_CAR_RACE else 0
+	# Every circuit of the tournament won: its trophy, and it opens the next ones.
+	for t in _career.tournaments:
+		if t.id == circuit_run.tournament and tournament_won(t):
+			if not had_trophy:
+				result.tournament = t.name
+			for u in t.unlocks:
+				if not career_open.has(u):
 					career_open[u] = true
-		save_career()
-		if c.type == HsCareer.TYPE_CAR_RACE and place == 1:
-			message = "Car won!"
-	return {"standings": standings, "done": done, "place": place, "prize": prize, "message": message}
+					for o in _career.tournaments:
+						if o.id == u:
+							result.opened.append(o.name)
+	save_career()
+	result.message = message
+	return result
+
+
+func tournament_won_by_id(id: int) -> bool:
+	for t in _career.tournaments:
+		if t.id == id:
+			return tournament_won(t)
+	return false

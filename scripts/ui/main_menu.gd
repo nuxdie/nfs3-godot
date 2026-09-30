@@ -1,98 +1,106 @@
 extends Control
-## The front end. The home screen lists what there is to do: race again with the last setup,
-## one of the modes, High Stakes' tournaments, the settings. Picking a mode walks through
-## three steps, each with the screen to itself: the track, the car, then the race options.
-## The step bar across the top shows what has been picked and goes back to any step; Esc
-## goes back one, Enter goes on. The chosen car stands on a turntable over the track's
-## postcard. Mouse, keyboard and pad work throughout.
+## The front end. A bar along the top holds its three places, each a click (or Q / E) away:
+##   RACE      the race as it's set up, ready to start with Enter: the mode, the track with
+##             the way round, time and weather, the rules (laps, rivals, traffic) and the car
+##             with its paint and upgrades. The track and the car open a picker each, which
+##             comes back here with the pick (Esc keeps the old one).
+##   CAREER    High Stakes' tournaments and the garage their cars live in, with the money and
+##             trophies. Entering a circuit goes on to choosing (or buying) a car for it.
+##   SETTINGS  gameplay, graphics, audio, the race HUD, the controls and the game data found.
+## The chosen car stands on a turntable over the track's picture. Mouse, keyboard and pad
+## work throughout: every action is on screen as something to click, with its key beside it.
 
-enum Screen { HOME, TRACK, CAR, OPTIONS, TOURNAMENTS }
+enum Screen { RACE, TRACK, CAR, CAREER, GARAGE, SETTINGS }
 
 const MODE_NOTES := [
 	"Up to seven rivals over one to eight laps.",
 	"One rival, and every cop in the county after you both.",
 	"Just you and the clock. No rivals, no traffic.",
-	"No laps, no rivals. Cruise with the traffic and the patrols.",
+	"No laps and no rivals: cruise with the traffic and the patrols.",
 	"Sit back and watch the AI race your car and its rivals.",
 ]
 const START_TEXT := ["START RACE", "START PURSUIT", "START TRIAL", "START DRIVING", "WATCH RACE"]
-## What the focused race option does, under the options.
+## What each race setting does, on the line under the setup while it has focus.
 const HELP := {
+	"Mode": "What kind of event: pick one and the rules below follow it.",
+	"Track": "Where you race. Enter or T opens every track to choose from.",
+	"Car": "What you drive. Enter or C opens every car to choose from.",
 	"Paint": "The colours this car came in.",
-	"Upgrades": "High Stakes' tuning, each level on top of the last: suspension, then aero, then engine. How the rivals are tuned is in Settings.",
+	"Upgrades": "High Stakes' tuning, each level on top of the last: suspension, then aero, then engine.",
 	"Layout": "Reverse runs the lap the other way round. Mirror flips the whole track, left for right.",
 	"Time": "Race by day, or at night by headlights.",
 	"Weather": "The track's own weather: rain on most, snow on some.",
 	"Laps": "How many laps the race runs.",
 	"Rivals": "AI cars on the grid with you.",
+	"Rival cars": "How the AI's cars are tuned: stock, with the same upgrades as yours, or fully upgraded.",
+	"Rival class": "Which cars the AI drives: ones of your car's class (the nearest if there aren't enough), or any.",
 	"Traffic": "Everyday cars in their lanes, both ways. They pull over for sirens.",
 }
-const M := 48.0               # screen margin
-const TOP := 96.0             # below the top bar
-const FOOT := 70.0            # the footer: hints and the main button
-const SETUP_ROW_H := 40.0
-const SECTION_H := 28.0
-const PODIUM_TOP := -0.595
-const CAM_DIST := 14.0
-const CAM_Y := 2.6
-const DROP_HEIGHT := 0.6      # tyres this far above the podium when a car is dropped in
+const M := 40.0               # screen margin
+const BAR_H := 64.0           # the top bar
+const TOP := 84.0             # content starts here
+const FOOT := 72.0            # the footer: hints and the main button
+const ROW_H := 34.0
+const HEAD_H := 30.0
 const CAR_PREVIEW_DELAY := 0.14   # s a browsed car must keep focus before its model loads
 
-var _screen := Screen.HOME
-var _mode := 0                   # the mode being set up
-var _quick_mode := 0             # the one raced last, for the home screen's quick start
-var _tour := {}                  # a tournament's circuit being entered: {t, cid}; {} in a race setup
+var _screen := Screen.RACE
+var _mode := 0
+var _tour := {}                  # a tournament's circuit being entered: {t, cid}; {} otherwise
 
-var _home: MenuList
-var _home_items: Array[Dictionary] = []
-var _steps: StepBar
+# Chrome.
+var _nav: TabStrip
+var _nav_screens: Array[Screen] = []
+var _sub: TabStrip               # the career's: tournaments, garage
+var _quit_btn: HintBar
+var _crumb: HintBar              # in a picker: back where it came from
 var _hints: HintBar
-var _chip: HintBar               # settings, top right
 var _next_btn: BigButton
-var _tournaments: TournamentPanel
 
-var _opts: Control               # the race options, in sections
-var _sections: Array = []        # [title, [OptionRow]]
-var _upgrade_row: OptionRow      # High Stakes' upgrades for the chosen car, remembered per car
-var _paint_row: OptionRow        # its paint, by the names its fedata gives them, remembered per car
+# The race setup.
+var _hub: Control
+var _mode_row: OptionRow
+var _track_card: PickCard
+var _car_card: PickCard
 var _layout_row: OptionRow       # which way round the track: forward, reverse, mirrored (Game.LAYOUTS)
-var _laps: OptionRow
-var _opp: OptionRow
-var _traffic: OptionRow
 var _time_row: OptionRow
 var _weather: OptionRow
-var _opt_focus: OptionRow
+var _laps: OptionRow
+var _opp: OptionRow
+var _rival_cars: OptionRow
+var _rival_class: OptionRow
+var _traffic: OptionRow
+var _paint_row: OptionRow        # the car's paint, by the names its fedata gives them, remembered per car
+var _upgrade_row: OptionRow      # High Stakes' upgrades for the chosen car, remembered per car
+var _pick_paint: OptionRow       # the same for the car on show in the picker (and the paint in the garage)
+var _pick_trim: OptionRow
+var _left: Array = []            # the left column: [heading, [controls]]; y of each heading set by _layout_hub()
+var _right: Array = []           # the car panel, likewise
+var _hub_focus: Control
 var _help_y := 0.0
 var _opp_value := 3              # remembered across modes that hide it
 
 var _track_i := 0                # picked
 var _car_i := 0
-var _track_shown := 0            # shown: the picked one, or the one pointed at in a browser
+var _track_shown := 0            # shown: the picked one, or the one pointed at in a picker
 var _car_shown := 0
+var _pick_from := -1             # what was picked when a picker opened, for Esc
 
 var _overlay: Control
 var _track_map: TrackMap
 var _stats: CarStats
+var _sheet: CarSheet             # the shown car's whole story, in the car picker and the garage
 var _settings: SettingsPanel
 var _tracks: TrackBrowser
 var _cars: CarBrowser
+var _tournaments: TournamentPanel
+var _garage: GaragePanel
 var _fade: ColorRect
 var _photo_back: TextureRect
 var _photo_front: TextureRect
 var _photo_drift: Node2D         # carries the photos' drift: a Control's position snaps to whole pixels
 
-var _showroom: SubViewportContainer
-var _preview: SubViewport
-var _cam: Camera3D
-var _rig: Node3D                 # camera and lights orbiting the car (a physics body can't ride a turntable)
-var _floor: MeshInstance3D
-var _preview_car: Car            # a real, simulated car dropped onto the podium, so it lands and sags
-var _shadow: MeshInstance3D
-var _spin_vel := 0.5             # orbit speed, rad/s; a flick sets it, then it eases back
-var _dragging := false
-var _last_drag_ms := 0
-var _car_slide := 0.0            # start: how far the car has slid out
-var _slide_from := Vector3.ZERO
+var _showroom: Showroom         # the car on its stage, in 3D
 var _car_pending := -1           # car to load into the showroom once browsing settles on it
 var _car_pending_t := 0.0
 
@@ -100,7 +108,7 @@ var _photos := {}                # track id -> Texture2D (or null)
 var _postcards: TrackPostcards   # rendered stills of the tracks, filled in in the background
 var _outlines := {}              # track id -> PackedVector3Array
 var _time := 0.0
-var _quit_armed_until := 0
+var _confirm: ConfirmDialog     # a question up over the menu (quitting)
 var _starting := false
 var _toast := ""
 var _toast_t := 0.0
@@ -114,20 +122,23 @@ func _ready() -> void:
 	_track_shown = _track_i
 	_car_shown = _car_i
 	_mode = Game.mode
-	_quick_mode = Game.mode
 	_postcards = TrackPostcards.new()
 	add_child(_postcards)
 	_build_backdrop()
-	_build_showroom()
+	_showroom = Showroom.new()
+	_showroom.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_showroom)
 	_build_overlay()
-	_build_home()
-	_build_options()
+	_build_hub()
+	# The captions and ratings go over the setup's surfaces.
+	move_child(_overlay, _hub.get_index())
 	_build_browsers()
-	_build_chrome()
 	_settings = SettingsPanel.new()
-	_settings.closed.connect(func(): _layout())
+	_settings.embedded = true
+	_settings.closed.connect(func(): if _screen == Screen.SETTINGS: _go(Screen.RACE))
 	_settings.changed.connect(_on_settings_changed)
 	add_child(_settings)
+	_build_chrome()
 	_fade = ColorRect.new()
 	_fade.color = Color.BLACK
 	_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -137,10 +148,24 @@ func _ready() -> void:
 	_postcards.rendered.connect(_on_postcard_rendered)
 	for id in Game.tracks:
 		_postcards.request(id)
+	if Game.music:
+		# In the menu bar, left of Quit.
+		Game.music.now_playing.right = 140.0
+		Game.music.now_playing.top = 37.0
 	_set_track(_track_i)
+	_set_car(_car_i)
 	_show_car_now(_car_i)
-	_go(Screen.HOME, false)
+	_go(Screen.RACE, false)
+	# Back from a tournament's last race: on the tournaments.
+	if Game.menu_screen == "tournaments" and Game.career_data():
+		_go(Screen.CAREER, false)
+	Game.menu_screen = ""
 	_intro()
+
+
+func _exit_tree() -> void:
+	if Game.music:
+		Game.music.now_playing.reset_place()
 
 
 # ------------------------------------------------------------------ building
@@ -170,158 +195,6 @@ func _build_backdrop() -> void:
 	shade.draw.connect(_draw_shade.bind(shade))
 	add_child(shade)
 
-func _build_showroom() -> void:
-	_showroom = SubViewportContainer.new()
-	_showroom.stretch = true
-	_showroom.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_showroom.mouse_default_cursor_shape = Control.CURSOR_DRAG
-	_showroom.gui_input.connect(_on_preview_input)
-	add_child(_showroom)
-	_preview = SubViewport.new()
-	_preview.own_world_3d = true
-	_preview.transparent_bg = true
-	_preview.msaa_3d = Viewport.MSAA_4X if Game.quality == Game.Quality.HIGH else Viewport.MSAA_2X \
-		if Game.quality == Game.Quality.MEDIUM else Viewport.MSAA_DISABLED
-	_showroom.add_child(_preview)
-
-	var w := Node3D.new()
-	_preview.add_child(w)
-	_rig = Node3D.new()
-	w.add_child(_rig)
-	_cam = Camera3D.new()
-	_cam.fov = 30
-	_cam.position = Vector3(0, CAM_Y, CAM_DIST)
-	_cam.rotation_degrees = Vector3(-9.5, 0, 0)
-	_rig.add_child(_cam)
-	var key := DirectionalLight3D.new()
-	key.rotation_degrees = Vector3(-38, 30, 0)
-	key.light_energy = 1.15
-	key.light_color = Color(1.0, 0.97, 0.92)
-	_rig.add_child(key)
-	var rim := DirectionalLight3D.new()
-	# High and soft: a low one lights the grey wheel-arch liners and inner panels up blue.
-	rim.rotation_degrees = Vector3(-50, 160, 0)
-	rim.light_energy = 0.45
-	rim.light_color = Color(0.7, 0.8, 1.0)
-	_rig.add_child(rim)
-	var env := Environment.new()
-	env.background_mode = Environment.BG_CLEAR_COLOR
-	# A dark studio with softboxes, that only shows up in reflections and the fill light (the
-	# backdrop stays transparent): lit panels mirror crisp highlight shapes and the sides fall
-	# into shade, where an even grey dome and fill light made the paint look like porcelain.
-	var sky_mat := ShaderMaterial.new()
-	sky_mat.shader = _studio_shader()
-	env.sky = Sky.new()
-	env.sky.sky_material = sky_mat
-	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 1.0
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	var we := WorldEnvironment.new()
-	we.environment = env
-	w.add_child(we)
-
-	_floor = MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(11, 11)
-	var fm := ShaderMaterial.new()
-	fm.shader = _floor_shader()
-	fm.set_shader_parameter("accent", UiKit.ACCENT)
-	plane.material = fm
-	_floor.mesh = plane
-	_floor.position.y = PODIUM_TOP
-	w.add_child(_floor)
-	# The podium top is solid ground (layer 1, what the wheel rays hit).
-	var ground := StaticBody3D.new()
-	ground.collision_layer = 1
-	var gs := CollisionShape3D.new()
-	var gb := BoxShape3D.new()
-	gb.size = Vector3(11, 1, 11)
-	gs.shape = gb
-	gs.position.y = PODIUM_TOP - 0.5
-	ground.add_child(gs)
-	w.add_child(ground)
-	_shadow = MeshInstance3D.new()
-	var q := PlaneMesh.new()
-	var sm := ShaderMaterial.new()
-	sm.shader = _shadow_shader()
-	# Both it and the floor are transparent and coplanar: depth sorting by AABB centre flips
-	# as the camera orbits and the floor would paint over it. Always draw it after the floor.
-	sm.render_priority = 1
-	q.material = sm
-	_shadow.mesh = q
-	_shadow.visible = false
-	w.add_child(_shadow)
-
-static func _studio_shader() -> Shader:
-	var s := Shader.new()
-	s.code = """
-shader_type sky;
-// Soft-edged panel: 1 inside |p| < half, fading out over `soft`.
-float panel(vec2 p, vec2 half, float soft) {
-	vec2 q = smoothstep(half + soft, half - soft, abs(p));
-	return q.x * q.y;
-}
-void sky() {
-	vec3 d = EYEDIR;
-	// Walls: near black, a touch lighter toward the ceiling; the floor darker still.
-	vec3 c = mix(vec3(0.012), vec3(0.04, 0.042, 0.05), smoothstep(-0.1, 0.8, d.y));
-	// A big softbox overhead, a little in front of the car.
-	if (d.y > 0.2) {
-		vec2 top = d.xz / d.y;
-		c += vec3(2.2, 2.15, 2.05) * panel(top - vec2(0.0, 0.2), vec2(0.55, 0.3), 0.08);
-	}
-	// Tall strip lights either side, and a warmer low one ahead, for crisp lines down the flanks.
-	float az = atan(d.x, -d.z);
-	float el = d.y;
-	c += vec3(1.5, 1.55, 1.7) * panel(vec2(abs(az) - 1.3, el - 0.2), vec2(0.05, 0.25), 0.03);
-	c += vec3(1.1, 1.0, 0.9) * panel(vec2(az - 2.9, el - 0.12), vec2(0.35, 0.05), 0.03);
-	COLOR = c;
-}
-"""
-	return s
-
-
-static func _floor_shader() -> Shader:
-	var s := Shader.new()
-	s.code = """
-shader_type spatial;
-render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
-uniform vec4 accent : source_color;
-varying vec3 lp;
-void vertex() { lp = VERTEX; }
-void fragment() {
-	float r = length(lp.xz);
-	float a = atan(lp.z, lp.x);
-	float disc = (1.0 - smoothstep(1.0, 4.2, r)) * 0.8;
-	float ring = exp(-abs(r - 2.95) * 60.0) * 0.8;
-	float halo = exp(-abs(r - 2.95) * 9.0) * 0.1;
-	float ticks = step(0.8, fract(a * 72.0 / 6.2831853)) * step(3.05, r) * step(r, 3.13) * 0.22;
-	float lines = exp(-abs(fract(r * 1.25) - 0.5) * 90.0) * 0.04 * step(r, 2.8);
-	vec3 base = vec3(0.025, 0.027, 0.034) + vec3(lines);
-	ALBEDO = mix(mix(base, accent.rgb, clamp(ring + halo, 0.0, 1.0)), vec3(0.9), ticks * 2.0);
-	ALPHA = clamp(max(disc, ring + halo + ticks), 0.0, 1.0);
-}
-"""
-	return s
-
-static var _shadow_sh: Shader
-
-static func _shadow_shader() -> Shader:
-	if _shadow_sh == null:
-		_shadow_sh = Shader.new()
-		_shadow_sh.code = """
-shader_type spatial;
-render_mode unshaded, blend_mix, depth_draw_never, shadows_disabled;
-void fragment() {
-	vec2 d = UV * 2.0 - 1.0;
-	float r = length(d);
-	ALBEDO = vec3(0.0);
-	ALPHA = pow(1.0 - smoothstep(0.2, 1.0, r), 1.6) * 0.85;
-}
-"""
-	return _shadow_sh
-
 
 func _build_overlay() -> void:
 	_overlay = Control.new()
@@ -335,91 +208,81 @@ func _build_overlay() -> void:
 	_stats = CarStats.new()
 	_stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overlay.add_child(_stats)
+	_sheet = CarSheet.new()
+	_overlay.add_child(_sheet)
 
 
-func _build_home() -> void:
-	_home = MenuList.new()
-	_home.activated.connect(_on_home_activated)
-	_home.focus_changed.connect(func(_i): _overlay.queue_redraw())
-	add_child(_home)
-
-
-## The home screen's entries, with what they'd start as it stands now.
-func _refresh_home() -> void:
-	var key := func(it: Dictionary) -> String: return "%s%s" % [it.id, it.get("mode", "")]
-	var keep: String = key.call(_home_items[_home.focus]) if not _home_items.is_empty() else "quick"
-	_home_items.clear()
-	var m := _quick_mode
-	var rules := PackedStringArray([Game.cars[_car_i].name])
-	if m != Game.Mode.FREE_ROAM:
-		rules.append("%d lap%s" % [_laps.index + 1, "" if _laps.index == 0 else "s"])
-	if m == Game.Mode.SINGLE_RACE or m == Game.Mode.SPECTATE or m == Game.Mode.HOT_PURSUIT:
-		rules.append("%d rival%s" % [_opp_value, "" if _opp_value == 1 else "s"])
-	_home_items.append({"id": "quick", "kind": "hero", "over": "Quick start  ·  " + Game.MODE_NAMES[m],
-		"title": Game.track_name(Game.tracks[_track_i]), "note": "  ·  ".join(rules)})
-	for i in Game.MODE_NAMES.size():
-		_home_items.append({"id": "mode", "mode": i, "title": Game.MODE_NAMES[i], "note": MODE_NOTES[i],
-			"gap": 10.0 if i == 0 else 0.0, "color": UiKit.COP_RED if i == Game.Mode.HOT_PURSUIT else UiKit.ACCENT})
-		# The tournaments after the single race and the pursuit.
-		if i == Game.Mode.HOT_PURSUIT and Game.career_data():
-			var won := Game.career_won.values().filter(func(p) -> bool: return int(p) == 1).size()
-			_home_items.append({"id": "tournaments", "title": "Tournaments",
-				"note": "High Stakes' cups for prize money: %d of %d circuits won." % [won, Game.career_data().circuits.size()],
-				"value": "$" + TournamentPanel.money(Game.career_money)})
-	_home_items.append({"id": "settings", "kind": "small", "title": "Settings", "gap": 10.0, "value": "TAB"})
-	_home_items.append({"id": "quit", "kind": "small", "title": "Press again to quit" if _quit_armed() else "Quit",
-		"color": UiKit.COP_RED if _quit_armed() else UiKit.ACCENT})
-	var focus := 0
-	for k in _home_items.size():
-		if key.call(_home_items[k]) == keep:
-			focus = k
-	_home.set_items(_home_items, focus)
-
-
-func _build_options() -> void:
-	_opts = Control.new()
-	_opts.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_opts.draw.connect(_draw_options)
-	add_child(_opts)
+func _build_hub() -> void:
+	_hub = Control.new()
+	_hub.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_hub.draw.connect(_draw_hub)
+	add_child(_hub)
 	var nums := func(from: int, to: int) -> PackedStringArray:
 		var out := PackedStringArray()
 		for n in range(from, to + 1):
 			out.append(str(n))
 		return out
-	_upgrade_row = OptionRow.new("Upgrades", PackedStringArray(Car.UPGRADE_NAMES))
-	_upgrade_row.index = Game.upgrade_of(_car_i)
-	_upgrade_row.changed.connect(func(i: int):
-		Game.set_upgrade(_car_i, i)
-		_stats.set_car(Game.car_spec(_car_shown), Game.units_kmh, Game.upgrade_of(_car_shown)))
+	var short_modes := PackedStringArray(["Race", "Pursuit", "Trial", "Free roam", "Spectate"])
+	_mode_row = OptionRow.new("Mode", short_modes)
+	_mode_row.index = _mode
+	_mode_row.changed.connect(func(i: int): _mode = i; _configure_hub())
+	_track_card = PickCard.new()
+	_track_card.key = "T"
+	_track_card.pressed.connect(_open_track_picker)
+	_car_card = PickCard.new()
+	_car_card.key = "C"
+	_car_card.pressed.connect(_open_car_picker)
 	_layout_row = OptionRow.new("Layout", PackedStringArray(Game.LAYOUTS))
 	_layout_row.index = Game.layout
-	_paint_row = OptionRow.new("Paint", PackedStringArray(["Factory"]))
-	_paint_row.changed.connect(func(i: int):
-		Game.paints[Game.cars[_car_i].id] = i
-		_show_car_now(_car_i))
-	_opp_value = Game.opponents
-	_laps = OptionRow.new("Laps", nums.call(1, 8))
-	_laps.index = Game.laps - 1
-	_opp = OptionRow.new("Rivals", nums.call(0, 7))
-	_opp.index = Game.opponents
-	_opp.changed.connect(func(i: int): _opp_value = i)
-	_traffic = OptionRow.new("Traffic", PackedStringArray(["Off", "On"]))
-	_traffic.index = int(Game.traffic)
 	_time_row = OptionRow.new("Time", PackedStringArray(["Day", "Night"]))
 	_time_row.index = int(Game.night)
-	_time_row.changed.connect(func(_i): _show_backdrop(true); _tracks.night = _time_row.index == 1)
+	_time_row.changed.connect(func(_i): _show_backdrop(true); _tracks.night = _time_row.index == 1; _refresh_track_card())
 	_weather = OptionRow.new("Weather", PackedStringArray(["Clear", "Rain"]))
 	_weather.index = int(Game.weather)
 	_weather.changed.connect(func(_i): _tint_backdrop())
-	_sections = [["YOUR CAR", [_paint_row, _upgrade_row]], ["TRACK", [_layout_row, _time_row, _weather]],
-		["RACE", [_laps, _opp, _traffic]]]
-	for s in _sections:
-		for r: OptionRow in s[1]:
-			r.custom_minimum_size.y = SETUP_ROW_H
-			r.hovered.connect(func(): _set_opt_focus(r))
-			r.changed.connect(func(_v): _update_steps(); _overlay.queue_redraw())
-			_opts.add_child(r)
-	_opt_focus = _paint_row
+	_opp_value = Game.opponents
+	_laps = OptionRow.new("Laps", nums.call(1, 8))
+	_laps.index = Game.laps - 1
+	_laps.changed.connect(func(_i): _refresh_track_card())
+	_opp = OptionRow.new("Rivals", nums.call(0, 7))
+	_opp.index = Game.opponents
+	_opp.changed.connect(func(i: int): _opp_value = i; _configure_hub())
+	_rival_cars = OptionRow.new("Rival cars", PackedStringArray(["Stock", "Like yours", "Full"]))
+	_rival_cars.index = Game.rival_upgrades
+	_rival_cars.changed.connect(func(i: int): Game.rival_upgrades = i)
+	_rival_class = OptionRow.new("Rival class", PackedStringArray(["Same as yours", "Any"]))
+	_rival_class.index = Game.rival_class
+	_rival_class.changed.connect(func(i: int): Game.rival_class = i)
+	_traffic = OptionRow.new("Traffic", PackedStringArray(["Off", "On"]))
+	_traffic.index = int(Game.traffic)
+	_paint_row = OptionRow.new("Paint", PackedStringArray(["Factory"]))
+	_paint_row.changed.connect(func(i: int): _set_paint(_car_i, i))
+	_upgrade_row = OptionRow.new("Upgrades", PackedStringArray(Car.UPGRADE_NAMES))
+	_upgrade_row.index = Game.upgrade_of(_car_i)
+	_upgrade_row.changed.connect(func(i: int): _set_trim(_car_i, i))
+	# The same two in the car picker (the paint in the garage too), under the car on show.
+	_pick_paint = OptionRow.new("Paint", PackedStringArray(["Factory"]))
+	_pick_paint.caption_w = 64.0
+	_pick_paint.changed.connect(func(i: int): _set_paint(_car_shown, i))
+	add_child(_pick_paint)
+	_pick_trim = OptionRow.new("Trim", PackedStringArray(Car.UPGRADE_NAMES))
+	_pick_trim.caption_w = 56.0
+	_pick_trim.changed.connect(func(i: int): _set_trim(_car_shown, i))
+	add_child(_pick_trim)
+	_left = [["", [_mode_row]], ["", [_track_card, _layout_row, _time_row, _weather]],
+		["RACE", [_laps, _opp, _rival_cars, _rival_class, _traffic]]]
+	_right = [["CAR", [_car_card, _paint_row, _upgrade_row]]]
+	for col in [_left, _right]:
+		for s in col:
+			for c: Control in s[1]:
+				if c is OptionRow:
+					c.custom_minimum_size.y = ROW_H
+					c.caption_w = 104.0
+					c.changed.connect(func(_v): _hub.queue_redraw(); _refresh_home_bits())
+				c.hovered.connect(func(): _set_hub_focus(c))
+				_hub.add_child(c)
+	_hub_focus = _mode_row
 
 
 func _build_browsers() -> void:
@@ -427,39 +290,75 @@ func _build_browsers() -> void:
 		var tex := _postcards.get_postcard(id, night)
 		return tex if tex else _track_photo(id)
 	_tracks = TrackBrowser.new()
+	_tracks.title = "CHOOSE A TRACK"
 	_tracks.postcard = postcard
 	_tracks.outline = _outline
 	_tracks.focus_changed.connect(_set_track)
 	_tracks.previewed.connect(func(i: int): _track_shown = i; _show_track(true))
-	_tracks.confirmed.connect(func(i: int): _set_track(i); _next())
+	_tracks.confirmed.connect(func(i: int): _set_track(i); _go(Screen.RACE))
 	_tracks.cancelled.connect(_back)
 	add_child(_tracks)
 	_cars = CarBrowser.new()
+	_cars.title = "CHOOSE A CAR"
 	_cars.focus_changed.connect(_set_car)
 	_cars.previewed.connect(_preview_car_later)
-	_cars.confirmed.connect(func(i: int): _set_car(i); _next())
+	_cars.confirmed.connect(func(i: int): _set_car(i); _go(Screen.RACE))
 	_cars.cancelled.connect(_back)
+	_cars.paint_step.connect(func(d: int): _pick_paint.step(d))
+	_cars.trim_step.connect(func(d: int): _pick_trim.step(d))
 	add_child(_cars)
 	_tournaments = TournamentPanel.new()
 	_tournaments.postcard = postcard
 	_tournaments.focus_changed.connect(_on_circuit_focus)
-	_tournaments.chosen.connect(func(t: Dictionary, cid: int): _tour = {"t": t, "cid": cid}; _go(Screen.CAR))
+	_tournaments.chosen.connect(func(t: Dictionary, cid: int): _tour = {"t": t, "cid": cid}; _go(Screen.GARAGE))
+	_tournaments.garage.connect(func(): _tour = {}; _go(Screen.GARAGE))
 	_tournaments.back.connect(_back)
+	_tournaments.changed.connect(_refresh_chrome)
 	add_child(_tournaments)
+	_garage = GaragePanel.new()
+	_garage.focus_changed.connect(func(i: int):
+		if i >= 0:
+			_preview_car_later(i))
+	_garage.changed.connect(_on_garage_changed)
+	_garage.chosen.connect(func(i: int): _car_i = i; _enter_circuit())
+	_garage.back.connect(_back)
+	add_child(_garage)
 
 
 func _build_chrome() -> void:
-	_steps = StepBar.new()
-	_steps.chosen.connect(_on_step_chosen)
-	add_child(_steps)
+	_nav = TabStrip.new(PackedStringArray(), TabStrip.Style.TABS)
+	_nav.custom_minimum_size.y = BAR_H - 12
+	_nav.size.y = BAR_H - 12
+	_nav.keys = PackedStringArray(["Q", "E"])
+	_nav.changed.connect(func(i: int): _go(_nav_screens[i]))
+	add_child(_nav)
+	var names := PackedStringArray(["Race"])
+	_nav_screens = [Screen.RACE]
+	if Game.career_data():
+		names.append("Career")
+		_nav_screens.append(Screen.CAREER)
+	names.append("Settings")
+	_nav_screens.append(Screen.SETTINGS)
+	_nav.set_items(names, 0)
+	_sub = TabStrip.new(PackedStringArray(["Tournaments", "Garage"]), TabStrip.Style.TABS)
+	_sub.font_size = 15
+	_sub.custom_minimum_size.y = 36
+	_sub.size.y = 36
+	_sub.changed.connect(func(i: int): _tour = {}; _go(Screen.CAREER if i == 0 else Screen.GARAGE))
+	add_child(_sub)
+	_quit_btn = HintBar.new()
+	_quit_btn.set_hints([["", "QUIT", _request_quit]])
+	add_child(_quit_btn)
+	_crumb = HintBar.new()
+	add_child(_crumb)
 	_hints = HintBar.new()
 	add_child(_hints)
-	_chip = HintBar.new()
-	add_child(_chip)
 	_next_btn = BigButton.new()
 	_next_btn.pressed.connect(_next)
 	add_child(_next_btn)
 
+
+# ------------------------------------------------------------------ layout
 
 func _layout() -> void:
 	var W := size.x
@@ -467,311 +366,446 @@ func _layout() -> void:
 	for tr in [_photo_back, _photo_front]:
 		tr.size = size * 1.08
 		tr.position = -size * 0.04
-	_chip.position = Vector2(W - M - _chip.size.x + 8, 32)
-	_steps.position = Vector2(M + 222, 22)
-	_steps.size = Vector2(_chip.position.x - 20 - _steps.position.x, 52)
-	_hints.position = Vector2(M - 8, H - 30 - _hints.size.y * 0.5)
-	_next_btn.size = Vector2(330, 60)
-	_next_btn.position = Vector2(W - M - _next_btn.size.x + 6, H - 34 - _next_btn.size.y)
-	var body_h := H - TOP - FOOT
-	_home.position = Vector2(M - 22, TOP + 16)
-	_home.size = Vector2(minf(450.0, W * 0.38), _home.content_height())
-	_opts.position = Vector2(M - 22, TOP + 14)
-	_opts.size = Vector2(minf(470.0, W * 0.38), body_h - 14)
-	_layout_options()
-	_cars.position = Vector2(M - 22, TOP)
-	_cars.size = Vector2(minf(580.0, W * 0.46), body_h)
-	_tracks.position = Vector2(M - 22, TOP)
-	_tracks.size = Vector2(minf(W * 0.62, 1100.0), body_h)
-	_tournaments.position = Vector2(M - 10, TOP + 8)
-	_tournaments.size = Vector2(W - M * 2 + 10, H - TOP - 8 - 118)
+	_nav.position = Vector2(M + 196, 6)
+	_crumb.position = Vector2(M + 196, (BAR_H - _crumb.size.y) * 0.5)
+	_quit_btn.position = Vector2(W - M - _quit_btn.size.x + 8, (BAR_H - _quit_btn.size.y) * 0.5)
+	_sub.position = Vector2(M - 14, TOP - 6)
+	_hints.position = Vector2(M - 10, H - 36 - _hints.size.y * 0.5)
+	_next_btn.size = Vector2(280, 50)
+	_next_btn.position = Vector2(W - M - _next_btn.size.x, H - 22 - _next_btn.size.y)
+	var body_h := H - TOP - FOOT - 6
+	_layout_hub()
+	_tracks.position = Vector2(M, TOP)
+	_tracks.size = Vector2(minf(W * 0.62, 1080.0), body_h)
+	_cars.position = Vector2(M, TOP)
+	_cars.size = Vector2(minf(560.0, W * 0.43), body_h)
+	_tournaments.position = Vector2(M, TOP + 44)
+	_tournaments.size = Vector2(W - M * 2, body_h - 44)
+	_garage.position = Vector2(M, TOP + (0.0 if _in_entry() else 44.0))
+	_garage.size = Vector2(minf(470.0, W * 0.37), body_h - (0.0 if _in_entry() else 44.0))
+	_settings.position = Vector2(M, TOP)
+	_settings.size = Vector2(W - M * 2, body_h)
 	if _screen == Screen.TRACK:
-		# The map large, beside the grid.
-		var x0 := _tracks.position.x + _tracks.size.x + 40
+		var x0 := _tracks.position.x + _tracks.size.x + 36
 		var mw := W - M - x0
-		_track_map.size = Vector2(mw, minf(mw * 0.72, H * 0.34))
-		_track_map.position = Vector2(x0, TOP + 110)
-	else:
-		_track_map.size = Vector2(150, 104)
-		_track_map.position = Vector2(W - M - _track_map.size.x + 8, TOP + 24)
-	_stats.size = Vector2(minf(460.0, W * 0.38), 62)
-	_stats.position = Vector2(W - M - _stats.size.x, H - 190)
+		_track_map.size = Vector2(mw, minf(mw * 0.8, H * 0.36))
+		_track_map.position = Vector2(x0, TOP + 96)
+	_stats.size = Vector2(_car_panel_w(), 56)
+	var sheet_x: float = (_cars if _screen == Screen.CAR else _garage).position.x + (_cars if _screen == Screen.CAR else _garage).size.x + 40
+	_sheet.position = Vector2(sheet_x, TOP + 2)
+	_sheet.size = Vector2(W - M - sheet_x, H - TOP - FOOT - 14)
+	var fr := _sheet.finish_rect()
+	fr.position += _sheet.position
+	var half := fr.size.x * (0.56 if _pick_trim.visible else 1.0)
+	_pick_paint.position = Vector2(fr.position.x, fr.position.y + 3)
+	_pick_paint.size = Vector2(half - 16, 34)
+	_pick_trim.position = Vector2(fr.position.x + half + 8, fr.position.y + 3)
+	_pick_trim.size = Vector2(fr.end.x - fr.position.x - half - 8, 34)
+	match _screen:
+		Screen.RACE:
+			_stats.position = Vector2(W - M - _car_panel_w(), _car_card.position.y + _car_card.size.y + 14)
+		_:
+			_stats.position = Vector2(W - M - _car_panel_w(), H - FOOT - 22 - _stats.size.y)
 	_place_car()
 	_overlay.queue_redraw()
+	_hub.queue_redraw()
 
 
-## Put the car in the space right of whatever is down the left, a little above centre.
+func _left_w() -> float:
+	return minf(440.0, size.x * 0.36)
+
+
+func _car_panel_w() -> float:
+	return minf(430.0, size.x * 0.34)
+
+
+## The setup, set as type straight on the picture. Down the left the mode, the track lockup
+## with its layout, time and weather, and the race's rules under a kicker; bottom right,
+## under the car on its turntable, the car lockup with its ratings, paint and upgrades.
+func _layout_hub() -> void:
+	var lw := _left_w()
+	var y := TOP + 4
+	for s in _left:
+		var rows: Array = s[1].filter(func(c: Control) -> bool: return c.visible)
+		s.resize(2)
+		if rows.is_empty():
+			s.append(-1.0)
+			continue
+		if s[0] != "":
+			s.append(y + 13)   # the kicker's baseline
+			y += 22
+		else:
+			s.append(-1.0)
+		for c: Control in rows:
+			var h := PickCard.H if c is PickCard else ROW_H
+			c.position = Vector2(M, y)
+			c.size = Vector2(lw, h)
+			y += h
+			if c == _mode_row:
+				y += 22.0   # its note
+		y += 20.0
+	_help_y = y
+	# The car, from the bottom up, above the footer.
+	var cw := _car_panel_w()
+	var x := size.x - M - cw
+	y = size.y - FOOT - 16 - 2 * ROW_H - 12 - 56 - 14 - PickCard.H
+	_right[0].resize(2)
+	_right[0].append(y)
+	_car_card.position = Vector2(x, y)
+	_car_card.size = Vector2(cw, PickCard.H)
+	y += PickCard.H + 14 + 56 + 12
+	for c: OptionRow in [_paint_row, _upgrade_row]:
+		c.position = Vector2(x, y)
+		c.size = Vector2(cw, ROW_H)
+		y += ROW_H
+
+
+## Tells the showroom where the car goes: the space right of whatever is down the left, above
+## what's under it (on the race, above the car's lockup; by its sheet, between the figures
+## and the spec sheet).
 func _place_car() -> void:
-	if not _cam:
+	if not _showroom:
 		return
 	var W := size.x
-	var aspect := W / maxf(size.y, 1.0)
-	var half_w := CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * aspect
-	var left := _home.position.x + _home.size.x
+	var r := Rect2()
 	match _screen:
-		Screen.CAR: left = _cars.position.x + _cars.size.x
-		Screen.OPTIONS: left = _opts.position.x + _opts.size.x
-	var target_x := (left + W - M) * 0.5 / W
-	_cam.h_offset = -(target_x - 0.5) * 2.0 * half_w
-	# ...and lift it clear of the car caption at the bottom right.
-	_cam.v_offset = -CAM_DIST * tan(deg_to_rad(_cam.fov * 0.5)) * (0.2 if _screen != Screen.HOME else 0.12)
+		Screen.CAR, Screen.GARAGE:
+			r = _sheet.car_rect()
+			r.position += _sheet.position
+		_:
+			var x := M + _left_w() + 30
+			var bottom: float = _right[0][2] - 12 if _right.size() > 0 and _right[0].size() > 2 else size.y * 0.55
+			r = Rect2(x, TOP, W - M - x, bottom - TOP)
+	_showroom.set_region(r)
 
 
 # ------------------------------------------------------------------ screens
 
-## Show screen `s`: its panel, the step bar and hints for it, and the main button.
+func _top_level(s: Screen) -> bool:
+	return s == Screen.RACE or s == Screen.CAREER or s == Screen.SETTINGS or (s == Screen.GARAGE and _tour.is_empty())
+
+
+func _in_career() -> bool:
+	return _screen == Screen.CAREER or _screen == Screen.GARAGE
+
+
+## Choosing a car for a circuit (rather than visiting the garage).
+func _in_entry() -> bool:
+	return _screen == Screen.GARAGE and not _tour.is_empty()
+
+
+## Show screen `s`: its panel, the bar and hints for it, and the main button.
 func _go(s: Screen, animate := true) -> void:
-	if s != Screen.CAR:
+	if _starting:
+		return
+	if s != Screen.GARAGE:
 		_tour = {}
 	var was := _screen
+	if was == Screen.SETTINGS and s != Screen.SETTINGS:
+		_settings.close()
 	_screen = s
-	_home.visible = s == Screen.HOME
-	_opts.visible = s == Screen.OPTIONS
-	_stats.visible = s == Screen.CAR or s == Screen.OPTIONS
-	_track_map.visible = s == Screen.HOME or s == Screen.TRACK or s == Screen.OPTIONS
-	_steps.visible = s != Screen.HOME
-	_next_btn.visible = s != Screen.HOME
+	_hub.visible = s == Screen.RACE
+	_stats.visible = s == Screen.RACE
+	_sheet.visible = s == Screen.CAR or s == Screen.GARAGE
+	_sheet.finish = _sheet.visible
+	_pick_paint.visible = _sheet.visible
+	# The garage's upgrades are bought there, not chosen.
+	_pick_trim.visible = s == Screen.CAR
+	_track_map.visible = s == Screen.TRACK
 	if s == Screen.TRACK and not _tracks.visible:
 		_tracks.night = _time_row.index == 1
 		_tracks.open(_track_i)
 	elif s != Screen.TRACK:
 		_tracks.close()
 	if s == Screen.CAR and not _cars.visible:
-		var c: Dictionary = Game.career_data().circuits.get(_tour.cid, {}) if not _tour.is_empty() else {}
-		_cars.allow = (func(i: int) -> bool: return Game.circuit_allows(c, i)) if not c.is_empty() else Callable()
 		_cars.open(_car_i)
 	elif s != Screen.CAR:
 		_cars.close()
-	if s == Screen.TOURNAMENTS and not _tournaments.visible:
+	if s == Screen.GARAGE:
+		_garage.circuit = Game.career_data().circuits.get(_tour.cid, {}) if not _tour.is_empty() else {}
+		_garage.open(_car_i)
+	else:
+		_garage.close()
+	if s == Screen.CAREER and not _tournaments.visible:
 		_tournaments.open()
-	elif s != Screen.TOURNAMENTS:
+	elif s != Screen.CAREER:
 		_tournaments.close()
-	if s == Screen.OPTIONS:
-		_configure_options()
-	if s == Screen.HOME:
-		_refresh_home()
-	if not _in_tour():
+	if s == Screen.SETTINGS and not _settings.visible:
+		_settings.open(0)
+	elif s != Screen.SETTINGS:
+		_settings.visible = false
+	if s == Screen.RACE:
+		_configure_hub()
+	if not _in_career():
 		_track_shown = _track_i
 		_show_track(animate)
-	if s != Screen.CAR:
+	if s != Screen.GARAGE:
 		_preview_car_later(_car_i)
 	# The car stands in the showroom on the screens that are about it.
-	var show_car := s == Screen.HOME or s == Screen.CAR or s == Screen.OPTIONS
-	create_tween().tween_property(_showroom, "modulate:a", 1.0 if show_car else 0.0, 0.25 if animate else 0.0)
-	_update_steps()
-	_update_hints()
-	_next_btn.set_text(_next_text())
+	var show_car := s == Screen.RACE or s == Screen.CAR or s == Screen.GARAGE
+	create_tween().tween_property(_showroom, "modulate:a", 1.0 if show_car else 0.0, 0.2 if animate else 0.0)
+	_refresh_chrome()
 	_layout()
 	_show_backdrop(animate)
 	_tint_backdrop()
-	# (The browsers slide themselves in.)
+	# (The pickers slide themselves in.)
 	if animate and was != s and s != Screen.TRACK and s != Screen.CAR:
-		var panel: Control = {Screen.HOME: _home, Screen.OPTIONS: _opts, Screen.TOURNAMENTS: _tournaments}[s]
-		var x := panel.position.x
-		panel.position.x = x - 24
+		var panel: Control = {Screen.RACE: _hub, Screen.CAREER: _tournaments, Screen.GARAGE: _garage,
+			Screen.SETTINGS: _settings}[s]
 		panel.modulate.a = 0.0
-		var tw := create_tween().set_parallel().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-		tw.tween_property(panel, "modulate:a", 1.0, 0.18)
-		tw.tween_property(panel, "position:x", x, 0.25)
+		create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT).tween_property(panel, "modulate:a", 1.0, 0.18)
 
 
-func _in_tour() -> bool:
-	return _screen == Screen.TOURNAMENTS or not _tour.is_empty()
+## The top bar, the career's tabs, the hints and the main button, for the screen as it is.
+func _refresh_chrome() -> void:
+	var top := _top_level(_screen)
+	_nav.visible = top
+	_quit_btn.visible = top
+	_crumb.visible = not top
+	var ni := _nav_screens.find(Screen.CAREER if _in_career() else _screen)
+	if top and ni >= 0 and ni != _nav.index:
+		_nav.set_items(_nav.items, ni)
+	if Game.career_data():
+		var badges := PackedStringArray()
+		for sc in _nav_screens:
+			badges.append(UiKit.money(Game.career_money) if sc == Screen.CAREER else "")
+		_nav.set_badges(badges)
+	_sub.visible = _in_career() and not _in_entry()
+	if _sub.visible:
+		var n := Game.career_garage.size()
+		_sub.set_badges(PackedStringArray(["", str(n)]))
+		if _sub.index != int(_screen == Screen.GARAGE):
+			_sub.set_items(_sub.items, int(_screen == Screen.GARAGE))
+	match _screen:
+		Screen.TRACK, Screen.CAR:
+			_crumb.set_hints([["ESC", "BACK TO RACE", _back]])
+		Screen.GARAGE:
+			_crumb.set_hints([["ESC", "BACK TO TOURNAMENTS", _back]])
+	_update_hints()
+	var text := _next_text()
+	_next_btn.visible = text != ""
+	_next_btn.set_text(text)
+	_next_btn.set_enabled(_next_enabled())
+	_layout()
 
 
-## On: the next step, or off to the race.
+func _update_hints() -> void:
+	var h: Array = []
+	match _screen:
+		Screen.RACE:
+			h = [["↑↓", "SELECT"], ["←→", "CHANGE"], ["T", "TRACK", _open_track_picker], ["C", "CAR", _open_car_picker],
+				["DRAG", "ROTATE CAR"]]
+		Screen.TRACK:
+			h = _tracks.hints() + [["", "TYPE TO SEARCH"]]
+		Screen.CAR:
+			h = _cars.hints() + [["DRAG", "ROTATE CAR"]]
+		Screen.CAREER:
+			h = [["↑↓", "CIRCUIT"], ["←→", "TOURNAMENT"], ["G", "GARAGE", func(): _tour = {}; _go(Screen.GARAGE)],
+				["N", "NEW CAREER", _tournaments.new_career]]
+		Screen.GARAGE:
+			h = [["↑↓", "BROWSE"], ["DRAG", "ROTATE CAR"]]
+		Screen.SETTINGS:
+			h = _settings.hints()
+	if _top_level(_screen):
+		h.append(["Q E", "SWITCH TAB"])
+	_hints.set_hints(h)
+
+
+func _next_text() -> String:
+	match _screen:
+		Screen.RACE: return START_TEXT[_mode]
+		Screen.TRACK: return "USE THIS TRACK"
+		Screen.CAR: return "USE THIS CAR"
+		Screen.CAREER: return "CHOOSE A CAR"
+		Screen.GARAGE: return _garage.primary_text()
+	return ""
+
+
+func _next_enabled() -> bool:
+	match _screen:
+		Screen.CAREER: return _tournaments.blocked() == ""
+		Screen.GARAGE: return _garage.primary_ok()
+	return true
+
+
+## The main button (Enter where nothing else takes it).
 func _next() -> void:
 	if _starting:
 		return
 	_next_btn.flash()
 	match _screen:
-		Screen.TRACK: _go(Screen.CAR)
-		Screen.CAR:
-			if _tour.is_empty():
-				_go(Screen.OPTIONS)
-			else:
-				_enter_circuit()
-		Screen.OPTIONS: _start()
-		Screen.TOURNAMENTS: _tournaments.choose()
+		Screen.RACE: _start()
+		Screen.TRACK: _set_track(_track_i); _go(Screen.RACE)
+		Screen.CAR: _set_car(_car_i); _go(Screen.RACE)
+		Screen.CAREER: _tournaments.choose()
+		Screen.GARAGE: _garage.primary()
 
 
-## Back a step (from the home screen: quit, asked twice).
+## Back a step: out of a picker (keeping what was picked before), out of a circuit's car
+## choice, or from the other tabs to the race. On the race: quit, asked twice.
 func _back() -> void:
 	if _starting:
 		return
 	match _screen:
-		Screen.HOME: _request_quit()
-		Screen.TRACK, Screen.TOURNAMENTS: _go(Screen.HOME)
-		Screen.CAR: _go(Screen.TOURNAMENTS if not _tour.is_empty() else Screen.TRACK)
-		Screen.OPTIONS: _go(Screen.CAR)
-
-
-func _on_step_chosen(i: int) -> void:
-	if _starting:
-		return
-	if i < 0:
-		_go(Screen.HOME)
-	elif not _tour.is_empty() or _screen == Screen.TOURNAMENTS:
-		if i == 0:
-			_go(Screen.TOURNAMENTS)
-		elif _screen == Screen.TOURNAMENTS:
-			_tournaments.choose()
-	else:
-		_go([Screen.TRACK, Screen.CAR, Screen.OPTIONS][i])
-
-
-func _on_home_activated(i: int) -> void:
-	var it: Dictionary = _home_items[i]
-	match it.id:
-		"quick":
-			_start(true)
-		"mode":
-			_mode = it.mode
-			_go(Screen.TRACK)
-		"tournaments":
-			_go(Screen.TOURNAMENTS)
-		"settings":
-			_open_settings()
-		"quit":
+		Screen.RACE:
 			_request_quit()
-
-
-func _next_text() -> String:
-	match _screen:
-		Screen.TRACK: return "NEXT: CAR"
-		Screen.CAR:
-			if not _tour.is_empty():
-				var c: Dictionary = Game.career_data().circuits.get(_tour.cid, {})
-				return "ENTER  ·  $" + TournamentPanel.money(c.fee) if c.get("fee", 0.0) > 0.0 else "ENTER CIRCUIT"
-			return "NEXT: OPTIONS"
-		Screen.OPTIONS: return START_TEXT[_mode]
-		Screen.TOURNAMENTS: return "NEXT: CAR"
-	return ""
-
-
-func _update_steps() -> void:
-	if _screen == Screen.HOME:
-		return
-	if _in_tour():
-		var t: Dictionary = _tour.get("t", _tournaments.tournament())
-		var cid: int = _tour.get("cid", _tournaments.circuit().get("id", -1))
-		var label := "%s  %d" % [t.get("name", ""), t.get("circuits", []).find(cid) + 1] if not t.is_empty() else ""
-		_steps.crumb_color = UiKit.ACCENT
-		_steps.set_steps("TOURNAMENTS", PackedStringArray(["CIRCUIT", "CAR"]), PackedStringArray([label, Game.cars[_car_i].name]),
-			0 if _screen == Screen.TOURNAMENTS else 1)
-		return
-	var track := Game.track_name(Game.tracks[_track_i])
-	if _layout_row.index > 0:
-		track += "  ·  " + Game.LAYOUTS[_layout_row.index]
-	var rules := PackedStringArray()
-	if _laps.visible:
-		rules.append("%d LAP%s" % [_laps.index + 1, "" if _laps.index == 0 else "S"])
-	if _opp.visible:
-		rules.append("%d RIVAL%s" % [_opp.index, "" if _opp.index == 1 else "S"])
-	rules.append(_time_row.value_text())
-	if _weather.index == 1:
-		rules.append(_weather.value_text())
-	_steps.crumb_color = UiKit.COP_RED if _mode == Game.Mode.HOT_PURSUIT else UiKit.ACCENT
-	_steps.set_steps(Game.MODE_NAMES[_mode].to_upper(), PackedStringArray(["TRACK", "CAR", "OPTIONS"]),
-		PackedStringArray([track, Game.cars[_car_i].name, " · ".join(rules)]),
-		{Screen.TRACK: 0, Screen.CAR: 1, Screen.OPTIONS: 2}.get(_screen, 0))
-
-
-func _update_hints() -> void:
-	var back := ["ESC", "BACK", _back]
-	var h: Array = []
-	match _screen:
-		Screen.HOME:
-			h = [["↑↓", "CHOOSE"], ["ENTER", "GO"], ["DRAG", "ROTATE CAR"], ["ESC", "QUIT", _request_quit]]
 		Screen.TRACK:
-			h = [back] + _tracks.hints() + [["", "TYPE TO SEARCH"]]
+			if _pick_from >= 0:
+				_set_track(_pick_from)
+			_go(Screen.RACE)
 		Screen.CAR:
-			h = [back] + _cars.hints() + [["DRAG", "ROTATE CAR"]]
-		Screen.OPTIONS:
-			h = [back, ["↑↓", "SELECT"], ["←→", "CHANGE"], ["DRAG", "ROTATE CAR"]]
-		Screen.TOURNAMENTS:
-			h = [back, ["↑↓", "CIRCUIT"], ["←→", "TOURNAMENT"]]
-	_hints.set_hints(h)
-	# Tab steps the browsers' filters, so there Settings is a click only.
-	var browsing := _screen == Screen.TRACK or _screen == Screen.CAR
-	_chip.set_hints([["" if browsing else "TAB", "SETTINGS", _open_settings]])
-	_layout()
+			if _pick_from >= 0:
+				_set_car(_pick_from)
+			_go(Screen.RACE)
+		Screen.GARAGE:
+			_go(Screen.CAREER)
+		_:
+			_go(Screen.RACE)
 
 
-# ------------------------------------------------------------------ race options
+func _open_track_picker() -> void:
+	if _screen != Screen.RACE:
+		return
+	_pick_from = _track_i
+	_go(Screen.TRACK)
+
+
+func _open_car_picker() -> void:
+	if _screen != Screen.RACE:
+		return
+	_pick_from = _car_i
+	_go(Screen.CAR)
+
+
+## The garage's money or cars changed, or its focus moved: the main button and the bar.
+func _on_garage_changed() -> void:
+	if _screen == Screen.GARAGE:
+		_refresh_chrome()
+		_overlay.queue_redraw()
+
+
+# ------------------------------------------------------------------ the race setup
 
 ## The rows that apply to the mode: hidden, not greyed out, where they don't.
-func _configure_options() -> void:
+func _configure_hub() -> void:
 	var m := _mode
+	_mode_row.set_items(_mode_row.items, m)
 	_opp.visible = m != Game.Mode.TIME_TRIAL and m != Game.Mode.FREE_ROAM
-	_laps.visible = m != Game.Mode.FREE_ROAM
+	_rival_cars.visible = _opp.visible
+	_rival_class.visible = _opp.visible
+	_rival_cars.disabled = _opp_value == 0
+	_rival_class.disabled = _opp_value == 0
+	_rival_cars.disabled_text = "No rivals"
+	_rival_class.disabled_text = "No rivals"
+	# A point-to-point run is raced once.
+	_laps.visible = m != Game.Mode.FREE_ROAM and not Game.is_sprint(Game.tracks[_track_i])
 	_traffic.visible = m != Game.Mode.TIME_TRIAL
-	_sections[2][0] = "TRAFFIC" if m == Game.Mode.FREE_ROAM else "RACE"
-	# The car's paints and upgrades, which only load with the car.
+	_left[2][0] = "TRAFFIC" if m == Game.Mode.FREE_ROAM else "RACE"
+	if not _hub_focus.visible:
+		_hub_focus = _mode_row
+	_set_hub_focus(_hub_focus)
+	_refresh_track_card()
+	_layout()
+	if _screen == Screen.RACE:
+		_next_btn.set_text(_next_text())
+	_overlay.queue_redraw()
+
+
+## The car's paints and upgrades (which only load with the car) and its lockup.
+func _refresh_car_rows() -> void:
 	_upgrade_row.set_items(_upgrade_row.items, Game.upgrade_of(_car_i))
 	var names := _paint_names(_car_i)
 	_paint_row.swatches = _paint_swatches(_car_i)
 	_paint_row.set_items(names, mini(Game.paint_of(_car_i), names.size() - 1))
-	if not _opt_focus.visible:
-		_opt_focus = _opt_nav()[0]
-	_set_opt_focus(_opt_focus)
-	_layout_options()
+	_refresh_car_card()
 
 
-func _opt_nav() -> Array[OptionRow]:
-	var out: Array[OptionRow] = []
-	for s in _sections:
-		for r: OptionRow in s[1]:
-			if r.visible:
-				out.append(r)
+## The race's car lockup, from the sheet (which has just read the car).
+func _refresh_car_card() -> void:
+	if _sheet.car == _car_i:
+		_car_card.set_content(_sheet.kicker_text(), _sheet.title_text(), _sheet.headline())
+
+
+## What the sheet says the car is to you, before its maker.
+func _sheet_context(i: int) -> String:
+	match _screen:
+		Screen.GARAGE: return "In your garage" if Game.owns(i) else "At the dealer"
+		Screen.CAR: return ""
+	return ""
+
+
+func _refresh_track_card() -> void:
+	var id := Game.tracks[_track_i]
+	var m := _tracks.map_of(id)
+	_track_card.outline = m.pts
+	_track_card.open = Game.is_sprint(id)
+	var bits := PackedStringArray()
+	var km: float = m.km
+	if km > 0:
+		if Game.is_sprint(id):
+			bits.append(UiKit.dist(km) + ", point to point")
+		else:
+			bits.append(UiKit.dist(km) + " a lap")
+			if _laps.visible:
+				bits.append("%s over %d lap%s" % [UiKit.dist(km * (_laps.index + 1)), _laps.index + 1, "" if _laps.index == 0 else "s"])
+	if _tracks.precip(id) == Nfs3Horizon.Precip.SNOW:
+		bits.append("snow country")
+	# The game it's from (whether it's a lap or a run is in the line under the name).
+	var sec := _tracks.section(id).split(" · ")[0]
+	_track_card.set_content("Track  ·  " + sec, Game.track_name(id), " · ".join(bits))
+
+
+## The bits of the chrome that follow the setup (the start button's words).
+func _refresh_home_bits() -> void:
+	if _screen == Screen.RACE:
+		_next_btn.set_text(_next_text())
+
+
+func _hub_nav() -> Array[Control]:
+	var out: Array[Control] = []
+	for col in [_left, _right]:
+		for s in col:
+			for c: Control in s[1]:
+				if c.visible:
+					out.append(c)
 	return out
 
 
-func _set_opt_focus(r: OptionRow) -> void:
-	_opt_focus = r
-	for s in _sections:
-		for o: OptionRow in s[1]:
-			o.focused = o == r
-	_opts.queue_redraw()
+func _set_hub_focus(c: Control) -> void:
+	_hub_focus = c
+	for x in _hub_nav():
+		x.focused = x == c
+	_hub.queue_redraw()
 
 
-func _move_opt_focus(dir: int) -> void:
-	var nav := _opt_nav()
-	_set_opt_focus(nav[posmod(nav.find(_opt_focus) + dir, nav.size())])
+func _move_hub_focus(dir: int) -> void:
+	var nav := _hub_nav()
+	_set_hub_focus(nav[posmod(nav.find(_hub_focus) + dir, nav.size())])
 
 
-func _layout_options() -> void:
-	var y := 0.0
-	for s in _sections:
-		var rows: Array = s[1].filter(func(r: OptionRow) -> bool: return r.visible)
-		s.resize(2)
-		if rows.is_empty():
-			continue
-		s.append(y)
-		y += SECTION_H
-		for r: OptionRow in rows:
-			r.position = Vector2(0, y)
-			r.size = Vector2(_opts.size.x, SETUP_ROW_H)
-			y += SETUP_ROW_H
-		y += 12
-	_help_y = y + 4
-	_opts.queue_redraw()
+func _hub_caption(c: Control) -> String:
+	if c == _track_card:
+		return "Track"
+	if c == _car_card:
+		return "Car"
+	return (c as OptionRow).caption if c is OptionRow else ""
 
 
-func _draw_options() -> void:
-	var o := _opts
-	var f := UiKit.font("cond", 3)
-	for s in _sections:
-		if s.size() < 3:
-			continue
-		var y: float = s[2] + 18
-		o.draw_string(f, Vector2(22, y), s[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.ACCENT)
-		var tw := f.get_string_size(s[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		o.draw_line(Vector2(34 + tw, y - 5), Vector2(o.size.x - 12, y - 5), UiKit.INK_FAINT, 1.0)
-	var help: String = HELP.get(_opt_focus.caption, "")
-	o.draw_rect(Rect2(22, _help_y, 3, 40), UiKit.ACCENT)
-	o.draw_multiline_string(UiKit.font("body"), Vector2(36, _help_y + 15), help, HORIZONTAL_ALIGNMENT_LEFT, o.size.x - 60, 14, 3,
-		UiKit.INK_DIM)
+func _draw_hub() -> void:
+	var h := _hub
+	var lw := _left_w()
+	for s in _left:
+		if s.size() > 2 and s[2] >= 0.0:
+			UiKit.kicker(h, Vector2(M, s[2]), s[0], lw)
+	# The mode's note under it.
+	h.draw_string(UiKit.font("body"), Vector2(M + _mode_row.caption_w, _mode_row.position.y + ROW_H + 12), MODE_NOTES[_mode],
+		HORIZONTAL_ALIGNMENT_LEFT, lw - _mode_row.caption_w, 14, UiKit.INK_DIM)
+	# What the focused setting does, at the foot of the column.
+	var help: String = HELP.get(_hub_caption(_hub_focus), "")
+	if help != "":
+		var y := maxf(_help_y, size.y - FOOT - 50)
+		h.draw_multiline_string(UiKit.font("body"), Vector2(M, y + 13), help, HORIZONTAL_ALIGNMENT_LEFT, lw, 14, 2,
+			Color(UiKit.INK, 0.55))
 
 
 # ------------------------------------------------------------------ drawing
@@ -780,17 +814,20 @@ func _draw_shade(c: Control) -> void:
 	var W := c.size.x
 	var H := c.size.y
 	var clear := Color(UiKit.BG, 0.0)
-	var dark := Color(UiKit.BG, 0.92)
-	# Left column scrim, top and bottom bands, so text reads over any photo.
-	_grad_rect(c, Rect2(0, 0, 640, H), dark, clear, true)
-	_grad_rect(c, Rect2(0, 0, W, 150), Color(UiKit.BG, 0.75), clear, false)
-	_grad_rect(c, Rect2(0, H - 300, W, 300), clear, Color(UiKit.BG, 0.95), false)
+	# Scrims so type reads over any picture: down the left, along the top and the bottom, and
+	# into the bottom right corner where the car's lockup sits.
+	_grad_rect(c, Rect2(0, 0, 760, H), Color(UiKit.BG, 0.95), clear, true)
+	_grad_rect(c, Rect2(0, 0, W, 140), Color(UiKit.BG, 0.85), clear, false)
+	_grad_rect(c, Rect2(0, H - 360, W, 360), clear, Color(UiKit.BG, 0.97), false)
+	var corner := Rect2(W - 900, H * 0.35, 900, H * 0.65)
+	c.draw_polygon(PackedVector2Array([corner.position, Vector2(corner.end.x, corner.position.y), corner.end,
+		Vector2(corner.position.x, corner.end.y)]), PackedColorArray([clear, clear, Color(UiKit.BG, 0.9), clear]))
+
 
 static func _grad_rect(ci: CanvasItem, r: Rect2, from: Color, to: Color, horizontal: bool) -> void:
 	var pts := PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
 	var cols := PackedColorArray([from, to, to, from]) if horizontal else PackedColorArray([from, from, to, to])
 	ci.draw_polygon(pts, cols)
-
 
 func _draw_overlay() -> void:
 	var o := _overlay
@@ -798,143 +835,78 @@ func _draw_overlay() -> void:
 	var H := o.size.y
 	# Logo.
 	var lf := UiKit.font("display")
-	o.draw_string(lf, Vector2(M, 58), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 40, UiKit.ACCENT)
-	var lw := lf.get_string_size("NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
-	o.draw_string(UiKit.font("cond_med", 6), Vector2(M + lw + 10, 57), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 26, UiKit.INK)
-	UiKit.draw_slant(o, Rect2(M, 68, 132, 3), UiKit.ACCENT, 0.9)
-	o.draw_string(UiKit.font("cond", 3), Vector2(M, 88), "HOT PURSUIT  ·  HIGH STAKES", HORIZONTAL_ALIGNMENT_LEFT, -1, 11,
-		UiKit.INK_DIM)
-	# Hot Pursuit: light bar sweeping across the top edge.
+	o.draw_string(lf, Vector2(M, 44), "NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, UiKit.ACCENT)
+	var lw := lf.get_string_size("NFS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30).x
+	o.draw_string(UiKit.font("cond_med", 5), Vector2(M + lw + 8, 43), "REVIVAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 19, UiKit.INK)
+	o.draw_line(Vector2(M + 180, 22), Vector2(M + 180, 42), UiKit.LINE, 1.0)
+	o.draw_line(Vector2(M - 14, BAR_H), Vector2(W - M + 14, BAR_H), UiKit.LINE, 1.0)
+	# In a picker: what it's for, after the way back.
+	if _crumb.visible:
+		var title: String = {Screen.TRACK: "Choose a track", Screen.CAR: "Choose a car", Screen.GARAGE: _entry_title()}.get(_screen, "")
+		o.draw_string(UiKit.font("body"), Vector2(_crumb.position.x + _crumb.size.x + 16, 38), title,
+			HORIZONTAL_ALIGNMENT_LEFT, W - M - _crumb.position.x - _crumb.size.x - 16, 16, UiKit.INK_DIM)
+	# Hot Pursuit: a light bar sweeping along the top edge.
 	if _pursuit_lights():
 		var phase := fmod(_time * 2.2, 2.0)
 		var col := UiKit.COP_RED if phase < 1.0 else UiKit.COP_BLUE
 		var a := 0.6 * absf(sin(_time * 14.0))
-		_grad_rect(o, Rect2(0, 0, W * 0.5, 4), Color(col, a if phase < 1.0 else 0.0), Color(col, 0.0), true)
-		_grad_rect(o, Rect2(W * 0.5, 0, W * 0.5, 4), Color(col, 0.0), Color(col, a if phase >= 1.0 else 0.0), true)
+		_grad_rect(o, Rect2(0, 0, W * 0.5, 3), Color(col, a if phase < 1.0 else 0.0), Color(col, 0.0), true)
+		_grad_rect(o, Rect2(W * 0.5, 0, W * 0.5, 3), Color(col, 0.0), Color(col, a if phase >= 1.0 else 0.0), true)
 	match _screen:
-		Screen.HOME:
-			_draw_track_card(o)
-			_draw_car_caption(o, H - 40)
+		Screen.RACE:
 			if not Game.has_game_data():
-				o.draw_multiline_string(UiKit.font("body"), Vector2(W * 0.5, TOP + 190), "No NFS3 data found: you get the generated "
-					+ "circuit and stand-in cars. Settings → Game data says where it looks.", HORIZONTAL_ALIGNMENT_LEFT, W * 0.5 - M, 14,
-					3, UiKit.ACCENT)
+				o.draw_multiline_string(UiKit.font("body"), Vector2(W * 0.5, TOP + 20), "No NFS3 data found: you get the "
+					+ "generated circuit and stand-in cars. Settings → Game data says where it looks.", HORIZONTAL_ALIGNMENT_LEFT,
+					W * 0.5 - M, 15, 3, UiKit.ACCENT)
 		Screen.TRACK:
 			_draw_track_detail(o)
-		Screen.CAR:
-			_draw_car_caption(o, _stats.position.y)
-		Screen.OPTIONS:
-			_draw_track_card(o)
-			_draw_car_caption(o, _stats.position.y)
+		Screen.CAREER:
+			if not _next_enabled():
+				var why := _tournaments.blocked()
+				o.draw_string(UiKit.font("body"), Vector2(M, _next_btn.get_center().y + 5), why,
+					HORIZONTAL_ALIGNMENT_RIGHT, _next_btn.position.x - M - 20, 15, UiKit.COP_RED)
 	if _toast_t > 0.0:
 		var a := clampf(_toast_t * 3.0, 0.0, 1.0)
-		var f := UiKit.font("cond", 2)
-		var y := _next_btn.position.y - 18 if _next_btn.visible else H - 30
-		o.draw_string(f, Vector2(W * 0.5, y + 5), _toast.to_upper(), HORIZONTAL_ALIGNMENT_RIGHT, W * 0.5 - M, 16, Color(_toast_col, a))
+		var f := UiKit.font("body_bold")
+		var y := _next_btn.position.y - 16 if _next_btn.visible else H - 30
+		o.draw_string(f, Vector2(W * 0.4, y), _toast, HORIZONTAL_ALIGNMENT_RIGHT, W * 0.6 - M, 15, Color(_toast_col, a))
+
+
+## "European Tour · circuit 1 · any car · entry free", over the car choice for a circuit.
+func _entry_title() -> String:
+	if _tour.is_empty():
+		return ""
+	var t: Dictionary = _tour.t
+	var c: Dictionary = Game.career_data().circuits.get(_tour.cid, {})
+	var bits := PackedStringArray(["Choose a car for %s, circuit %d" % [t.get("name", ""), t.get("circuits", []).find(_tour.cid) + 1]])
+	var only := Game.career_data().restriction_text(c)
+	if only != "":
+		bits.append(only)
+	return "  ·  ".join(bits)
 
 
 func _pursuit_lights() -> bool:
-	if _screen == Screen.HOME:
-		var it: Dictionary = _home_items[_home.focus] if _home.focus < _home_items.size() else {}
-		return it.get("mode", -1) == Game.Mode.HOT_PURSUIT or (it.get("id") == "quick" and _quick_mode == Game.Mode.HOT_PURSUIT)
-	return _mode == Game.Mode.HOT_PURSUIT and not _in_tour()
+	return _mode == Game.Mode.HOT_PURSUIT and (_screen == Screen.RACE or _screen == Screen.TRACK or _screen == Screen.CAR)
 
 
-## Top right: track name, lengths and the map.
-func _draw_track_card(o: Control) -> void:
-	var W := o.size.x
-	var card_w := 400.0
-	var cx := W - M - card_w
-	var cy := _track_map.position.y - 24
-	var tid := Game.tracks[_track_shown]
-	var hf0 := UiKit.font("cond", 3)
-	var head := "TRACK"
-	if _layout_row.index > 0:
-		head += "  ·  " + Game.LAYOUTS[_layout_row.index].to_upper()
-	o.draw_string(hf0, Vector2(cx, cy), head, HORIZONTAL_ALIGNMENT_RIGHT, card_w, 13, UiKit.ACCENT)
-	var head_w := hf0.get_string_size(head, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-	o.draw_line(Vector2(cx + 60, cy - 5), Vector2(W - M - head_w - 14, cy - 5), UiKit.INK_FAINT, 1.0)
-	var text_w := _track_map.position.x - 18 - cx
-	var ty := _track_map.position.y + 38
-	var df := UiKit.font("display")
-	var name := Game.track_name(tid).to_upper()
-	var fs := 30
-	while fs > 18 and df.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > text_w:
-		fs -= 2
-	o.draw_string(df, Vector2(cx, ty), name, HORIZONTAL_ALIGNMENT_RIGHT, text_w, fs, UiKit.INK)
-	var km := _track_map.length_m / 1000.0
-	var bf := UiKit.font("cond", 2)
-	if _track_map.length_m > 0:
-		o.draw_string(bf, Vector2(cx, ty + 24), "%s  PER LAP" % _dist(km), HORIZONTAL_ALIGNMENT_RIGHT, text_w, 13, UiKit.INK_DIM)
-		if _laps.visible and _screen == Screen.OPTIONS:
-			o.draw_string(bf, Vector2(cx, ty + 44), "%s  RACE" % _dist(km * (_laps.index + 1)), HORIZONTAL_ALIGNMENT_RIGHT,
-				text_w, 13, UiKit.INK_DIM)
-
-
-## Beside the track browser: the track in focus large, with its map.
+## Beside the track picker: the track in focus, large, with its map and facts.
 func _draw_track_detail(o: Control) -> void:
 	var x0 := _track_map.position.x
 	var w := _track_map.size.x
 	var id := Game.tracks[_track_shown]
-	var hf := UiKit.font("cond", 3)
-	o.draw_string(hf, Vector2(x0, TOP + 22), _tracks.section(id), HORIZONTAL_ALIGNMENT_LEFT, w, 13, UiKit.ACCENT)
-	var df := UiKit.font("display")
+	UiKit.kicker(o, Vector2(x0, TOP + 18), _tracks.section(id), w)
 	var name := Game.track_name(id).to_upper()
-	var fs := 48
-	while fs > 24 and df.get_string_size(name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > w:
-		fs -= 2
-	o.draw_string(df, Vector2(x0, TOP + 68), name, HORIZONTAL_ALIGNMENT_LEFT, w, fs, UiKit.INK)
-	var y := _track_map.position.y + _track_map.size.y + 34
+	o.draw_string(UiKit.font("display"), Vector2(x0 - 2, TOP + 64), name, HORIZONTAL_ALIGNMENT_LEFT, w,
+		UiKit.fit("display", name, w, 48, 22), UiKit.INK)
+	var y := _track_map.position.y + _track_map.size.y + 30
 	var km := _track_map.length_m / 1000.0
 	var snow := _tracks.precip(id) == Nfs3Horizon.Precip.SNOW
-	var facts := [["LAP", _dist(km) if km > 0 else "—"], ["WEATHER", "CLEAR OR SNOW" if snow else "CLEAR OR RAIN"]]
-	var bf := UiKit.font("cond", 2)
+	var facts := [["Length", (UiKit.dist(km) + (" point to point" if Game.is_sprint(id) else " a lap")) if km > 0 else "—"],
+		["Weather", "Clear or snow" if snow else "Clear or rain"]]
 	for f in facts:
-		o.draw_string(bf, Vector2(x0, y), f[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.INK_DIM)
-		o.draw_string(UiKit.font("display"), Vector2(x0, y + 26), f[1], HORIZONTAL_ALIGNMENT_LEFT, w, 22, UiKit.INK)
-		y += 52
-
-
-## Bottom right: the car's showroom facts, spec line and name, standing on `y0` (the top of
-## the rating bars where they're shown).
-func _draw_car_caption(o: Control, y0: float) -> void:
-	var W := o.size.x
-	var ci := _car_shown
-	var car_name: String = Game.cars[ci].name.to_upper()
-	var df := UiKit.font("display")
-	var fs := 58 if _screen != Screen.HOME else 48
-	var left := _cars.position.x + _cars.size.x + 40 if _screen == Screen.CAR else W * 0.5
-	var max_w := W - M - left
-	while fs > 30 and df.get_string_size(car_name, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x > max_w:
-		fs -= 2
-	var hf := UiKit.font("cond", 3)
-	var line := _stats.spec
-	var line_y := y0 - 24 - fs * 0.93
-	if _screen == Screen.HOME:
-		var lw := hf.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		o.draw_string(hf, Vector2(W - M - max_w, line_y), "YOUR CAR", HORIZONTAL_ALIGNMENT_RIGHT, max_w - lw - 24, 13, UiKit.ACCENT)
-	o.draw_string(hf, Vector2(W - M - max_w, line_y), line, HORIZONTAL_ALIGNMENT_RIGHT, max_w, 13, UiKit.INK_DIM)
-	o.draw_string(df, Vector2(W - M - max_w, y0 - 24), car_name, HORIZONTAL_ALIGNMENT_RIGHT, max_w, fs, UiKit.INK)
-	if _screen == Screen.HOME:
-		return
-	# The car file's own showroom facts, as the original listed them.
-	var spec := Game.car_spec(ci)
-	var info: Dictionary = spec.info if "info" in spec else {}
-	var facts := PackedStringArray()
-	for k in ["engine", "power", "zero_60", "price"]:
-		var v: String = info.get(k, "")
-		# Asides such as "(7.3 auto)" left out.
-		if v.find("(") > 0:
-			v = v.left(v.find("(")).strip_edges()
-		if v != "" and v.to_lower() != "n/a":
-			facts.append(("0-60  " + v) if k == "zero_60" else v)
-	if not facts.is_empty():
-		o.draw_string(hf, Vector2(W - M - max_w, line_y - 26), "   ·   ".join(facts).to_upper(),
-			HORIZONTAL_ALIGNMENT_RIGHT, max_w, 12, UiKit.INK_DIM)
-
-
-func _dist(km: float) -> String:
-	return "%.1f KM" % km if Game.units_kmh else "%.1f MI" % (km / 1.609)
+		o.draw_string(UiKit.font("body"), Vector2(x0, y), f[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, UiKit.INK_DIM)
+		o.draw_string(UiKit.font("display"), Vector2(x0 + 90, y), f[1], HORIZONTAL_ALIGNMENT_LEFT, w - 90, 20, UiKit.INK)
+		y += 32
 
 
 # ------------------------------------------------------------------ setup
@@ -942,7 +914,7 @@ func _dist(km: float) -> String:
 func _intro() -> void:
 	var tw := create_tween().set_parallel().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tw.tween_property(_fade, "color:a", 0.0, 0.5).from(1.0)
-	for c in [_overlay, _home, _chip, _hints]:
+	for c in [_overlay, _hub, _nav, _hints]:
 		c.modulate.a = 0.0
 		tw.tween_property(c, "modulate:a", 1.0, 0.45).set_delay(0.15)
 
@@ -952,7 +924,6 @@ func _outline(id: String) -> PackedVector3Array:
 		_outlines[id] = ProceduralTrack.outline() if id == Game.PROCEDURAL_TRACK \
 			else Nfs3Track.peek_outline(Game.track_dir(id))
 	return _outlines[id]
-
 
 func _set_track(i: int) -> void:
 	_track_i = i
@@ -964,12 +935,12 @@ func _set_track(i: int) -> void:
 	var snow := _tracks.precip(Game.tracks[i]) == Nfs3Horizon.Precip.SNOW
 	_weather.set_items(PackedStringArray(["Clear", "Snow" if snow else "Rain"]), _weather.index)
 	_show_track(true)
-	_update_steps()
+	_refresh_track_card()
 
 
 ## Map and backdrop for the shown track.
 func _show_track(animate: bool) -> void:
-	_track_map.set_outline(_outline(Game.tracks[_track_shown]))
+	_track_map.set_outline(_outline(Game.tracks[_track_shown]), true, Game.is_sprint(Game.tracks[_track_shown]))
 	_show_backdrop(animate)
 	_overlay.queue_redraw()
 
@@ -980,13 +951,15 @@ func _on_circuit_focus() -> void:
 	if i >= 0:
 		_track_shown = i
 		_show_backdrop(true)
-	_update_steps()
+	if _screen == Screen.CAREER:
+		_next_btn.set_enabled(_next_enabled())
+		_overlay.queue_redraw()
 
 
 func _set_car(i: int) -> void:
 	_car_i = i
 	_preview_car_later(i)
-	_update_steps()
+	_refresh_car_rows()
 
 
 ## Car `i`'s paints by name ("Torch Red"...), as many as its model has colours.
@@ -1000,53 +973,85 @@ func _paint_names(i: int) -> PackedStringArray:
 		out.append("Factory")
 	return out
 
-
 ## ...and their colours (the paint areas are mid-grey, so the car files' colours are held
 ## at double strength: halved here to show as they come out on the car).
 func _paint_swatches(i: int) -> Array[Color]:
 	var out: Array[Color] = []
+	# Only once its model is in (loading it for every car browsed past would stall the list).
+	var key: String = Game.cars[i].path if Game.cars[i].path != "" else "preset%d" % i
+	if not Game._car_cache.has(key):
+		return out
 	var data: Object = Game.load_car(Game.cars[i].path, i)
 	for c: Color in data.colours:
 		out.append(Color(minf(c.r * 0.5, 1.0), minf(c.g * 0.5, 1.0), minf(c.b * 0.5, 1.0)))
-	return out if out.size() == _paint_names(i).size() else []
-
+	if out.size() != _paint_names(i).size():
+		out.clear()
+	return out
 
 ## A browsed car: its caption and ratings at once, the model once focus rests on it.
 func _preview_car_later(i: int) -> void:
 	_car_shown = i
 	_show_backdrop(true)
-	_stats.set_car(Game.car_spec(i), Game.units_kmh, Game.upgrade_of(i))
-	_car_pending = i if _preview_car == null or i != _preview_car.get_meta("car", -1) else -1
+	_stats.set_car(Game.car_spec(i), Game.units_kmh, _upgrade_shown(i))
+	_sheet.show_car(i, _upgrade_shown(i), _sheet_context(i))
+	_car_pending = i if _showroom.shown_id() != i else -1
 	_car_pending_t = CAR_PREVIEW_DELAY
+	if i == _car_i:
+		_refresh_car_card()
+	_refresh_pick_rows()
 	_overlay.queue_redraw()
+
+
+## Car `i` in paint `p` (remembered per car): repainted on the stand where it's the one on show.
+func _set_paint(i: int, p: int) -> void:
+	Game.paints[Game.cars[i].id] = p
+	if _showroom.shown_id() == i:
+		var data: Object = Game.load_car(Game.cars[i].path, i)
+		_showroom.repaint(Game.paint_tint(i, data))
+	if i == _car_i:
+		_paint_row.set_items(_paint_row.items, p)
+	if i == _car_shown:
+		_pick_paint.set_items(_pick_paint.items, p)
+
+
+## Car `i` with its upgrades at `level` (remembered per car): its figures follow.
+func _set_trim(i: int, level: int) -> void:
+	Game.set_upgrade(i, level)
+	if i == _car_i:
+		_upgrade_row.set_items(_upgrade_row.items, level)
+	if i == _car_shown:
+		_pick_trim.set_items(_pick_trim.items, level)
+		_stats.set_car(Game.car_spec(i), Game.units_kmh, _upgrade_shown(i))
+		_sheet.show_car(i, _upgrade_shown(i), _sheet_context(i))
+	if i == _car_i:
+		_refresh_car_card()
+
+
+## The picker's paint and trim, for the car on show.
+func _refresh_pick_rows() -> void:
+	var i := _car_shown
+	var names := _paint_names(i)
+	_pick_paint.swatches = _paint_swatches(i)
+	_pick_paint.set_items(names, mini(Game.paint_of(i), names.size() - 1))
+	_pick_trim.set_items(_pick_trim.items, Game.upgrade_of(i))
+
+
+## The upgrade level car `i`'s ratings show: in the garage, as it's fitted there.
+func _upgrade_shown(i: int) -> int:
+	return Game.garage_upgrade(i) if _screen == Screen.GARAGE else Game.upgrade_of(i)
 
 
 func _show_car_now(i: int) -> void:
 	_car_shown = i
 	_car_pending = -1
 	var data: Object = Game.load_car(Game.cars[i].path, i)
-	_stats.set_car(data, Game.units_kmh, Game.upgrade_of(i))
-	_show_car(data)
-	_preview_car.set_meta("car", i)
+	_stats.set_car(data, Game.units_kmh, _upgrade_shown(i))
+	_showroom.show_car(data, Game.paint_tint(i, data), _upgrade_shown(i), i)
+	# Its colours are known now.
+	_refresh_pick_rows()
+	if i == _car_i:
+		_refresh_car_rows()
 	_overlay.queue_redraw()
-
-
-func _show_car(data: Object) -> void:
-	if _preview_car:
-		_preview_car.queue_free()
-		_preview_car = null
-	# The race car itself, parked (handbrake on, no brake lights) and dropped from a little
-	# height: it lands on its springs, bounces and settles at its real static sag.
-	var car := Car.new()
-	car.setup(data, Game.paint_tint(_car_shown, data))
-	car.handbrake = true
-	car.set_headlights(false)
-	_floor.get_parent().add_child(car)
-	car.reset_to(Transform3D(Basis(), Vector3(0, PODIUM_TOP, 0)), DROP_HEIGHT)
-	_preview_car = car
-	(_shadow.mesh as PlaneMesh).size = Vector2(data.half_size.x * 2.6, data.half_size.z * 2.3)
-	_shadow.visible = true
-
 
 ## The shown track's rendered postcard for the time of day; the blurred front-end slide
 ## until that has been rendered.
@@ -1070,10 +1075,11 @@ func _show_backdrop(animate: bool) -> void:
 	create_tween().tween_property(_photo_back, "modulate:a", 0.0, 0.45)
 	_tint_backdrop()
 
-
 func _on_postcard_rendered(id: String) -> void:
 	if id == Game.tracks[_track_shown]:
 		_show_backdrop(true)
+	if id == Game.tracks[_track_i]:
+		_refresh_track_card()
 	_tracks.refresh()
 	_tournaments.queue_redraw()
 
@@ -1085,10 +1091,12 @@ func _tint_backdrop() -> void:
 		# A render already has the time of day in it: just dim it behind the showroom.
 		tint = Color(0.72, 0.72, 0.75)
 	if _screen == Screen.TRACK:
-		tint = Color(0.9, 0.9, 0.92)
-	elif _screen == Screen.TOURNAMENTS:
-		tint = Color(0.45, 0.45, 0.48)
-	if _weather.index == 1 and not _in_tour():
+		tint = Color(0.5, 0.5, 0.53)
+	elif _screen == Screen.CAREER:
+		tint = Color(0.42, 0.42, 0.45)
+	elif _screen == Screen.SETTINGS:
+		tint = Color(0.25, 0.25, 0.28)
+	if _weather.index == 1 and not _in_career():
 		tint = tint.darkened(0.25).lerp(Color(0.3, 0.33, 0.36), 0.3)
 	for tr in [_photo_back, _photo_front]:
 		create_tween().tween_property(tr, "self_modulate", tint, 0.4)
@@ -1108,7 +1116,6 @@ func _showcase_photo(i: int) -> Texture2D:
 		_showcase[id] = ImageTexture.create_from_image(fsh.images[0]) if fsh and not fsh.images.is_empty() else null
 	return _showcase[id]
 
-
 ## The track's front-end slide, cropped to the photo, heavily blurred and used as mood
 ## lighting behind the showroom (the baked-in map and logo blur away).
 func _track_photo(id: String) -> Texture2D:
@@ -1117,7 +1124,17 @@ func _track_photo(id: String) -> Texture2D:
 	var tex: Texture2D = null
 	var fsh: Fsh = null
 	var top := 60
-	if Game.is_hs_track(id):
+	if Game.is_pu_track(id):
+		# Porsche Unleashed's photo of the track, its middle.
+		var photo := Game.pu_track_photo(id)
+		if photo:
+			var img := photo.get_region(Rect2i(0, photo.get_height() / 2 - 64, 256, 128))
+			img.convert(Image.FORMAT_RGBA8)
+			img.resize(48, 24, Image.INTERPOLATE_BILINEAR)
+			img.resize(96, 48, Image.INTERPOLATE_BILINEAR)
+			img.resize(384, 192, Image.INTERPOLATE_CUBIC)
+			tex = ImageTexture.create_from_image(img)
+	elif Game.is_hs_track(id):
 		# High Stakes' own slides (FeArt/slides/tN_00.qfs), numbered in its track order.
 		var n: int = Game.HS_SLIDES.get(id.trim_prefix(Game.HS_PREFIX), -1)
 		if n >= 0:
@@ -1136,37 +1153,35 @@ func _track_photo(id: String) -> Texture2D:
 	_photos[id] = tex
 	return tex
 
-
 func _on_settings_changed() -> void:
-	_stats.set_car(Game.car_spec(_car_shown), Game.units_kmh, Game.upgrade_of(_car_shown))
+	_stats.set_car(Game.car_spec(_car_shown), Game.units_kmh, _upgrade_shown(_car_shown))
+	_refresh_track_card()
 	_overlay.queue_redraw()
 
 
-# ------------------------------------------------------------------ overlays
+# ------------------------------------------------------------------ for the tools
 
-func _open_settings(page := 0) -> void:
-	if _starting or _settings.visible:
-		return
-	_settings.open(page)
-
-
-## `page`: 0 general, 1 the race HUD (tools/autotest.gd).
+## `page`: 0 the first, 3 the race HUD (tools/autotest.gd).
 func open_settings(page := 0) -> void:
-	_open_settings(page)
+	_go(Screen.SETTINGS, false)
+	_settings.show_page(page)
 
 
-## For tools/autotest.gd: "home", "track", "car", "options", "tournaments" or "circuit"
-## (the car for the first tournament circuit open).
+## For tools/autotest.gd: "race" (or "home", "options"), "track", "car", "tournaments",
+## "garage", "circuit" (the car choice for the first tournament circuit open) or "settings".
 func show_screen(name: String) -> void:
 	match name:
-		"track": _go(Screen.TRACK, false)
-		"car": _go(Screen.CAR, false)
-		"options": _go(Screen.OPTIONS, false)
-		"tournaments": _go(Screen.TOURNAMENTS, false)
+		"track": _open_track_picker()
+		"car": _open_car_picker()
+		"tournaments": _go(Screen.CAREER, false)
+		"garage":
+			_tour = {}
+			_go(Screen.GARAGE, false)
 		"circuit":
-			_go(Screen.TOURNAMENTS, false)
+			_go(Screen.CAREER, false)
 			_tournaments.choose()
-		_: _go(Screen.HOME, false)
+		"settings": _go(Screen.SETTINGS, false)
+		_: _go(Screen.RACE, false)
 
 
 func _open_tournaments() -> void:
@@ -1178,6 +1193,8 @@ func _open_cars() -> void:
 	show_screen("car")
 
 
+# ------------------------------------------------------------------ input
+
 func _say(text: String, col := UiKit.ACCENT) -> void:
 	_toast = text
 	_toast_col = col
@@ -1185,116 +1202,115 @@ func _say(text: String, col := UiKit.ACCENT) -> void:
 	_overlay.queue_redraw()
 
 
+## For tools/: whether the quit question is up.
 func _quit_armed() -> bool:
-	return Time.get_ticks_msec() < _quit_armed_until
+	return _confirm != null and is_instance_valid(_confirm)
 
 
+## Asks before quitting: Esc then Enter quits, a second Esc stays.
 func _request_quit() -> void:
 	if _quit_armed():
-		get_tree().quit()
 		return
-	_quit_armed_until = Time.get_ticks_msec() + 2500
-	_say("Press Esc again to quit", UiKit.COP_RED)
-	if _screen == Screen.HOME:
-		_refresh_home()
+	var note := "Your settings are saved."
+	if Game.career_data():
+		note = "Your settings and your career are saved."
+	_confirm = ConfirmDialog.ask(self, "NFS Revival", "Quit to the desktop?", note, "Quit", "Stay",
+		func(): get_tree().quit(), true)
 
 
 func _unhandled_input(e: InputEvent) -> void:
-	if _starting or _settings.visible:
+	if _starting:
 		return
-	if e is InputEventKey:
-		if not e.pressed:
+	var key := e as InputEventKey
+	if key:
+		if not key.pressed:
 			return
-		if e.physical_keycode == KEY_TAB and not e.echo:
-			_open_settings()
-		elif e.physical_keycode == KEY_ESCAPE:
-			if not e.echo:
+		var k := key.physical_keycode
+		if k == KEY_ESCAPE:
+			if not key.echo:
 				_back()
-		elif _screen == Screen.OPTIONS:
-			match e.physical_keycode:
-				KEY_UP, KEY_W: _move_opt_focus(-1)
-				KEY_DOWN, KEY_S: _move_opt_focus(1)
-				KEY_LEFT, KEY_A: _opt_focus.step(-1)
-				KEY_RIGHT, KEY_D: _opt_focus.step(1)
+		elif (k == KEY_Q or k == KEY_E) and not key.echo and _nav.visible:
+			_nav.step(-1 if k == KEY_Q else 1)
+		elif _screen == Screen.RACE:
+			match k:
+				KEY_UP: _move_hub_focus(-1)
+				KEY_DOWN: _move_hub_focus(1)
+				KEY_LEFT, KEY_RIGHT:
+					if _hub_focus is OptionRow:
+						(_hub_focus as OptionRow).step(-1 if k == KEY_LEFT else 1)
+				KEY_T: _open_track_picker()
+				KEY_C: _open_car_picker()
 				KEY_ENTER, KEY_KP_ENTER:
-					if e.alt_pressed or e.echo:
+					if key.alt_pressed or key.echo:
 						return
-					_next()
+					_activate_hub_focus()
 				_: return
+		elif k in [KEY_ENTER, KEY_KP_ENTER] and not key.echo and not key.alt_pressed and _screen != Screen.SETTINGS:
+			_next()
 		else:
 			return
 		get_viewport().set_input_as_handled()
 		return
-	if e is InputEventJoypadButton and e.pressed and e.button_index == JOY_BUTTON_Y:
-		_open_settings()
+	var pad := e as InputEventJoypadButton
+	if pad and pad.pressed and pad.button_index in [JOY_BUTTON_LEFT_SHOULDER, JOY_BUTTON_RIGHT_SHOULDER] and _nav.visible:
+		_nav.step(-1 if pad.button_index == JOY_BUTTON_LEFT_SHOULDER else 1)
 	elif e.is_action_pressed("ui_cancel"):
 		_back()
-	elif _screen != Screen.OPTIONS:
+	elif _screen != Screen.RACE:
 		return
 	elif e.is_action_pressed("ui_down", true):
-		_move_opt_focus(1)
+		_move_hub_focus(1)
 	elif e.is_action_pressed("ui_up", true):
-		_move_opt_focus(-1)
-	elif e.is_action_pressed("ui_left", true):
-		_opt_focus.step(-1)
-	elif e.is_action_pressed("ui_right", true):
-		_opt_focus.step(1)
+		_move_hub_focus(-1)
+	elif e.is_action_pressed("ui_left", true) and _hub_focus is OptionRow:
+		(_hub_focus as OptionRow).step(-1)
+	elif e.is_action_pressed("ui_right", true) and _hub_focus is OptionRow:
+		(_hub_focus as OptionRow).step(1)
 	elif e.is_action_pressed("ui_accept"):
-		_next()
+		_activate_hub_focus()
 	else:
 		return
 	get_viewport().set_input_as_handled()
 
 
-## Drag the car around with the mouse; letting go mid-drag flings it.
-func _on_preview_input(e: InputEvent) -> void:
-	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
-		_dragging = e.pressed
-		# Holding still before letting go shouldn't fling it with a stale speed.
-		if not e.pressed and Time.get_ticks_msec() - _last_drag_ms > 80:
-			_spin_vel = 0.0
-	elif e is InputEventMouseMotion and _dragging and _rig:
-		_rig.rotate_y(-e.relative.x * 0.01)
-		_spin_vel = clampf(e.velocity.x * 0.01, -12.0, 12.0)
-		_last_drag_ms = Time.get_ticks_msec()
+## Enter on the setup: a card opens its picker, anything else starts the race.
+func _activate_hub_focus() -> void:
+	if _hub_focus == _track_card:
+		_open_track_picker()
+	elif _hub_focus == _car_card:
+		_open_car_picker()
+	else:
+		_next()
+
+
+func _gui_input(e: InputEvent) -> void:
+	# A right click anywhere that doesn't take it: back.
+	if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_RIGHT and not _top_level(_screen):
+		_back()
+		accept_event()
 
 
 func _process(dt: float) -> void:
 	_time += dt
-	if not _dragging:
-		_rig.rotate_y(-dt * _spin_vel)
-		_spin_vel = UiKit.damp(_spin_vel, 0.5, 1.5, dt)
 	if _car_pending >= 0:
 		_car_pending_t -= dt
 		if _car_pending_t <= 0.0:
 			_show_car_now(_car_pending)
-	if _preview_car:
-		if _starting:
-			# Drive off screen: slide the (frozen) car out along the camera's x.
-			_preview_car.global_position = _slide_from + _rig.basis.x * _car_slide
-		var xf := _preview_car.get_global_transform_interpolated()
-		_shadow.position = Vector3(xf.origin.x, PODIUM_TOP + 0.01, xf.origin.z)
-		_shadow.rotation.y = xf.basis.get_euler().y
-	# Slow drift on the backdrop and a breath of camera motion keep the scene alive.
+	# Slow drift on the backdrop keeps the scene alive.
 	_photo_drift.position = Vector2(sin(_time * 0.07), cos(_time * 0.05)) * size * 0.02
-	_cam.position.y = CAM_Y + sin(_time * 0.3) * 0.06
 	if _pursuit_lights():
 		_overlay.queue_redraw()
 	if _toast_t > 0.0:
 		_toast_t -= dt
 		_overlay.queue_redraw()
-	if _quit_armed_until > 0 and not _quit_armed():
-		_quit_armed_until = 0
-		if _screen == Screen.HOME:
-			_refresh_home()
 
 
-func _start(quick := false) -> void:
+func _start() -> void:
 	if _starting:
 		return
 	_starting = true
-	var m := _quick_mode if quick else _mode
-	Game.mode = m as Game.Mode
+	Game.circuit_run = {}
+	Game.mode = _mode as Game.Mode
 	Game.track_id = Game.tracks[_track_i]
 	Game.car_index = _car_i
 	Game.laps = _laps.index + 1
@@ -1304,7 +1320,6 @@ func _start(quick := false) -> void:
 	Game.weather = _weather.index == 1
 	Game.layout = _layout_row.index
 	Game.save_settings()
-	Game.circuit_run = {}
 	_launch()
 
 
@@ -1323,9 +1338,7 @@ func _enter_circuit() -> void:
 ## The race scene, after the car rolls off and the loading caption fades in.
 func _launch() -> void:
 	_next_btn.flash()
-	if _preview_car:
-		_preview_car.freeze = true
-		_slide_from = _preview_car.global_position
+	_showroom.freeze_for_start()
 	# The race's loading screen fades in over the menu; the race scene opens on the same one.
 	var loading := LoadingScreen.new()
 	loading.stage("Getting ready", 0.0, 0.03)
@@ -1333,7 +1346,7 @@ func _launch() -> void:
 	add_child(loading)
 	var tw := create_tween().set_parallel()
 	tw.tween_property(loading, "modulate:a", 1.0, 0.35).set_delay(0.1)
-	tw.tween_property(self, "_car_slide", -6.0, 0.35).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.tween_property(_showroom, "sliding", -9.0, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 	await tw.finished
 	loading.hand_over()
 	# Let it reach the screen before the scene change (which blocks while it loads).

@@ -133,6 +133,8 @@ func _ready() -> void:
 		_start_intro()
 
 
+var _flybys: Array[CanFile] = []   # the track's own fly-bys (Porsche Unleashed's)
+
 ## The track's start fly-by, if it has one and it's wanted; else straight to the countdown.
 ## Its keys circle the player's car looking at it, but which way the files' "ahead" runs
 ## isn't settled (NFS3 and High Stakes seem to differ), so each fly-by is tried both ways
@@ -143,6 +145,12 @@ func _start_intro() -> void:
 	var list: Array[CanFile] = []
 	if Game.intro_flyby and dir != "":
 		list = CanFile.intros(dir, Game.is_hs_track(Game.track_id))
+		# Porsche Unleashed's come with the track (Nfs5Track.flybys).
+		if list.is_empty():
+			for c in _flybys:
+				var copy := CanFile.new()
+				copy.keys.assign(c.keys.map(func(k: Dictionary) -> Dictionary: return k.duplicate()))
+				list.append(copy)
 	if Game.layout_mirrored():
 		for c in list:
 			for k in c.keys:
@@ -209,6 +217,7 @@ func _build_world(world: TrackWorld) -> void:
 		_merge_land(world.root)
 	add_child(world.root)
 	_parking = world.root.get_meta("parking", [])
+	_flybys.assign(world.root.get_meta("flybys", []))
 	path = world.path
 	_track_mat = world.track_mat
 	world.light(self, Game.night, Game.weather, get_viewport())
@@ -382,14 +391,19 @@ func _cars_to_load() -> Array:
 
 
 func _spawn_cars() -> void:
-	var start := 0
+	var start := path.start_node
 	var half_w := minf(path.left_width[start], path.right_width[start])
 	var col := clampf(half_w * 0.4, 1.8, 3.5)
 
 	# Player (in spectate mode an AI racer drives it, and `player` is whichever car is watched)
 	var player_data := Game.player_car_data()
-	player = _make_car(player_data, Game.paint_tint(Game.car_index, player_data), Game.upgrade_of(Game.car_index))
+	player = _make_car(player_data, Game.paint_tint(Game.car_index, player_data), Game.player_upgrade())
 	player.is_player = true
+	# A tournament's car comes with the damage it wasn't repaired of.
+	if not Game.circuit_run.is_empty():
+		for ch in player.get_children():
+			if ch is CarDamage:
+				ch.wear(Game.garage_damage(Game.car_index))
 	player.set_headlight_beam(true, true)
 	if spectating():
 		var auto := AIController.new()
@@ -440,8 +454,13 @@ func _spawn_cars() -> void:
 		ai_car.add_child(ai)
 		ai_car.add_child(CarAudio.new())
 		grid.append(ai_car)
-	# Player starts at the back, like the original.
+	# Player starts at the back, like the original; a tournament's circuit lines up after its
+	# first race by the standings (Game.circuit_grid).
 	grid.reverse()
+	if not rivals.is_empty():
+		var order := Game.circuit_grid()
+		grid.sort_custom(func(a: Car, b: Car) -> bool:
+			return order.find(a.get_meta("circuit_key")) < order.find(b.get_meta("circuit_key")))
 	for i in grid.size():
 		var row := i / 2
 		var side := -1.0 if i % 2 == 0 else 1.0
@@ -535,12 +554,13 @@ func _spawn_traffic() -> void:
 			data = Game.load_car(models[randi() % models.size()], 4)
 		else:
 			data = ProceduralCar.make(4, Color.from_hsv(randf(), 0.4, 0.8))
-		var tc := _make_car(data)
+		# Porsche Unleashed's traffic comes in any of its stock paints (Nfs5Car.STOCK_PAINTS).
+		var tc := _make_car(data, data.colours.pick_random() if data is Nfs5Car and not data.colours.is_empty() else Color(0, 0, 0, 0))
 		var ai := AIController.new()
 		ai.role = AIController.Role.TRAFFIC
 		ai.path = path
 		ai.cruise_speed = 40.0   # the speed limit sets its pace (AIController.traffic_speed)
-		ai.drive_side = TrafficRules.drive_side(Game.track_id)
+		ai.drive_side = TrafficRules.drive_side(Game.track_id, Game.layout_mirrored() and Game.track_dir(Game.track_id) != "")
 		ai.traffic_lane = 1
 		tc.add_child(ai)
 		tc.add_child(CarAudio.new())
@@ -775,6 +795,18 @@ func _update_progress() -> void:
 		var car: Car = r.car
 		var n := path.closest(car.global_position, r.node)
 		var prog := path.progress_at(car.global_position, n)
+		if not path.closed:
+			# A point-to-point run: the start line, then the finish line, each crossed once.
+			var line: float = path.cumulative[path.start_node if r.lap < 0 else path.finish_node]
+			var prev: float = r.progress
+			if prev < line and prog >= line:
+				_lap_done(r)
+			elif r.lap >= 0 and prev >= path.cumulative[path.start_node] and prog < path.cumulative[path.start_node]:
+				r.lap = -1
+			r.node = n
+			r.progress = prog
+			r.total = prog
+			continue
 		if r.node >= 0:
 			var prev: float = r.progress
 			if prev > L * 0.75 and prog < L * 0.25:
@@ -809,14 +841,14 @@ func _lap_done(r: Dictionary) -> void:
 	if not r.has("cross"):
 		r.cross = {}
 	r.cross[r.lap] = race_time
-	if r.car == player and r.lap >= 2 and lap_time < r.best and Game.mode != Game.Mode.FREE_ROAM and r.lap < Game.laps:
+	if r.car == player and r.lap >= 2 and lap_time < r.best and Game.mode != Game.Mode.FREE_ROAM and r.lap < Game.race_laps():
 		speech.say("lapeng", [0, 1, 2])
 	r.best = minf(r.best, lap_time)
 	if r.car == player and Game.mode != Game.Mode.FREE_ROAM:
 		hud.flash("Lap %s" % Hud.fmt_time(lap_time), 2.0)
 	if Game.mode == Game.Mode.FREE_ROAM:
 		return
-	if r.lap >= Game.laps and not r.finished:
+	if r.lap >= Game.race_laps() and not r.finished:
 		r.finished = true
 		r.time = race_time
 		_finish_order.append(r)
@@ -837,7 +869,7 @@ func _lap_done(r: Dictionary) -> void:
 			_end_race(false)
 		elif state == State.FINISHED:
 			_results_dirty = true
-	elif r.car == player and r.lap == Game.laps - 1:
+	elif r.car == player and r.lap == Game.race_laps() - 1:
 		hud.flash("FINAL LAP", 2.0)
 		speech.say("lapeng", [5, 6])
 	elif r.car == player and r.lap + 1 <= 7:
@@ -971,38 +1003,97 @@ func _end_race(arrested: bool) -> void:
 	hud.show_results(title, rows, extra)
 
 
-## A tournament race over: its points and standings, then on to the next race, or the
-## circuit's result and prize.
+## A tournament race over: its results beside the circuit's standings, then on to the next
+## race (the car mended first, if you'll pay), or at the circuit's end its trophy, prize or
+## car and what it opens.
 func _end_circuit_race(title: String, rows: Array) -> void:
 	var cars_in_order: Array = racers.map(func(r): return r.car)
 	cars_in_order.sort_custom(func(a: Car, b: Car) -> bool: return position_of(a) < position_of(b))
 	var order := cars_in_order.map(func(c: Car) -> Variant: return c.get_meta("circuit_key", "you"))
 	var run := Game.circuit_run
+	var career := Game.career_data()
+	var c: Dictionary = career.circuits[run.circuit]
+	var tour := {}
+	for t in career.tournaments:
+		if t.id == run.tournament:
+			tour = t
+	var race_no: int = run.race + 1
+	# The car keeps its damage until it's paid for.
+	if Game.damage:
+		Game.set_garage_damage(Game.car_index, player.damage)
 	var outcome := Game.circuit_race_done(order)
-	var standings := PackedStringArray()
-	for s: Array in outcome.standings:
-		var who: String = "You" if s[0] is String else Game.cars[run.field[s[0]].car].name
-		standings.append("%s %d" % [who, s[1]])
-	var extra := "Points:  " + "  ·  ".join(standings.slice(0, 4))
-	if outcome.message != "":
-		extra = outcome.message + "   " + extra
-	var actions := []
+	Game.save_career()
+	var standings := []
+	for s: Dictionary in outcome.standings:
+		standings.append({"name": Game.circuit_name(s.key), "you": s.key is String, "race": s.race, "gained": s.gained,
+			"points": s.points, "out": s.out})
+	var circuit := {"standings": standings,
+		"caption": "%s  ·  %s %d  ·  RACE %d OF %d" % [Game.track_name(Game.track_id).to_upper(), str(tour.get("name", "")).to_upper(),
+			tour.get("circuits", []).find(run.circuit) + 1, race_no, c.races.size()],
+		"standings_caption": "FINAL STANDINGS" if outcome.done else "STANDINGS AFTER RACE %d OF %d" % [race_no, c.races.size()]}
 	if outcome.done:
-		title = "CIRCUIT %s" % ("WON" if outcome.place == 1 else "OVER: %s" % Hud.ordinal(outcome.place))
-		extra = ("Prize $%d   " % outcome.prize if outcome.prize > 0 else "") + "Money $%d   " % Game.career_money + extra
-		actions = [["Main menu", func() -> void:
-			Game.circuit_run = {}
-			hud.quit()]]
-	else:
-		var c: Dictionary = Game.career_data().circuits[run.circuit]
-		actions = [["Race %d of %d" % [run.race + 1, c.races.size()], func() -> void:
-			Game.next_circuit_race()
-			get_tree().paused = false
-			get_tree().reload_current_scene()],
-			["Quit circuit", func() -> void:
-			Game.circuit_run = {}
-			hud.quit()]]
-	hud.show_results(title, rows, extra, actions)
+		if run.you_out:
+			title = "KNOCKED OUT"
+		elif outcome.place == 1:
+			title = "CIRCUIT WON"
+		else:
+			title = "%s OVERALL" % Hud.ordinal(outcome.place).to_upper()
+		var lines := []
+		if outcome.award >= 0:
+			lines.append("%s is yours" % Game.cars[outcome.award].name)
+		if outcome.prize > 0:
+			lines.append("$%s prize" % TournamentPanel.money(outcome.prize))
+		if outcome.tournament != "":
+			lines.append("%s won" % outcome.tournament)
+		if not outcome.opened.is_empty():
+			lines.append("Opens " + " & ".join(outcome.opened))
+		lines.append("Money $%s" % TournamentPanel.money(Game.career_money))
+		circuit.trophy = outcome.trophy
+		circuit.tour = run.tournament
+		circuit.lines = lines
+		var extra: String = outcome.message if outcome.award < 0 else ""
+		hud.show_results(title, rows, extra, [
+			["Tournaments", func() -> void:
+				Game.circuit_run = {}
+				Game.menu_screen = "tournaments"
+				hud.quit()],
+			["Main menu", func() -> void:
+				Game.circuit_run = {}
+				hud.quit()]], circuit)
+		return
+	hud.show_results(title, rows, _circuit_extra(outcome.message), _circuit_actions(c), circuit)
+
+
+## Between a circuit's races: what's happened, the car's damage and what mending it costs.
+func _circuit_extra(message := "") -> String:
+	var parts := PackedStringArray()
+	if message != "":
+		parts.append(message)
+	var cost := Game.repair_cost(Game.car_index)
+	if cost > 0:
+		parts.append("Car damage %d%%  ·  repair $%s" % [roundi(Game.garage_damage(Game.car_index) * 100.0), TournamentPanel.money(cost)])
+	parts.append("Money $%s" % TournamentPanel.money(Game.career_money))
+	return "   ·   ".join(parts)
+
+
+## Between a circuit's races: on to the next, mend the car (while it's damaged), or give up.
+func _circuit_actions(c: Dictionary) -> Array:
+	var run := Game.circuit_run
+	var actions := [["Race %d of %d" % [run.race + 1, c.races.size()], func() -> void:
+		Game.next_circuit_race()
+		get_tree().paused = false
+		get_tree().reload_current_scene()]]
+	var cost := Game.repair_cost(Game.car_index)
+	if cost > 0:
+		actions.append(["Repair  $%s" % TournamentPanel.money(cost), func() -> void:
+			var err := Game.repair_car(Game.car_index)
+			hud.set_result_extra(_circuit_extra(err))
+			if err == "":
+				hud.set_result_actions(_circuit_actions(c))])
+	actions.append(["Quit circuit", func() -> void:
+		Game.circuit_run = {}
+		hud.quit()])
+	return actions
 
 
 ## The leaderboard in its current order; also kept in Game.last_results.

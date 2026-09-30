@@ -68,11 +68,11 @@ static func legal_speeds(track_id: String, n: int) -> PackedFloat32Array:
 	return out
 
 
-## +1 where traffic keeps right, -1 where it keeps left.
-static func drive_side(track_id: String) -> int:
-	if Game.is_hs_track(track_id) and track_id.trim_prefix(Game.HS_PREFIX).to_lower() in DRIVE_LEFT:
-		return -1
-	return 1
+## +1 where traffic keeps right, -1 where it keeps left; `mirrored` (the track's mirrored
+## layout, whose lanes swap sides with the road) the other way.
+static func drive_side(track_id: String, mirrored := false) -> int:
+	var side := -1 if Game.is_hs_track(track_id) and track_id.trim_prefix(Game.HS_PREFIX).to_lower() in DRIVE_LEFT else 1
+	return -side if mirrored else side
 
 
 ## How fast traffic coming the other way may go (m/s) when the racer it's in play for does

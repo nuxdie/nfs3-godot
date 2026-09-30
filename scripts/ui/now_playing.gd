@@ -1,13 +1,17 @@
 class_name NowPlaying
 extends CanvasLayer
-## A song's title and artist, faded in low in the middle of the screen for a few seconds when it
-## starts, over menus and races alike (between the HUD's map and tach, above the key hints).
+## A song's title and artist, faded in for a few seconds when it starts, the same over menus,
+## loading and races: a note, the title and the artist in one line at the top right, on a
+## soft shade so it reads over anything. Whoever owns the top right moves it clear:
+## `right` (px in from the right edge) and `top` (its baseline).
 
-const HOLD_S := 4.0
+const HOLD_S := 4.5
 const SLIDE_S := 0.35
-const W := 300.0
-const H := 76.0
-const BOTTOM := 92.0     # its bottom edge, up from the screen's
+const RIGHT := 40.0
+const TOP := 40.0
+
+var right := RIGHT
+var top := TOP
 
 var _title := ""
 var _artist := ""
@@ -34,6 +38,13 @@ func show_title(title: String, artist := "", delay := 0.0) -> void:
 	_draw.queue_redraw()
 
 
+## Back to the corner, for a scene that doesn't move it.
+func reset_place() -> void:
+	right = RIGHT
+	top = TOP
+	_draw.queue_redraw()
+
+
 func _process(dt: float) -> void:
 	if _t < 0.0:
 		return
@@ -55,19 +66,21 @@ func _on_draw() -> void:
 		k = 1.0 - (_t - SLIDE_S - HOLD_S) / SLIDE_S
 	k = clampf(k, 0.0, 1.0)
 	k = 1.0 - pow(1.0 - k, 3.0)
-	var size := _draw.size
-	var tf := UiKit.font("display")
-	var af := UiKit.font("cond_med", 1)
-	var w := maxf(W, maxf(tf.get_string_size(_title, HORIZONTAL_ALIGNMENT_LEFT, -1, 26).x,
-			af.get_string_size(_artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x) + 56.0)
-	var r := Rect2((size.x - w) * 0.5, size.y - BOTTOM - H + (1.0 - k) * 16.0, w, H)
-	UiKit.draw_slant(_draw, Rect2(r.position + Vector2(5, 5), r.size), Color(0, 0, 0, 0.3 * k))
-	UiKit.draw_slant(_draw, r, Color(UiKit.PANEL, UiKit.PANEL.a * k))
-	UiKit.draw_slant(_draw, Rect2(r.position, Vector2(6, H)), Color(UiKit.ACCENT, k))
-	var x := r.position.x + 24.0
-	_draw.draw_string(UiKit.font("cond", 3), Vector2(x, r.position.y + 19), "NOW PLAYING",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(UiKit.ACCENT, k))
-	_draw.draw_string(tf, Vector2(x - 2, r.position.y + 45), _title, HORIZONTAL_ALIGNMENT_LEFT, -1, 26,
-			Color(UiKit.INK, k))
-	_draw.draw_string(af, Vector2(x - 5, r.position.y + 65), _artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 16,
-			Color(UiKit.INK_DIM, UiKit.INK_DIM.a * k))
+	var tf := UiKit.font("cond", 1)
+	var af := UiKit.font("body")
+	var title := _title.to_upper()
+	var artist := ("  ·  " + _artist) if _artist != "" else ""
+	var tw := tf.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+	var aw := af.get_string_size(artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+	var end := _draw.size.x - right + (1.0 - k) * 12.0
+	var x := end - tw - aw
+	var y := top
+	UiKit.shade(_draw, Rect2(x - 70, y - 34, tw + aw + 120, 56), 0.6 * k)
+	# A quaver.
+	var n := Vector2(x - 16, y - 1)
+	_draw.draw_circle(n, 3.5, Color(UiKit.ACCENT, k), true, -1.0, true)
+	_draw.draw_line(n + Vector2(3, 0), n + Vector2(3, -13), Color(UiKit.ACCENT, k), 1.5)
+	_draw.draw_line(n + Vector2(3, -13), n + Vector2(8, -9), Color(UiKit.ACCENT, k), 1.5)
+	_draw.draw_string(tf, Vector2(x, y), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(UiKit.INK, k))
+	_draw.draw_string(af, Vector2(x + tw, y), artist, HORIZONTAL_ALIGNMENT_LEFT, -1, 14,
+		Color(UiKit.INK_DIM, UiKit.INK_DIM.a * k))

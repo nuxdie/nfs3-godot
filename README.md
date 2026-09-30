@@ -1,8 +1,9 @@
 # NFS Revival (Godot 4)
 
-A *Need for Speed III: Hot Pursuit* and *Need for Speed: High Stakes*-style arcade racer
-for Godot 4.7. All game code is original GDScript; it loads **tracks and cars from your
-own NFS3 and/or High Stakes install at runtime** (nothing from the games is copied into
+A *Need for Speed III: Hot Pursuit*, *Need for Speed: High Stakes* and *Need for Speed:
+Porsche Unleashed*-style arcade racer for Godot 4.7. All game code is original GDScript; it
+loads **tracks and cars from your own NFS3, High Stakes and/or Porsche Unleashed install at
+runtime** (nothing from the games is copied into
 this project). With no game data present it falls back to a procedural circuit and
 stand-in cars, so the project always runs.
 
@@ -121,21 +122,132 @@ damaged copy's normals coming with it.
 multiplying acceleration, braking, handling and top speed as the PlayStation version's
 `ZTUNING.BIN` has them (the PC version keeps them in the program); rivals stock, as upgraded
 as you or fully (Settings). **Layouts**: reverse (the lap run the other way round), mirrored
-(every position flipped and each quad's corners swapped, which keeps lettering readable
-without its `<mirrored>` texture copies) and both.
+(the track, its textures, sun and horizon flipped, as High Stakes draws it, with its
+`<mirrored>` copies of the lettered textures in their place so the signs read right; the NFS3
+tracks borrow them from High Stakes' remakes, matched by image or name, where it's installed;
+traffic keeps to the other side) and both.
 
 **Tournaments**: the 11 of `tierdef.cdb` (European Tour, High Stakes Tour, ... Tournament of
 Champions) and their 32 circuits in `circdef.cdb`: races on given tracks, reversed, mirrored,
 at night or in the wet; a field and laps; an entry fee and prize money per place; knockouts
 (the last car out each race) and one-off races for a car. Points per race 10-8-6-5-4-3-2-1,
-the prize by the final standing; winning every circuit of a tournament opens the ones it
-unlocks. Money is kept in `user://career.cfg`; cars and upgrades stay free. The circuits'
-race flags are read as reverse, mirror, night, weather, which order isn't certain.
+the prize by the final standing; after the first race (from the back) the grid lines up
+by the standings. A podium wins the circuit's gold, silver or bronze trophy; winning every
+circuit of a tournament wins its trophy and opens the ones it unlocks. The trophies are High
+Stakes' own, one design per tournament (`FeArt/<n>go.qfs`, `si`, `br`: 16 frames turning,
+spun on the results). The Pro Cups give
+their bonus car to the winner (their first "prize" of 1, 2 or 9 is an award-car number;
+La Niña's 9 is a guess). Career in `user://career.cfg`: you start with $25,000 and no car;
+the garage's dealer sells High Stakes' cars at its own prices, and the three upgrade levels
+at theirs (both from `fedata.eng`, from 0x39E); damage stays with the car between races
+until repaired (15% of its price for a wreck); a car sells for 60% of what went into it.
+The circuits' race flags are read as reverse, mirror, night, weather, which order isn't
+certain.
 
 Not used: the pursuit cars' alternative interiors (`:OND`, `:OLD`); `dash.fsh` (the dash skin
 again, 8-bit); `GameArt/cop1-4` (skins without a mesh); `heights.sim` (one constant per track);
 the second paint and driver hair colour tables (the skins carry no mask for them); the other
 languages' texts; movies.
+
+### Need for Speed: Porsche Unleashed tracks and cars
+
+With a Porsche Unleashed install present its 15 tracks join the list after High Stakes':
+the nine point-to-point runs (Normandie, Schwarzwald, Corsica, Côte d'Azur, Pyrénées, Alps,
+Auvergne, Autobahn, Zone Industrielle) and the five Monte Carlo circuits and the skid pad,
+which are laps. Its 80 cars (every version of each model: the '50 356 1100 Coupé to the
+'00 911 Turbo, the 550 Spyder, 935, 959, GT1, GT2 and GT3) join the car list after the others'.
+The first `GameData` folder that contains `Track` and `Carmodel` wins:
+
+1. `NFS5_DATA` environment variable
+2. `../OpenNFS/resources/NFS_5/GameData`
+3. `../need-for-speed-porsche-unleashed/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Porsche Unleashed/GameData`
+4. The same under `~/Games`
+
+| File | Used for |
+|---|---|
+| `Track/<name>.crp` | The whole track (`crp.gd`: EA's CRP container, RefPack-compressed): its articles of triangles, with UVs and a baked colour per corner, at full detail; the virtual road |
+| `Track/<name>.crp` → `SimD`, `SimT` | The virtual road: per slice (80 bytes) position, up, forward and right, the road's left and right edge, and each side's lanes and their width; the road network's segments. A lap is the segments joined end to start across their junctions |
+| `Track/<name>.fsh` | Its textures, which the materials name (4 letters each) |
+| `Track/<name>_fstart.scn`, `_bstart.scn` | Point-to-point runs: the start (trigger type 2) and finish (type 1) lines, forward and backward (the reverse layout) |
+| `Carmodel/<model>.crp` | The car: bodywork, glass, interior, wheels (their hubs from each part's `tr` matrix), lamps from its glare effects; the textures inside it (`sf`) |
+| `Carmodel/<model>.tpg` | Which texture file goes on which page, and each version's "style": the variant of each part it shows (the Carrera's and the Turbo's bumpers, the Targa's roof) |
+| `Carmodel/<model>.clr`, `cabrio.fsh`, `head.fsh`, `intglass.fsh`, `shadow.fsh`, `suit.fsh` | Paints; the shared texture pages |
+| `Simulation/Cardata/<car>.sim` | The driving model, as carp.txt fields: mass, wheelbase, gears and ratios, final drive, torque every 500 rpm, redline, top speed, tyre size, grip, braking, the 959's front drive share (the car table names one with its letters out of order, `993coupeS436` for `993coupe4s36`: the file with the same letters) |
+| `FeData/Data/nfs5.car` | The car list: each car's name, model, style, driving model, showroom text and price |
+| `FeData/Locale/<car>.loc` | The showroom's figures (engine, power, 0-60, weight, layout, tyres...): the weight split from where the engine sits, each axle's tyres |
+| `FeData/Trackart/<name>sp.fsh` | The track's photo in the menus |
+| `Sounds/<set>.viv` → `<set>.bnk`, `.ect`, `.elt` | Engine sound: the car table names each car's set; its tables are High Stakes' (AudioEng, "CRDl"), off and on the throttle, so they play as its `careng.ctb`/`.ltb` |
+| `Track/Sky/<name>.fsh` | The horizon panorama (`horz`: two halves one above the other) and the sky's colours from its tiles (`st1a`, `sc1a`): sunset over Côte d'Azur and Auvergne, haze over Zone Industrielle, dusk in Monte Carlo |
+| `Track/<name>_cameras.scn` | Trackside cameras for the TV view (C) |
+| `Track/<name>.crp` → `CmAn` | Its camera animations (`camera00`..`04`: 52-byte keys, the camera's position about the car), the fly-by round the grid before the countdown |
+| `nfs5.car`: "Cop ..." and "Eden"/"EAS" records | Police (the 356, 930 and 993 cruisers, German ones too, with their light bars from the `GlareSiren` effects) and traffic on its tracks, the snowplough only in the Alps. Traffic has no driving model: an ordinary saloon's, weighted by its size, in period paints |
+
+Porsche Unleashed is in metres, as the cars are. An article's base flags say what it is:
+`0x10` ground the car can be on, with `0x10000` the road itself (its polys are wetted
+in the rain and tagged asphalt); what isn't ground is scenery, solid where its texture is
+opaque, passable where it's a cut-out. Articles are named for the slice their chunk of
+eight starts at (`CNK0016L`, `RD1136C`), which is how they're drawn in chunks; those
+reaching far from it (the mountains) are drawn from any distance. Its baked colours are
+lit at twice their value. The walls stand on the road's edges from `SimD`, and an open
+road is walled off across both ends.
+
+A point-to-point run is raced once, from its start line to its finish (the options have
+no laps for it): the grid lines up behind the start, and the road runs on 45 slices past
+each line. Reverse races it from the other end, from `_bstart.scn`'s start.
+
+Crashes dent the cars toward their damaged copies (each part's `vt` at its level + 0x8000:
+how far each vertex moves), a region of the car at a time (front, middle, rear; left, right;
+low, high), and the paint crumples with them: `Carmodel/<model>d.fsh`'s creases (and
+broken lamp glass), drawn over the exterior page and its mirror, show as far as each panel
+is bent. The sea's layers (`wtr`, alpha 95 at most) are blended over nothing here, so
+they're made opaque.
+
+Its car textures are small images that the game packs into texture pages, at the
+positions their FSH headers give; here the pages go into one atlas, the car's skin. The
+skins paint by alpha: 204 the body colour and 77-230 its stripes and trim colours, 255
+unpainted, 0 cut out; they're converted to the car shader's convention (all the body
+colour), and the paints are each `.clr` section's first colour, by its hue, saturation and
+value (the RGB beside them is often stale or zero). Which images a version
+shows comes from the `.tpg`: a `[fileN.name]` section ties an image to the style's variant
+of a geometry slot (`geometryK`/`typeK`: the roof's `top2` on a cabriolet) or a texture slot
+(`textureK`: badge `det3`, "Carrera S", of which the Carrera's shorter badge shows only
+"Carrera"; wheels `whg1`..), and marks the showroom's (`frontend=1`), the test drive's
+(`testdrive=1`) and the lit dials (`night=1`), left out. The window page's pane (alpha 128)
+is glass; its seal (255) and the painted rim (204) round it are bodywork. Shading uses the
+model's own normals (`nm`).
+
+Each part's base info byte 6 is a signed depth bias: the decals, badges and lamp lenses
+-3 and the door handles -10 lie on the panels under them, the interior +3 behind them (its
+headlining touches the roof). The car shader slides such vertices along the line to the
+eye by a share of their distance, so they win (or lose) the depth test without moving on
+screen. Level 0x12's `SpoilerW` is a copy of the lowered spoiler and isn't drawn.
+
+The drivers sit in at rest (their arms' steering frames are other indices), in the suit
+and face the car's style picks; the steering wheel (level 0x49) and the hands on it (slot 56)
+turn with the steering, about the column through the wheel's middle. Cabriolets (level
+0x1E; the insides of the lids there stay hidden) have a soft top (slot 37) and slot 41's
+pairs of variants, the hood's frame and rear window (odd) and the hood folded (even); the
+styles mix them, so up (the setting's "Top up") is the top and the odd one, down (the
+default) the folded one alone. The Targas' glass roof is slot 8. The 914's and 944's pop-up lamps (the `HeadLight`
+part) rise by the `.tpg`'s `headlightextent` with the lights on; the 928's (negative) are
+modelled up and fold back flat about their hinge while off. The Carreras' rear spoiler (slot
+42: the style's odd variant lowered, the next one raised) rises above 80 km/h and drops
+below 15 km/h. The inner panes of the windows use the interior's material
+on the page the `.tpg` marks `window`, so they're glass and left out from inside.
+
+Porsche Unleashed has no night or weather versions of its tracks: at night its sky goes dark
+and the ambient light down over the day's baked colours, as on the NFS3 tracks without one.
+Its `_forward.key`/`_backward.key` files aren't the AI's: steps of (slice, 171..600) that
+drop in the tunnels, most likely how far ahead the game draws.
+
+Not used yet: the arms' steering frames, the sky's dome and cloud layers
+(`Track/Sky/*.bin`, `.txt`), the `.key` files, the damage zones (`dz`, `[damagezones]`),
+`<model>l.fsh` (like `d.fsh`, black: most likely a lighter damage), the 996's and
+Boxster's sliding spoiler (`MoveSpoiler`, `movespoilerextent`), the lit dials at night,
+the knock-over objects (base flag `0x8000`: a library at the origin, placed only by the
+Factory Driver's missions, `_st*.scn`), the second and third paint colours (stripes:
+`stripepackage`, `packages.ini`'s bands), the `[colorsN]` sections of some `.tpg`s, and the
+928, which has no `.clr` (stock paints).
 
 ## Modes
 
@@ -184,44 +296,66 @@ languages' texts; movies.
 
 ### Menu
 
-The home screen lists what there is to do: **Quick start** (the last setup, straight into
-the race), the five modes, **Tournaments** (with High Stakes), Settings and Quit. A mode
-then takes three steps, each with the screen to itself:
+A bar along the top holds the menu's three places, each a click (or Q / E, LB / RB) away:
 
-1. **Track**: every track as a postcard, searchable, by game;
-2. **Car**: every car on the turntable with its ratings, searchable, by class and game, sortable;
-3. **Options**: your car's paint and upgrades; the track's layout, time and weather; the
-   laps, rivals and traffic (only those the mode has), with a line on what each does.
+- **Race**: the race as it's set up, ready to go with Enter. The mode at the top; the
+  **track** with its layout, time and weather; the **race** rules (laps, rivals, how the
+  rivals' cars are tuned and which class they come from, traffic: only those the mode has);
+  and, under the car on its turntable, the **car** with its ratings, paint and upgrades.
+  The track and car cards open a picker (click, Enter, or T / C): every track as a
+  postcard, every car with its ratings, searchable and filtered by game or class. Enter or
+  a click picks and comes back; Esc comes back with the old pick. A line under the setup
+  says what the setting in focus does.
+- **The showroom**: the car stands on a dark gloss floor that fades into the track's picture,
+  mirrored in it, while a camera director goes through a few shots (a low front
+  three-quarter, down at the grille, a long-lens profile, the rear, a high one), each framed
+  to the car's own size. Drag to turn it round and up or down; the director carries on a
+  few seconds after.
+- **Choosing a car**: a table to compare them by (class, power, top speed, 0-100, weight);
+  a click on a column's heading sorts by it, again the other way. Filters by class, game and
+  drive; type to search by name, make, class or drive. The car on show can be repainted
+  and trimmed there (←→ paint, Shift+←→ trim, or click), as on the race page.
+- **Cars** are shown the same way in the car picker and the garage: the make over the model,
+  the headline figures (power, and the top speed, 0-100 and weight the game's own physics
+  give it, with the original's claims beside them), the car on its turntable, the maker's
+  history as a line of dated models, and the whole spec sheet from its files (engine with
+  its torque curve, chassis, and how it drives against the others).
+- **Point-to-point** runs (Porsche Unleashed's) are drawn open, start bar to chequered flag,
+  in the menus, on the loading screen and on the race's map; in the race the lap counter
+  gives way to the distance left to the finish.
+- **Career** (with High Stakes): the **tournaments** (money and trophies at the top right;
+  each circuit's laps, rivals, entry fee, prize and your best, and its races as postcards)
+  and the **garage**. Choosing a circuit goes on to the car for it: yours that it takes, or
+  the dealer's to buy.
+- **Settings**: Gameplay, Graphics, Audio, HUD, Controls (every key) and Game data, as
+  pages (Tab / Shift+Tab).
 
-The step bar along the top shows what's picked in each step and goes back to any of them
-(the mode name back to the home screen). A tournament takes two: the circuit, then the car.
-
-Everything is clickable; the keyboard and pad do the same:
+Everything is clickable, with its key beside it; the keyboard and pad do the same:
 
 | Action | Keyboard | Gamepad |
 |---|---|---|
 | Move / change | ↑↓ / ←→ (or the mouse wheel over an option) | D-pad |
-| Next step / start | Enter | A |
-| Back a step | Esc (right click in a list) | B |
-| Settings | Tab (a click in the track and car lists) | Y |
-| Quit | Esc twice on the home screen | B twice |
+| Open / pick / start | Enter | A |
+| Back | Esc (or right click) | B |
+| Switch tab | Q / E | LB / RB |
+| Quit | Esc on Race (or Quit at the top right), then Enter | B, then A |
 
-In the track and car lists, type to search; Tab (LB / RB) steps the class or game
-filter; ←→ changes the car sort (class, name, or any of the four ratings). The arrows
-pick as they move; pointing at an item only previews it, and a click picks it and goes on.
-In the tournaments, ↑↓ go through the circuits and ←→ through the tournaments.
+In the pickers, type to search; Tab (LB / RB) steps the class or game filter. In the car
+picker ←→ change the paint, Shift+←→ the trim, and a click on a column's heading sorts by it. In the tournaments, ↑↓ go through
+the circuits and ←→ through the tournaments; G opens the garage, N starts a new
+career. In the garage, Enter buys (or races the car in the circuit being entered), U
+upgrades, R repairs, S sells (pad: A, X, LB, RB); each has a button too. Quitting, a new career and selling ask first.
 
 Starting a race fades to its loading screen: the track's picture, what's being raced (the
 mode, or the tournament and which race of the circuit), the race's facts, the map, your car,
 a tip, and a bar through the loading's stages. The track is read and built on a worker
 thread, so the screen keeps moving while it loads.
 
-Settings has two pages (Q / E): **General** (graphics, sound, gameplay, the controls) and
-**HUD**: the dials (this game's, or High Stakes' either side of the mirror as it had them or
-at the bottom centre), and each part of the race HUD on or off (speed, standings,
-police, lap, map, mirror, messages, countdown, light bar, key hints), with a sketch of the
-screen showing where each one is. The pause menu has Settings too, on the HUD page, with
-the race behind it changing as you go.
+The HUD page sets the dials (this game's, or High Stakes' either side of the mirror as it
+had them or at the bottom centre) and each part of the race HUD on or off (speed,
+standings, police, lap, map, mirror, messages, countdown, light bar, key hints), with a
+sketch of the screen showing where each one is. The pause menu has Settings too, opening on
+the HUD page, with the race behind it changing as you go.
 
 ## Graphics quality
 
@@ -250,8 +384,10 @@ scripts/io/        file formats: qfs.gd (RefPack), fsh.gd, viv.gd, nfs3_track.gd
                    tracks, read into nfs3_track.gd's data), fce4.gd (High Stakes' dashboard, officer and
                    helicopter models), ea_bnk.gd (EA sound banks: PCM and EA-XA ADPCM),
                    ea_music.gd (streamed .asf / .mus music), ea_microtalk.gd (EA's speech codec),
-                   data_path.gd (case-insensitive lookups)
+                   data_path.gd (case-insensitive lookups), crp.gd (Porsche Unleashed's CRP models),
+                   nfs5_track.gd / nfs5_car.gd (its tracks and cars, read into the same data)
 scripts/track/     nfs3_track_builder.gd (meshes, Texture2DArray, collision, walls),
+                   nfs5_track_builder.gd (Porsche Unleashed's tracks, under the same shaders),
                    procedural_track.gd (the no-data circuit's layout: lap, heights, tunnel, bridges,
                    and the roads off it: town streets, farm lanes, forest roads, the campground's
                    road, a lookout, gravel shortcuts across two big bends),
@@ -277,9 +413,9 @@ scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_str
                    rain_cover.gd (top-down height map: no rain under bridges or in tunnels),
                    dynamic_resolution.gd (3D resolution that gives way when the GPU misses frames),
                    reflections.gd (wet road sheen, lamp streaks and High-quality mirror; the
-                   reflection probe on the player's car)
-scripts/ui/        main_menu.gd (the front end: home screen, setup steps, showroom), menu_list.gd (home
-                   screen list), step_bar.gd, hint_bar.gd, big_button.gd, tournament_panel.gd, loading_screen.gd,
+                   reflection probe on the player's car on High)
+scripts/ui/        main_menu.gd (the front end: top bar, race setup, pickers, career, showroom),
+                   pick_card.gd, car_sheet.gd, showroom.gd (the car's stage and camera), option_row.gd, tab_strip.gd, hint_bar.gd, big_button.gd, tournament_panel.gd, garage_panel.gd, loading_screen.gd,
                    track_browser.gd / car_browser.gd (on browser_base.gd:
                    search, filters, scrolling grid or list), settings_panel.gd, track_postcards.gd (renders each track by day and
                    night in the background for the menu backdrop, cached in user://postcards), hud.gd (tach, map, mirror, pause, results),
@@ -296,6 +432,7 @@ shaders/           track.gdshader (unshaded, vertex-lit like the original; wet r
                    (rain/snow wrapped around the camera on the GPU), proc_road.gdshader and
                    proc_ground.gdshader (the procedural track's asphalt and land)
 tools/autotest.gd  scripted run for testing: godot --path . -- --autotest <trk000|procedural|menu> [mode] [car] [--duration=S]
+                   (car: an index into the car list or a car id, e.g. pu_993coupe36)
                    (add --settings with menu to photograph the settings panel)
                    (--night / --weather set the conditions, --tag=NAME prefixes the screenshots)
                    (--classic drops the body sway and progressive grip, --no-traffic empties the road)
@@ -330,7 +467,8 @@ tools/track_shots.gd photograph a track's road at points round the lap (fraction
 tools/postcards.gd re-render the menu's track pictures and copy them to shots/:
                    godot --path . -- --postcards [track ...]
 tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, front and rear, saved to shots/:
-                   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|heli] [id ...] [--track=trk000 [--night]]
+                   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|heli|pu] [id ...] [--track=trk000 [--night]]
+                   (pu: Porsche Unleashed's cars, by car id: pu_993coupe36)
                    (--big / --low / --yaw=DEG / --wire for close inspection; --dent crashes each car
                    first, --officer stands a High Stakes cruiser's officer beside it)
 tools/car_calib.gd flat-out drag test of every car against the original game's acceleration table:
@@ -345,7 +483,7 @@ tools/car_handling.gd  skidpad (lateral g, and against what the AI expects), lan
 - The radio's place names ("near the old mill": which stretch of each track they mean isn't
   known), High Stakes' speech, the car banks' one-shot patch 2, NFS3's music reacting to the
   race (its `.map`s are only used for the menu tunes, at random).
-- Mirrored/reverse tracks, split-screen.
+- Split-screen.
 - The Knockout/tournament structure and car unlocks.
 - The car body collides as a box; FCE dummies (light positions) are unused.
 - Scenery collision is guessed from the textures (the track files carry no collision flag):

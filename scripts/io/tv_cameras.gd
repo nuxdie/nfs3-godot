@@ -1,5 +1,5 @@
 class_name TvCameras
-## Trackside "TV" cameras. High Stakes' Tracks/<name>/tr.cam: a count, then 68-byte records
+## Trackside "TV" cameras (Porsche Unleashed's too, see load_dir). High Stakes' Tracks/<name>/tr.cam: a count, then 68-byte records
 ## (a type, the position, an orientation matrix, a zoom, and the virtual road nodes it
 ## covers: first, middle, last). NFS3's trNN.ccm: a version and a count, then 28-byte records
 ## (16.16 fixed-point position, orientation quaternion, and two flags), with no road
@@ -10,7 +10,17 @@ var cams: Array[Dictionary] = []   # {pos: Vector3, from: int, to: int} (from = 
 
 static func load_dir(dir: String, high_stakes: bool) -> TvCameras:
 	var t := TvCameras.new()
-	if high_stakes:
+	if Nfs5Track.is_track_file(dir):
+		# Porsche Unleashed: Track/<name>_cameras.scn, text: each CAMERA_ELEMENT's next line is
+		# its position (the trigger zones after it aren't used: as NFS3's, by distance).
+		var f := DataPath.find_ci(dir.get_base_dir(), dir.get_file().get_basename() + "_cameras.scn")
+		var lines := FileAccess.get_file_as_string(f).split("\n") if f != "" else PackedStringArray()
+		for i in lines.size() - 1:
+			if lines[i].begins_with("CAMERA_ELEMENT"):
+				var v := lines[i + 1].split_floats(" ", false)
+				if v.size() >= 3:
+					t.cams.append({"pos": Vector3(-v[0], v[1], v[2]), "from": -1, "to": -1})
+	elif high_stakes:
 		var d := FileAccess.get_file_as_bytes(DataPath.find_ci(dir, "tr.cam"))
 		if d.size() >= 4:
 			for i in mini(d.decode_u32(0), (d.size() - 4) / 68):

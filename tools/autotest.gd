@@ -62,7 +62,7 @@ func _ready() -> void:
 	if pos.size() > 1:
 		Game.mode = int(pos[1])
 	if pos.size() > 2:
-		Game.car_index = int(pos[2])
+		Game.car_index = int(pos[2]) if pos[2].is_valid_int() else maxi(Game.cars.find_custom(func(c: Dictionary) -> bool: return c.id == pos[2]), 0)
 	Game.night = "--night" in args
 	for arg in args:
 		if arg.begins_with("--duration="):
@@ -157,14 +157,14 @@ func _ready() -> void:
 			get_tree().current_scene.open_settings.call_deferred()
 		# --hud-settings: the settings' HUD page.
 		if "--hud-settings" in args:
-			get_tree().current_scene.open_settings.call_deferred(1)
+			get_tree().current_scene.open_settings.call_deferred(SettingsPanel.PAGE_HUD)
 		# --tournaments: High Stakes' tournaments panel open.
 		if "--tournaments" in args:
 			get_tree().current_scene._open_tournaments.call_deferred()
 		# --cars: the car browser open (on the car given as the third argument).
 		if "--cars" in args:
 			get_tree().current_scene._open_cars.call_deferred()
-		# --screen=home|track|car|options|tournaments: that screen of the front end.
+		# --screen=home|track|car|options|tournaments|garage: that screen of the front end.
 		for arg in args:
 			if arg.begins_with("--screen="):
 				get_tree().current_scene.show_screen.call_deferred(arg.trim_prefix("--screen="))
@@ -180,6 +180,7 @@ func _ready() -> void:
 			Game.career_path = "user://career_autotest.cfg"
 			var career := Game.career_data()
 			Game.career_money = 10000000
+			Game.career_garage[Game.cars[Game.car_index].id] = {"upgrade": 0, "damage": 0.0}
 			var cid := int(arg.trim_prefix("--circuit="))
 			for tt in career.tournaments:
 				if cid in tt.circuits:
@@ -380,7 +381,10 @@ func _physics_process(dt: float) -> void:
 		# How far each racer got (m along the lap, laps included), and how often it was reset.
 		var dist := []
 		for rr: Dictionary in race.racers:
-			dist.append("%s %.0f m" % [rr.name.left(10), rr.lap * race.path.length + float(rr.get("progress", 0.0))])
+			# A point-to-point run's is from the start line.
+			var got: float = float(rr.get("progress", 0.0)) - race.path.cumulative[race.path.start_node] if not race.path.closed \
+				else rr.lap * race.path.length + float(rr.get("progress", 0.0))
+			dist.append("%s %.0f m" % [rr.name.left(10), got])
 		print("distance ", " | ".join(dist))
 		get_tree().quit()
 

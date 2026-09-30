@@ -1,6 +1,7 @@
 class_name TrackPath
-## Closed-loop centre line of a track ("virtual road"): used for AI steering,
-## race progress, respawning and invisible side walls.
+## Centre line of a track ("virtual road"): used for AI steering, race progress,
+## respawning and invisible side walls. A closed loop, or (Porsche Unleashed's point-to-point
+## runs) an open road whose start and finish lines are nodes along it (see set_open()).
 
 var points := PackedVector3Array()
 var rights := PackedVector3Array()   # unit vector pointing to the driver's right
@@ -22,6 +23,12 @@ var lane_width_right := PackedFloat32Array()
 ## The speed limit at each node (m/s), where the original game has one for the track.
 var legal_speed := PackedFloat32Array()
 var length := 0.0
+## False for an open road: node indices stop at its ends instead of wrapping round.
+var closed := true
+## An open road's start and finish nodes, and the other way round's ([start, finish] each).
+var start_node := 0
+var finish_node := 0
+var _other_way := Vector2i(-1, -1)
 ## How far past a wall a car off the drivable surface may get before the race resets it
 ## (the procedural track has no walls, so its cars can roam out onto the land).
 var lost_margin := 5.0
@@ -42,11 +49,18 @@ func size() -> int:
 ## tables swap too, each way's to the other.
 func reverse() -> void:
 	var n := points.size()
+	# An open road runs from its far end; its lines swap for the other way's.
+	var from := n - 1 if not closed else n
 	var order := func(a: Variant) -> Variant:
 		var out: Variant = a.duplicate()
 		for i in n:
-			out[i] = a[(n - i) % n]
+			out[i] = a[(from - i) % n]
 		return out
+	if not closed:
+		var fwd := Vector2i(start_node, finish_node)
+		start_node = n - 1 - _other_way.x
+		finish_node = n - 1 - _other_way.y
+		_other_way = Vector2i(n - 1 - fwd.x, n - 1 - fwd.y)
 	points = order.call(points)
 	ups = order.call(ups)
 	var r: PackedVector3Array = order.call(rights)
@@ -76,14 +90,26 @@ func reverse() -> void:
 	finalize()
 
 
+## Makes this an open road with these nodes as [start, finish, the other way's start, its
+## finish] (Nfs5Track.sprint).
+func set_open(lines: PackedInt32Array) -> void:
+	closed = false
+	start_node = lines[0]
+	finish_node = lines[1]
+	_other_way = Vector2i(lines[2], lines[3])
+	finalize()
+
+
 func finalize() -> void:
 	var n := points.size()
 	cumulative.resize(n)
 	var d := 0.0
 	for i in n:
 		cumulative[i] = d
-		d += points[i].distance_to(points[(i + 1) % n])
-	length = d
+		if closed or i < n - 1:
+			d += points[i].distance_to(points[(i + 1) % n])
+	# An open road's length is to its far end; fposmod over it leaves its distances be.
+	length = d if closed else d + 1.0
 	# Bend radius from the change of heading across a few nodes either side (on the ground
 	# plane, so crests and dips don't count as bends).
 	radius.resize(n)
@@ -97,6 +123,8 @@ func finalize() -> void:
 
 func idx(i: int) -> int:
 	var n := points.size()
+	if not closed:
+		return clampi(i, 0, n - 1)
 	return ((i % n) + n) % n
 
 
@@ -104,6 +132,8 @@ func idx(i: int) -> int:
 func ahead(n: int, dir: int, metres: float) -> int:
 	var m := n
 	for k in points.size():
+		if not closed and m == idx(m + dir):
+			break
 		m = idx(m + dir)
 		if fposmod((cumulative[m] - cumulative[n]) * dir, length) >= metres:
 			break
@@ -133,7 +163,12 @@ func lane_offset(n: int, side: int, k: int) -> float:
 
 
 func forward(i: int) -> Vector3:
-	return (points[idx(i + 1)] - points[idx(i)]).normalized()
+	i = idx(i)
+	var j := idx(i + 1)
+	# An open road's last node looks on from the one before it.
+	if j == i:
+		return (points[i] - points[idx(i - 1)]).normalized()
+	return (points[j] - points[i]).normalized()
 
 
 ## Closest node to `pos`. Pass the previous result as `hint` for a cheap local search.

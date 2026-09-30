@@ -1,10 +1,10 @@
 class_name BrowserBase
 extends Control
-## The shared frame of the car and track browsers: a panel with a title, type-to-search,
-## filter chips and a scrolling list or grid. It is one step of the race setup: moving
-## through it with the arrows (or pad) picks the item there, pointing at one only previews
-## it, and Enter or a click picks it and goes on. Esc (or a right click) goes back.
-## Subclasses fill in the entries, lay them out and draw them.
+## The shared frame of the car and track pickers: a panel with a title, type-to-search,
+## filter chips and a scrolling list or grid. Moving through it with the arrows (or pad)
+## focuses the item there and the screen previews it; pointing at one previews it too. Enter
+## or a click picks it; Esc (or a right click) goes back without changing the pick (the menu
+## puts the old one back). Subclasses fill in the entries, lay them out and draw them.
 
 signal focus_changed(item: int)   # moved to with the keys or pad: picked
 signal previewed(item: int)       # pointed at, or the pointer left and it's back on `current`
@@ -22,7 +22,8 @@ var head_h := 156.0
 ## {item: int (-1 for a section header), text: String, rect: Rect2 in list space}
 var entries: Array[Dictionary] = []
 var focus := -1               # index into entries
-var current := -1             # the item picked, tagged in the list
+var current := -1             # the item in focus (as picked for now)
+var picked := -1              # the item in use when it opened, tagged in the list
 var total := 0                # items before filtering, for the count
 
 var _list: Control
@@ -66,8 +67,8 @@ func _draw_entry(_ci: CanvasItem, _e: Dictionary, _r: Rect2, _focused: bool, _ho
 	pass
 
 
-## ←→ in a list: subclasses use it for a second control (the car sort).
-func _side_step(_dir: int) -> void:
+## ←→ in a list (with Shift, Ctrl): subclasses use it for other controls (the car's paint).
+func _side_step(_dir: int, _shift := false, _ctrl := false) -> void:
 	pass
 
 
@@ -86,9 +87,13 @@ func _layout_head() -> void:
 func open(item: int) -> void:
 	query = ""
 	current = item
+	picked = item
 	visible = true
 	_layout()
 	_rebuild(item)
+	# Open with the one in use in the middle of the list, not pinned to an edge.
+	if focus >= 0:
+		_scroll_to = clampf(entries[focus].rect.get_center().y - _list.size.y * 0.5, 0.0, _max_scroll())
 	_scroll = _scroll_to
 	modulate.a = 0.0
 	var x := position.x
@@ -143,7 +148,7 @@ func _rebuild(keep := -2) -> void:
 
 
 func _layout() -> void:
-	filters.position = Vector2(PAD, 116)
+	filters.position = Vector2(-8, 100)
 	_layout_head()
 	_list.position = Vector2(0, head_h)
 	_list.size = Vector2(size.x, maxf(size.y - head_h, 40))
@@ -244,8 +249,8 @@ func _unhandled_input(e: InputEvent) -> void:
 				var d := -1 if e.physical_keycode == KEY_LEFT else 1
 				if grid:
 					_set_focus(_next_item(focus, d))
-				elif not e.echo:
-					_side_step(d)
+				else:
+					_side_step(d, e.shift_pressed, e.ctrl_pressed)
 			KEY_PAGEUP, KEY_PAGEDOWN:
 				_page(-1 if e.physical_keycode == KEY_PAGEUP else 1)
 			KEY_HOME:
@@ -411,34 +416,31 @@ func _process(dt: float) -> void:
 
 func _draw() -> void:
 	var w := size.x
-	draw_rect(Rect2(Vector2.ZERO, size), Color(0.04, 0.045, 0.06, 0.93))
-	draw_rect(Rect2(0, 0, w, 3), UiKit.ACCENT)
 	var tf := UiKit.font("display")
-	draw_string(tf, Vector2(PAD, 50), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34, UiKit.INK)
-	var tw := tf.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
+	draw_string(tf, Vector2(-2, 34), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, UiKit.INK)
+	var tw := tf.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 32).x
 	var shown := entries.filter(func(en: Dictionary) -> bool: return en.item >= 0).size()
-	var count := "%d" % total if shown == total else "%d OF %d" % [shown, total]
-	draw_string(UiKit.font("cond", 2), Vector2(PAD + tw + 12, 49), count, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, UiKit.INK_DIM)
-	# Search box: typing anywhere goes into it.
-	var sr := Rect2(PAD, 66, w - PAD * 2, 38)
-	draw_rect(sr, Color(1, 1, 1, 0.06))
-	draw_rect(sr, Color(UiKit.ACCENT, 0.7) if query != "" else Color(1, 1, 1, 0.14), false, 1.0)
-	var gc := sr.position + Vector2(20, 18)
+	var count := "%d" % total if shown == total else "%d of %d" % [shown, total]
+	draw_string(UiKit.font("cond", 1, true), Vector2(tw + 10, 33), count, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UiKit.ACCENT)
+	# Search: typing anywhere goes into it. A line, lit while there's a query.
+	var sr := Rect2(0, 52, w, 36)
+	draw_rect(Rect2(sr.position.x, sr.end.y - 1, sr.size.x, 1), UiKit.ACCENT if query != "" else Color(1, 1, 1, 0.25))
+	var gc := sr.position + Vector2(8, 16)
 	draw_arc(gc, 6.0, 0, TAU, 20, UiKit.INK_DIM, 2.0, true)
 	draw_line(gc + Vector2(4.5, 4.5), gc + Vector2(9, 9), UiKit.INK_DIM, 2.0, true)
 	var bf := UiKit.font("body")
-	var tx := sr.position.x + 40
+	var tx := sr.position.x + 28
 	if query == "":
-		draw_string(bf, Vector2(tx, sr.position.y + 25), "Type to search %s" % noun, HORIZONTAL_ALIGNMENT_LEFT, -1, 16,
+		draw_string(bf, Vector2(tx, sr.position.y + 23), "Type to search %s" % noun, HORIZONTAL_ALIGNMENT_LEFT, -1, 16,
 			UiKit.INK_FAINT)
 	else:
-		draw_string(bf, Vector2(tx, sr.position.y + 25), query, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UiKit.INK)
+		draw_string(bf, Vector2(tx, sr.position.y + 23), query, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, UiKit.INK)
 		tx += bf.get_string_size(query, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x + 2
-		UiKit.draw_key(self, Vector2(sr.end.x - 104, sr.get_center().y), "ESC", 11, UiKit.INK_DIM)
-		draw_string(UiKit.font("cond", 2), Vector2(sr.end.x - 64, sr.get_center().y + 5), "CLEAR", HORIZONTAL_ALIGNMENT_LEFT,
+		UiKit.draw_key(self, Vector2(sr.end.x - 96, sr.get_center().y), "ESC", 11, UiKit.INK_DIM)
+		draw_string(UiKit.font("cond", 1), Vector2(sr.end.x - 56, sr.get_center().y + 5), "CLEAR", HORIZONTAL_ALIGNMENT_LEFT,
 			-1, 13, UiKit.INK_DIM)
 	if fmod(_time, 1.0) < 0.5:
-		draw_rect(Rect2(tx, sr.position.y + 10, 2, 19), UiKit.ACCENT)
+		draw_rect(Rect2(tx, sr.position.y + 8, 2, 19), UiKit.ACCENT)
 
 
 func _draw_list() -> void:
@@ -451,32 +453,28 @@ func _draw_list() -> void:
 			continue
 		var sr := Rect2(r.position - Vector2(0, _scroll), r.size)
 		if e.item < 0:
-			var f := UiKit.font("cond", 3)
-			var y := sr.end.y - 9
-			l.draw_string(f, Vector2(PAD, y), e.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.ACCENT)
-			var tw := f.get_string_size(e.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-			l.draw_line(Vector2(PAD + tw + 12, y - 5), Vector2(l.size.x - PAD, y - 5), UiKit.INK_FAINT, 1.0)
+			UiKit.kicker(l, Vector2(0, sr.end.y - 9), e.text, l.size.x)
 		else:
 			_draw_entry(l, e, sr, k == focus, k == _hover)
 	if _next_item(-1, 1) < 0:
 		var f := UiKit.font("display")
 		var msg := "NO %s MATCH \"%s\"" % [noun.to_upper(), query.to_upper()] if query != "" else "NOTHING HERE"
-		l.draw_string(f, Vector2(PAD, 60), msg, HORIZONTAL_ALIGNMENT_LEFT, l.size.x - PAD * 2, 24, UiKit.INK_DIM)
-		l.draw_string(UiKit.font("body"), Vector2(PAD, 88), "Backspace to edit, Esc to clear, Tab for another filter.",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, UiKit.INK_FAINT)
+		l.draw_string(f, Vector2(0, 60), msg, HORIZONTAL_ALIGNMENT_LEFT, l.size.x - PAD * 2, 24, UiKit.INK_DIM)
+		l.draw_string(UiKit.font("body"), Vector2(0, 88), "Backspace to edit, Esc to clear, Tab for another filter.",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, UiKit.INK_DIM)
 	var br := _bar_rect()
 	if br.size.y > 0:
-		l.draw_rect(Rect2(br.position.x, 0, br.size.x, l.size.y), Color(1, 1, 1, 0.05))
-		l.draw_rect(br, Color(1, 1, 1, 0.35 if _drag_bar else 0.2))
-	# Fade the edges where the list runs on.
+		l.draw_rect(Rect2(br.position.x + 1, 0, 1, l.size.y), Color(1, 1, 1, 0.06))
+		UiKit.box(l, Rect2(br.position.x, br.position.y, 3, br.size.y), Color(1, 1, 1, 0.45 if _drag_bar else 0.25), 1)
+	# Where the list runs on past the top or bottom: a short line, so it reads as more.
 	if _scroll > 1.0:
-		_fade_edge(l, 0.0, 1.0)
+		l.draw_rect(Rect2(0, 0, l.size.x - 12, 1), UiKit.LINE)
 	if _scroll < _max_scroll() - 1.0:
-		_fade_edge(l, l.size.y, -1.0)
+		l.draw_rect(Rect2(0, l.size.y - 1, l.size.x - 12, 1), UiKit.LINE)
 
 
 static func _fade_edge(c: Control, y: float, dir: float) -> void:
-	var c0 := Color(0.04, 0.045, 0.06, 0.93)
+	var c0 := Color(0.052, 0.057, 0.074, 0.95)
 	var c1 := Color(c0, 0.0)
 	var h := 24.0 * dir
 	var w := c.size.x - 10

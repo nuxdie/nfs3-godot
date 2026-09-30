@@ -69,6 +69,13 @@ static func _file(id: String, night: bool) -> String:
 	return "%s/%s_%s_v%s.webp" % [DIR, id, "night" if night else "day", v]
 
 
+## Quitting while a track builds: let the worker finish first, or it runs on without Game.
+func _exit_tree() -> void:
+	if _task >= 0:
+		WorkerThreadPool.wait_for_task_completion(_task)
+		_task = -1
+
+
 func _process(_dt: float) -> void:
 	if _task < 0 and _world == null and not _queue.is_empty():
 		var id: String = _queue.pop_front()
@@ -125,15 +132,21 @@ func _shoot() -> void:
 
 ## Above the road a little back from the start line, looking up it.
 static func pose(path: TrackPath) -> Transform3D:
+	# Back from the start line (node 0 of a lap, or an open road's start node), each walk
+	# bounded: an open road's nodes stop at its ends.
 	var n := path.size()
-	var i := n - 1
+	var i := path.start_node
 	var back := 0.0
-	while back < BEHIND_START and i > n / 2:
+	for k in n / 2:
+		if back >= BEHIND_START or path.idx(i - 1) == path.idx(i):
+			break
 		back += path.points[path.idx(i)].distance_to(path.points[path.idx(i - 1)])
 		i -= 1
 	var ahead := i
 	var along := 0.0
-	while along < LOOK_AHEAD:
+	for k in n:
+		if along >= LOOK_AHEAD or path.idx(ahead + 1) == path.idx(ahead):
+			break
 		along += path.points[path.idx(ahead)].distance_to(path.points[path.idx(ahead + 1)])
 		ahead += 1
 	i = path.idx(i)

@@ -29,6 +29,7 @@ uniform vec3 tint = vec3(1.0);  // the track's ambient light: dims clouds and pa
 uniform sampler2D panorama : source_color, filter_linear, repeat_enable;
 uniform bool has_panorama = false;
 uniform bool mirror = false;
+uniform bool flip = false;  // the track's mirrored layout: the panorama the other way round
 uniform float pano_rotation = 0.0;  // radians
 uniform float pano_top = 0.14;
 uniform float pano_bottom = -0.1;
@@ -74,7 +75,7 @@ void sky() {
 	if (has_panorama && d.y <= pano_top && d.y >= pano_bottom) {
 		// Turning right moves right across the image; the track is mirrored in X, so
 		// this keeps the panorama the right way round.
-		float u = fract((atan(d.x, -d.z) + pano_rotation) / TAU);
+		float u = fract((atan(flip ? -d.x : d.x, -d.z) + pano_rotation) / TAU);
 		if (mirror) {
 			u = 1.0 - abs(u * 2.0 - 1.0);
 		}

@@ -58,6 +58,11 @@ var textures: Array[TexInfo] = []
 var vroad: Array[VRoad] = []
 var col_objects: Array = []   # Array[Dictionary] {ref, verts, shading, polys}: static ones only
 var images: Array[Image] = []
+var image_names := PackedStringArray()   # the archive's entry names, per image (NFS3's)
+## Per image (index into `images`), what a mirrored track draws instead: High Stakes'
+## "<mirrored>" copies of its lettered textures, drawn flipped so the signs read the right
+## way on the mirrored geometry (see mirror_world, borrow_mirror_images).
+var mirror_images := {}
 var error := ""
 var night_version := false   # High Stakes' night version of the track (lamps baked into its lighting)
 ## The game's clock for animated objects and textures (High Stakes runs at 64).
@@ -160,6 +165,8 @@ func _has_anim_xobj(o: Dictionary) -> bool:
 
 ## Loads an NFS3 track folder, or a High Stakes one (see Nfs4Track) into the same data.
 static func load_dir(dir: String, night := false) -> Nfs3Track:
+	if Nfs5Track.is_track_file(dir):
+		return Nfs5Track.load_file(dir, night)
 	if Nfs4Track.is_track_dir(dir):
 		var hs := Nfs4Track.load_dir(dir, night)
 		hs._read_ai_tables(dir, ["spdfa.bin", "spdra.bin"], Nfs4Track.SCALE)
@@ -181,6 +188,7 @@ static func load_dir(dir: String, night := false) -> Nfs3Track:
 	var fsh := Fsh.load_file(DataPath.find_ci(dir, short + "0.qfs"))
 	if fsh:
 		t.images = fsh.images
+		t.image_names = fsh.names
 	else:
 		t.error = "missing texture archive"
 		return t
@@ -191,12 +199,17 @@ static func load_dir(dir: String, night := false) -> Nfs3Track:
 	return t
 
 
-## The track's mirror image (both games' "mirrored" option): every position flipped in X,
-## and each quad's corners swapped to keep it facing out, which also keeps lettering
-## (signs, banners) reading the right way round, as High Stakes' "<mirrored>" texture
-## copies do. The virtual road's right becomes the other side, its walls swap, and the
-## racing line changes sides.
+## The track's mirror image (both games' "mirrored" option), as High Stakes draws it:
+## every position flipped in X, each quad's corners swapped to keep it facing out and each
+## texture's corners with them, so the pictures are mirrored too (a split tree's trunk stays
+## in the middle, a bend's arrow points the way the road now goes), but for the lettered
+## ones that have a mirrored copy (mirror_images), drawn instead. The virtual road's right
+## becomes the other side, its walls swap, and the racing line changes sides.
 func mirror_world() -> void:
+	for ti in textures:
+		ti.uv = PackedVector2Array([ti.uv[1], ti.uv[0], ti.uv[3], ti.uv[2]])
+	for i: int in mirror_images:
+		images[i] = mirror_images[i]
 	var done := {}   # the Polys already turned (collision objects share them)
 	for b in blocks:
 		b.center = _flip(b.center)
@@ -230,6 +243,63 @@ func mirror_world() -> void:
 		for i in line.size():
 			line[i] = -line[i]
 		racing_line[k] = line
+
+
+## For an NFS3 track, the mirrored copies of its signs from High Stakes' remake of it
+## (`hs`, the remake's texture archive): the copy where this track has the very image it
+## was made from, else this track's image of the copy's name flipped (the names are NFS3's
+## on some tracks; Country Woods' and Aquatica's aren't).
+func borrow_mirror_images(hs: Fsh) -> void:
+	if hs == null:
+		return
+	var by_data := {}   # image bytes -> this track's images with them
+	for i in images.size():
+		by_data.get_or_add(images[i].get_data(), []).append(i)
+	for c: Array in mirrored_copies(hs.names, hs.images, hs.tags):
+		var plain: Image = hs.images[c[0]]
+		for i: int in by_data.get(plain.get_data(), []):
+			if images[i].get_size() == plain.get_size():
+				mirror_images[i] = hs.images[c[1]]
+	for c: Array in mirrored_copies(hs.names, hs.images, hs.tags):
+		var i := image_names.find(hs.names[c[1]])
+		if i >= 0 and i < images.size() and not mirror_images.has(i):
+			var flipped := images[i].duplicate() as Image
+			flipped.flip_x()
+			mirror_images[i] = flipped
+
+
+## A High Stakes archive's "<mirrored>" copies as [original, copy] entry indices. The copies
+## follow a run of their originals (tagged "<nonmirrored>"), not always in the same order
+## (Hometown's posters, Country Woods' 0056-0058) nor always named alike (Atlantica calls
+## its originals "nomr", Hometown both its posters "dixy"): each is paired with the one of
+## the run of its name, the one of those it is the flip of, else the next.
+static func mirrored_copies(names: PackedStringArray, imgs: Array[Image], tags: PackedStringArray) -> Array:
+	var out := []
+	var run: Array[int] = []   # the originals not yet paired
+	var copying := false
+	for i in imgs.size():
+		if tags[i] == "<nonmirrored>":
+			if copying:
+				run.clear()
+				copying = false
+			run.append(i)
+			continue
+		if tags[i] != "<mirrored>" or run.is_empty():
+			continue
+		copying = true
+		var pick := 0
+		var best := 0
+		for k in run.size():
+			var f := imgs[run[k]].duplicate() as Image
+			f.flip_x()
+			var score := (2 if names[run[k]] == names[i] else 0) \
+				+ (1 if f.get_size() == imgs[i].get_size() and f.get_data() == imgs[i].get_data() else 0)
+			if score > best:
+				best = score
+				pick = k
+		out.append([run[pick], i])
+		run.remove_at(pick)
+	return out
 
 
 static func _flip(v: Vector3) -> Vector3:
@@ -305,6 +375,8 @@ func _add_lane_images(sfx: Fsh) -> void:
 ## Just the block centres along the lap (Godot space), read from the FRD headers without
 ## building anything: enough for the menu's track map. Empty if the file is missing or bad.
 static func peek_outline(dir: String) -> PackedVector3Array:
+	if Nfs5Track.is_track_file(dir):
+		return Nfs5Track.peek_outline(dir)
 	if Nfs4Track.is_track_dir(dir):
 		return Nfs4Track.peek_outline(dir)
 	var out := PackedVector3Array()

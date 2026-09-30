@@ -64,6 +64,8 @@ var sun: Image                   # the sun by day, the moon (or an aurora) at ni
 ## it's missing or too short to be a horizon file. `track_images` are the track's decoded
 ## texture archive.
 static func load_dir(dir: String, night: bool, weather := false, track_images: Array[Image] = []) -> Nfs3Horizon:
+	if Nfs5Track.is_track_file(dir):
+		return _load_pu(dir, night)
 	if Nfs4Track.is_track_dir(dir):
 		return _load_hs(dir, night, weather)
 	var short := dir.get_file().to_lower().replace("trk0", "3tr")  # trk001 -> 3tr01
@@ -284,6 +286,64 @@ static func _rgb(v: PackedInt32Array, i: int) -> Color:
 
 
 ## The panorama tiles side by side, each scaled to the first tile's size.
+## A Porsche Unleashed track's sky, Track/Sky/<name>.fsh (default.fsh without one): its
+## "horz" image holds the horizon panorama as two 256 x 128 halves, one above the other,
+## clear over the sky. Its sky tiles ("st1a" the sky, "sc1a" its cloud layer) are the time
+## of day (sunset over Côte d'Azur and Auvergne, dusk in Monte Carlo); its dome (the .bin,
+## not read) shades them, so their colours are taken most of the way from a plain day sky,
+## no darker than a dusk. The game has no night: at night the same sky goes dark, and
+## the ambient light with it (the baked colours are the day's).
+static func _load_pu(crp_path: String, night := false) -> Nfs3Horizon:
+	var sky_dir := DataPath.find_ci(crp_path.get_base_dir(), "Sky")
+	var name := crp_path.get_file().get_basename().to_lower()
+	var fsh := Fsh.load_file(DataPath.find_ci(sky_dir, name + ".fsh"))
+	if fsh == null:
+		fsh = Fsh.load_file(DataPath.find_ci(sky_dir, "default.fsh"))
+	if fsh == null or not fsh.by_name.has("horz"):
+		return null
+	var h := Nfs3Horizon.new()
+	var horz: Image = fsh.by_name.horz.duplicate()
+	horz.convert(Image.FORMAT_RGBA8)
+	var half := horz.get_height() / 2
+	h.panorama = _stitch([horz.get_region(Rect2i(0, 0, horz.get_width(), half)),
+		horz.get_region(Rect2i(0, half, horz.get_width(), half))])
+	h.has_pixmap = true
+	h.pixmap_top = 190.0
+	h.pixmap_bottom = -25.0
+	var top := _tile_colour(fsh.by_name.get("st1a"), Color(0.28, 0.48, 0.82))
+	var low := _tile_colour(fsh.by_name.get("sc1a"), Color(0.72, 0.8, 0.9))
+	h.sky_top = top
+	h.sky_sun = low
+	h.sky_away = low.lerp(top, 0.3)
+	h.fog_color = low
+	h.fog_density = 8.0
+	h.fog_on_pixmap = 30.0
+	h.earth_top = low.darkened(0.3)
+	h.earth_base = low.darkened(0.5)
+	h.ambient = Color.WHITE
+	if night:
+		h.sky_top = Color(0.02, 0.03, 0.07)
+		h.sky_sun = Color(0.07, 0.08, 0.14)
+		h.sky_away = Color(0.05, 0.06, 0.1)
+		h.fog_color = Color(0.05, 0.06, 0.09)
+		h.earth_top = Color(0.03, 0.03, 0.04)
+		h.earth_base = Color(0.02, 0.02, 0.03)
+		h.ambient = Color(0.22, 0.24, 0.32)
+	return h
+
+
+## A sky tile's average colour, 60% over `day` (the plain sky's), at least 35% bright.
+static func _tile_colour(img: Variant, day: Color) -> Color:
+	if img == null:
+		return day
+	var im: Image = (img as Image).duplicate()
+	im.convert(Image.FORMAT_RGBA8)
+	im.resize(1, 1, Image.INTERPOLATE_BILINEAR)
+	var c := day.lerp(im.get_pixel(0, 0), 0.6)
+	c.a = 1.0
+	return c.lightened(0.35 - c.get_luminance()) if c.get_luminance() < 0.35 else c
+
+
 static func _stitch(tiles: Array[Image]) -> Image:
 	var w := tiles[0].get_width()
 	var ht := tiles[0].get_height()

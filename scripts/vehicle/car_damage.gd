@@ -5,7 +5,8 @@ extends Node
 ## the steering out of line and puts out the lamps near it. High Stakes cars bend toward
 ## the damaged copy of the body their model carries instead of a made-up crumple, a whole
 ## panel (bonnet, door, roof...) at a time as that game does. Nothing is repaired until the
-## race is restarted. Add as a child of the Car after setup().
+## race is restarted (in a tournament the damage stays with the car until it's paid for:
+## see wear()). Add as a child of the Car after setup().
 
 const MIN_HIT := 4.0        # m/s of velocity change into a contact before anything bends
 const FULL_HIT := 22.0      # ... and the hit that does the most one crash can
@@ -162,6 +163,32 @@ func hit(at: Vector3, inward: Vector3, strength: float) -> void:
 		_car.steer_pull = clampf(_car.steer_pull + signf(p.x) * MAX_PULL * 0.3 * s, -MAX_PULL, MAX_PULL)
 
 
+## Damage `amount` (0..1) carried over from an earlier race (a tournament's car not repaired
+## since): the lost power at once, and dents about the body, more the worse it is.
+func wear(amount: float) -> void:
+	if amount <= damage:
+		return
+	damage = clampf(amount, 0.0, 1.0)
+	_car.damage = damage
+	var box: BoxShape3D = null
+	for c in _car.get_children():
+		if c is CollisionShape3D and c.shape is BoxShape3D:
+			box = c.shape
+	if box == null:
+		return
+	var half := box.size * 0.5
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(_car.display_name)   # the same car, the same dents
+	for k in mini(ceili(damage / HIT_WEAR * 1.5), 10):
+		# Round the corners and sides, front and back alternately.
+		var side := rng.randf_range(-1.0, 1.0)
+		var end := 1.0 if k % 2 == 0 else -1.0
+		var p := Vector3(side * half.x, _mid_y, end * half.z * rng.randf_range(0.3, 1.0))
+		var dir := -Vector3(signf(side) * absf(side), 0.0, end * (1.0 - absf(side))).normalized()
+		var s := clampf(damage * rng.randf_range(0.8, 1.6), 0.2, 1.0)
+		_queue.append([self, p, dir, DENT_RADIUS * lerpf(0.6, 1.0, s), DENT_DEPTH * lerpf(0.25, 1.0, s)])
+
+
 ## The box's corners stand clear of the rounded bodywork: move the hit onto the body itself.
 ## The nearest vertex in the first cells out from the point that hold any (near enough: it
 ## only has to be on the body, under the hit).
@@ -288,6 +315,11 @@ static func _bend_panels(sf: Dictionary, lp: Vector3, radius: float, depth: floa
 	var arrays: Array = sf.arrays
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	# How bent each vertex's panel is, for the crumpled paint (car.gdshader: 1 - COLOR.a).
+	var colours: PackedColorArray = arrays[Mesh.ARRAY_COLOR] if arrays[Mesh.ARRAY_COLOR] != null else PackedColorArray()
+	if colours.size() != rest.size():
+		colours.resize(rest.size())
+		colours.fill(Color.WHITE)
 	for i in rest.size():
 		var m := panels[i]
 		var w := 0.0
@@ -301,8 +333,10 @@ static func _bend_panels(sf: Dictionary, lp: Vector3, radius: float, depth: floa
 			continue
 		verts[i] = rest[i].lerp(dpos[i], w)
 		normals[i] = orig[i].lerp(dnorm[i], w).normalized()
+		colours[i] = Color(1.0, 1.0, 1.0, 1.0 - w)
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_COLOR] = colours
 	return true
 
 

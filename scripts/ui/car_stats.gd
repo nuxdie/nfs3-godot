@@ -1,16 +1,21 @@
 class_name CarStats
 extends Control
-## Four segmented performance bars (speed, acceleration, handling, braking) read
-## from a car's carp data; they glide to the new values when the car changes.
+## Four performance bars (speed, acceleration, handling, braking) read from a car's carp
+## data, each with its figure; they glide to the new values when the car changes.
 
 const NAMES := ["TOP SPEED", "ACCELERATION", "HANDLING", "BRAKING"]
 const SEGMENTS := 20
+
+## The bars two by two, or (1) one under another.
+var columns := 2
 
 var _target := [0.0, 0.0, 0.0, 0.0]
 var _shown := [0.0, 0.0, 0.0, 0.0]
 var _readout := ["", "", "", ""]
 ## Weight and gearbox, for the caption above the bars.
 var spec := ""
+## The same as words in sentence case: ["Class C", "1518 kg", "6-speed", "RWD"].
+var spec_parts := PackedStringArray()
 
 
 ## Normalised 0..1 ratings against the spread of the stock NFS3 cars, with `upgrade` (High
@@ -71,16 +76,17 @@ func set_car(data: Object, kmh: bool, upgrade := 0) -> void:
 	var gears := 0
 	for g in range(2, ratios.size()):
 		gears += int(ratios[g] > 0.0)
-	spec = ""
+	spec_parts = PackedStringArray()
 	var cls := int(data.carp_value(1, -1.0))
 	if data.carp.has(1) and cls >= 0 and cls <= 2:
-		spec = "CLASS %s   ·   " % "ABC"[cls]
-	spec += "%d KG" % roundi(data.carp_value(2, 1400.0))
+		spec_parts.append("Class %s" % "ABC"[cls])
+	spec_parts.append("%d kg" % roundi(data.carp_value(2, 1400.0)))
 	if gears > 0:
-		spec += "   ·   %d-SPEED" % gears
+		spec_parts.append("%d-speed" % gears)
 	if data.carp.has(16):
 		var fd: float = data.carp_value(16)
-		spec += "   ·   %s" % ("FWD" if fd >= 1.0 else ("AWD" if fd > 0.0 else "RWD"))
+		spec_parts.append("FWD" if fd >= 1.0 else ("AWD" if fd > 0.0 else "RWD"))
+	spec = "   ·   ".join(spec_parts).to_upper()
 	queue_redraw()
 
 
@@ -97,21 +103,21 @@ func _process(dt: float) -> void:
 
 
 func _draw() -> void:
-	var cols := 2
-	var gap := Vector2(28, 12)
+	var cols := columns
+	var gap := Vector2(28, 10 if cols == 2 else 6)
 	var cw := (size.x - gap.x * (cols - 1)) / cols
-	var rh := (size.y - gap.y) / 2.0
-	var f := UiKit.font("cond", 2)
+	var rh := (size.y - gap.y * (4 / cols - 1)) / (4 / cols)
+	var lf := UiKit.font("cond", 1)
+	var vf := UiKit.font("cond", 1, true)
 	for i in 4:
 		var o := Vector2((i % cols) * (cw + gap.x), (i / cols) * (rh + gap.y))
-		draw_string(f, o + Vector2(0, 13), NAMES[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, UiKit.INK_DIM)
-		draw_string(f, o + Vector2(0, 13), _readout[i], HORIZONTAL_ALIGNMENT_RIGHT, cw, 12, UiKit.INK)
-		var sw := (cw - (SEGMENTS - 1) * 2.0) / SEGMENTS
-		var lit: float = _shown[i] * SEGMENTS
-		for s in SEGMENTS:
-			var r := Rect2(o + Vector2(s * (sw + 2.0), 20), Vector2(sw, 8))
-			var fill := clampf(lit - s, 0.0, 1.0)
-			draw_colored_polygon(UiKit.slant_points(r, 0.35), Color(1, 1, 1, 0.1))
-			if fill > 0.0:
-				var c := UiKit.ACCENT.lerp(UiKit.ACCENT_HOT, float(s) / SEGMENTS)
-				draw_colored_polygon(UiKit.slant_points(r, 0.35), Color(c, fill))
+		var rw := UiKit.text_width("cond", _readout[i], 14, 1, true)
+		var name: String = NAMES[i]
+		draw_string(lf, o + Vector2(0, 14), name, HORIZONTAL_ALIGNMENT_LEFT, cw - rw - 8,
+			UiKit.fit("cond", name, cw - rw - 8, 13, 10, 1), UiKit.INK_DIM)
+		draw_string(vf, o + Vector2(0, 14), _readout[i], HORIZONTAL_ALIGNMENT_RIGHT, cw, 14, UiKit.INK)
+		var bar := Rect2(o + Vector2(0, 21), Vector2(cw, 5))
+		UiKit.box(self, bar, Color(1, 1, 1, 0.1), 2)
+		var v: float = _shown[i]
+		if v > 0.0:
+			UiKit.box(self, Rect2(bar.position, Vector2(bar.size.x * v, bar.size.y)), UiKit.ACCENT.lerp(UiKit.ACCENT_HOT, v * 0.6), 2)

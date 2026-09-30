@@ -15,8 +15,9 @@ const FCE4_HEADER_END := 0x2038
 ## pursuit cars' alternative interiors (OND, OLD) are left out; the pop-up lamps (OL) and
 ## wheels are handled apart.
 const FCE4_BODY_PARTS := [":hb", ":olm", ":orm", ":ot", ":oc", ":od", ":oh", ":odl"]
-## FCE4 triangle flags: the windows have all of these set (the bits above say which window).
-const FCE4_WINDOW := 0x2E
+## FCE4 triangle flags: the windows have both of these set (the bits above say which window;
+## 0x02 and 0x04 are set on some cars' windows and not others, 0x04 on plain body too).
+const FCE4_WINDOW := 0x28
 ## ...and from this bit up, which body panels a triangle belongs to (roof, boot, nose, each
 ## side, the bonnet...): what High Stakes bends a panel at a time.
 const FCE4_PANEL_SHIFT := 11
@@ -25,6 +26,7 @@ const SCALE := 1.0
 var id := ""
 var display_name := ""
 var texture: Texture2D
+var damage_texture: Texture2D          # Porsche Unleashed: the crumpled paint in the skin's layout, or null
 var body_parts: Array[Dictionary] = []   # {name, mesh, center}; High Stakes: + glass, damaged {pos, normal, panels} (see _parse_fce)
 var wheels: Array[Dictionary] = []       # {name, mesh, center} front-left, front-right, rear-left, rear-right
 var popup_lights: Array[Dictionary] = [] # {name, mesh, center}: pop-up headlamps, raised only while the lights are on
@@ -273,20 +275,24 @@ static func read_info(fedata: PackedByteArray, high_stakes: bool, fce: PackedByt
 ## The binary head of fedata.eng, as High Stakes reads it (its car record, from the second
 ## byte on). class: 0..3 for AAA, AA, A, B, -1 for none (the Knockout); serial: the number a
 ## "Model" restriction names (not always carp.txt's); ratings: the overall rating bar (1..20) at
-## each upgrade level, what it ranks rivals by; upgradable: whether it takes upgrades.
+## each upgrade level, what it ranks rivals by; upgradable: whether it takes upgrades;
+## price and upgrade_costs (its three levels): what the tournaments' dealer asks, in $.
 ## NFS3's head has its own class (0..2 for A..C, which High Stakes' AA..B stand for),
 ## serial and four bars (acceleration, top speed, handling, braking) but no overall one:
 ## their mean stands in. {} if the file is too short.
 static func read_rank(fedata: PackedByteArray, high_stakes: bool) -> Dictionary:
 	if high_stakes:
-		if fedata.size() < 0x3A0:
+		if fedata.size() < 0x3AE:
 			return {}
 		var cls := fedata[0x382]
 		var ratings := []
 		for level in 4:
 			ratings.append(fedata[0x399 + level])
+		var costs := []
+		for level in 3:
+			costs.append(fedata.decode_u32(0x3A2 + level * 4))
 		return {"class": cls if cls <= 3 else -1, "serial": fedata[0x31E], "ratings": ratings,
-			"upgradable": fedata[0x37B] & 0x40 == 0}
+			"upgradable": fedata[0x37B] & 0x40 == 0, "price": fedata.decode_u32(0x39E), "upgrade_costs": costs}
 	if fedata.size() < 0x2C:
 		return {}
 	var cls := fedata[0x0A]
@@ -439,6 +445,7 @@ func _parse_fce(d: PackedByteArray) -> void:
 	var steering_wheel := {}
 	var body_st: SurfaceTool = null
 	var glass_st: SurfaceTool = null
+	var driver_st: SurfaceTool = null   # ":OD", drawn apart in car_driver.gdshader; he doesn't dent
 	var body_dmg := PackedVector3Array()
 	var glass_dmg := PackedVector3Array()
 	# Per emitted vertex: the damaged copy's normal, and the panels (bit mask) it's part of.
@@ -451,6 +458,8 @@ func _parse_fce(d: PackedByteArray) -> void:
 		body_st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		glass_st = SurfaceTool.new()
 		glass_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		driver_st = SurfaceTool.new()
+		driver_st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for pi in n_parts:
 		var pname := _part_name(d, pi, o)
 		var wi := wheel_ids.find(pi)
@@ -466,6 +475,7 @@ func _parse_fce(d: PackedByteArray) -> void:
 			error = "damaged car.fce"
 			return
 		var in_body := merged and pi in body_ids
+		var is_driver := in_body and pname == ":od"
 		var part_dmg := has_damage and in_body and header_end + maxi(damaged_off, damaged_norm_off) + (first_v + nv) * 12 <= d.size()
 		# A vertex belongs to every panel of the triangles round it, so the copies of it
 		# (unindexed) bend alike and the panels stay joined.
@@ -546,7 +556,7 @@ func _parse_fce(d: PackedByteArray) -> void:
 			if d.decode_u32(q + 4) >= nv or d.decode_u32(q + 8) >= nv or d.decode_u32(q + 12) >= nv:
 				continue
 			var glass := in_body and (d.decode_u32(q + 28) & FCE4_WINDOW) == FCE4_WINDOW
-			var to := glass_st if glass else st
+			var to := driver_st if is_driver else glass_st if glass else st
 			# Mirroring X flips handedness; emit the triangle in reverse order to keep it front-facing.
 			for k in [2, 1, 0]:
 				var vi := d.decode_u32(q + 4 + k * 4)
@@ -561,10 +571,10 @@ func _parse_fce(d: PackedByteArray) -> void:
 				if floor_tris.has(ti):
 					pos = floor_mid + (pos - floor_mid) * Vector3(0.84, 1.0, 0.92)
 					bent = floor_mid + (bent - floor_mid) * Vector3(0.84, 1.0, 0.92)
-				if merged and to == body_st:
+				if to == driver_st:
 					to.set_uv2(Vector2(1.0 if steering.has(vi) else 0.0, 0.0))
 				to.add_vertex(pos + offset)
-				if in_body:
+				if in_body and not is_driver:
 					(glass_dmg if glass else body_dmg).append(bent + offset)
 					var bn := _v(d, header_end + damaged_norm_off + (first_v + vi) * 12).normalized() if part_dmg \
 						else _v(d, np).normalized()
@@ -584,12 +594,15 @@ func _parse_fce(d: PackedByteArray) -> void:
 	if merged:
 		var body := {"name": ":hb", "mesh": body_st.commit(), "center": main_center}
 		var glass := {"name": "glass", "mesh": glass_st.commit(), "center": main_center, "glass": true}
+		var driver := {"name": ":od", "mesh": driver_st.commit(), "center": main_center, "driver": true}
 		if not steering_wheel.is_empty():
-			body.steering = steering_wheel
+			driver.steering = steering_wheel
 		if has_damage:
 			body.damaged = {"pos": body_dmg, "normal": body_dmg_n, "panels": body_panels}
 			glass.damaged = {"pos": glass_dmg, "normal": glass_dmg_n, "panels": glass_panels}
 		body_parts.push_front(body)
+		if driver.mesh.get_surface_count() > 0:
+			body_parts.append(driver)
 		if not glass_dmg.is_empty():
 			body_parts.append(glass)
 	wheels.sort_custom(func(a, b): return a.slot < b.slot)

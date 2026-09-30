@@ -1473,12 +1473,19 @@ static func make_walls(path: TrackPath) -> StaticBody3D:
 			foot.append(p)
 			extent.append(_wall_extent(path, grid, i, p))
 		var faces := PackedVector3Array()
-		for i in n:
+		for i in n if path.closed else n - 1:
 			var j := (i + 1) % n
 			var a := foot[i]
 			var b := foot[j]
 			faces.append_array([a + Vector3.DOWN * extent[i].x, b + Vector3.DOWN * extent[j].x, b + Vector3.UP * extent[j].y,
 				a + Vector3.DOWN * extent[i].x, b + Vector3.UP * extent[j].y, a + Vector3.UP * extent[i].y])
+		# An open road is walled off across both ends too.
+		if not path.closed and side > 0.0:
+			for i in [0, n - 1]:
+				var a: Vector3 = path.points[i] - path.rights[i] * path.left_width[i]
+				var b: Vector3 = path.points[i] + path.rights[i] * path.right_width[i]
+				faces.append_array([a + Vector3.DOWN * WALL_DEPTH, b + Vector3.DOWN * WALL_DEPTH, b + Vector3.UP * WALL_HEIGHT,
+					a + Vector3.DOWN * WALL_DEPTH, b + Vector3.UP * WALL_HEIGHT, a + Vector3.UP * WALL_HEIGHT])
 		var shape := ConcavePolygonShape3D.new()
 		shape.set_faces(faces)
 		shape.backface_collision = true
