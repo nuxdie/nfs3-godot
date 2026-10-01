@@ -95,8 +95,18 @@ const SHOTS := {
 const ROUND := ["hero", "headlamp", "wheel", "tail", "spoiler", "driver", "door", "flank", "mirror", "top",
 	"bonnet", "grille", "hazards", "engine", "paint", "wipers", "overhead"]
 const LOADING_ROUND := ["l_hero", "l_driver", "l_rear"]
+## The calm round (`calm`): wide shots only, the car kept inside its region.
+const CALM_ROUND := ["hero", "l_rear", "l_hero"]
 var car: Car                      # the car on the stage (null while none)
 var loading := false              # the loading screen's: the driver in, its own slow round
+## Only the wide shots, while something beside the car needs the rest of the view (the
+## dealership's map): no close-up spills over it.
+var calm := false:
+	set(v):
+		if v != calm:
+			calm = v
+			if calm and not _shot in CALM_ROUND:
+				_cut_to("hero")
 var night := false                # the lights on (the menu's time of day)
 var rain := false                 # the wipers going and the top up (the menu's weather)
 
@@ -177,6 +187,8 @@ func set_region(r: Rect2) -> void:
 ## Puts `data` on the stage in `tint` (the paint), dropped in from a little height (`drop`).
 ## `wear` (0..1): the damage it carries (a tournament car not repaired), dented as the race will.
 func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HEIGHT, wear := 0.0) -> void:
+	# Another car opens on the whole of it; the close-ups only once it's been seen.
+	var fresh: bool = car == null or car.get_meta("car", -1) != id
 	if car:
 		car.queue_free()
 		car = null
@@ -211,6 +223,9 @@ func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HE
 	_settle(true)
 	_build_twins.call_deferred()
 	_build_mirrors()
+	if fresh and not loading and _rev_t < 0.0:
+		_round_i = 0
+		_cut_to("hero")
 
 
 ## Cuts to the shot of the driver at the wheel, where the car has one.
@@ -826,10 +841,11 @@ func _process(dt: float) -> void:
 ## The next shot: the next of the round the car can show.
 func _next_shot() -> void:
 	var name := ""
-	for k in ROUND.size():
-		var cand: String = ROUND[(_round_i + k) % ROUND.size()]
+	var shots: Array = CALM_ROUND if calm else ROUND
+	for k in shots.size():
+		var cand: String = shots[(_round_i + k) % shots.size()]
 		if _can_show(cand) and cand != _shot:
-			_round_i = (_round_i + k + 1) % ROUND.size()
+			_round_i = (_round_i + k + 1) % shots.size()
 			name = cand
 			break
 	_cut_to(name if name != "" else "hero")
@@ -867,7 +883,8 @@ func _frame() -> void:
 				target = p
 	var yaw := deg_to_rad(lerpf(sh.yaw[0], sh.yaw[1], u) * _side + _drag.x + sin(_time * 0.37) * 0.6)
 	var e := deg_to_rad(clampf(lerpf(sh.elev[0], sh.elev[1], u) + _drag.y + sin(_time * 0.29) * 0.4, -5.0, 85.0))
-	var d: float = lerpf(sh.dist[0], sh.dist[1], u) * k
+	# (Calm: further back too, the car well inside its region.)
+	var d: float = lerpf(sh.dist[0], sh.dist[1], u) * k * (1.35 if calm else 1.0)
 	var fov: float = lerpf(sh.fov[0], sh.fov[1], u)
 	var roll := deg_to_rad(float(sh.get("roll", 0.0)) * _side)
 	var dir := Vector3(sin(yaw) * cos(e), sin(e), cos(yaw) * cos(e))

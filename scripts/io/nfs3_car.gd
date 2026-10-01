@@ -25,6 +25,8 @@ const FCE4_WINDOW := 0x28
 ## set (a twin of it, flagged otherwise, sits just behind). The bonus cars' copies flag the
 ## same glass 0x01 and drop the twin.
 const DASH_MIRROR_GLASS := 0x0A
+## A dash mirror this near the body's own (m) is left where dash.fce has it.
+const DASH_MIRROR_SEATED := 0.15
 ## ...and from this bit up, which body panels a triangle belongs to (roof, boot, nose, each
 ## side, the bonnet...): what High Stakes bends a panel at a time.
 const FCE4_PANEL_SHIFT := 11
@@ -130,13 +132,65 @@ func _load_dash(viv: Viv, fce: PackedByteArray) -> void:
 	var eye := Vector3(0.45, 0.42, -0.45)
 	if not f.dummies.is_empty():
 		eye = f.dummies[0].pos
+	# (Some cars' floors, the SLK's ~10 cm, reach below the road under the wheels, which then
+	# shows through them: nothing of it goes lower than the body's underside.)
+	var lowest := INF
+	for b in body_parts:
+		for v in (b.mesh as Mesh).get_faces():
+			lowest = minf(lowest, v.y + (b.center as Vector3).y)
 	var out: Array[Dictionary] = []
 	for p in f.parts:
-		var part := {"name": p.name, "mesh": f.mesh(p), "center": p.center}
+		var part := {"name": p.name, "mesh": _floored(f.mesh(p), lowest - (p.center as Vector3).y), "center": p.center}
 		if (p.name as String).to_lower().contains("mirror"):
 			_split_mirror_glass(f, p, part, eye)
+			_seat_dash_mirror(part, eye)
 		out.append(part)
+	var under := _floor_under(out, lowest - 0.01)
+	if not under.is_empty():
+		out.append(under)
 	dash = {"texture": tex, "eye": eye, "parts": out}
+
+
+## A carpet laid under the floor of the cockpit `parts`, at `y`: some floors have gaps (the F50's round
+## its seat, the Camaro's by the console) that the road showed through, from the in-car view
+## looking down. In the floor part's colour, or {} if there's none.
+static func _floor_under(parts: Array[Dictionary], y: float) -> Dictionary:
+	if not is_finite(y):
+		return {}
+	var box := AABB()
+	var uv := Vector2.INF
+	# (As far as the floor goes: the dash's mirrors stand out past the doors, where it would
+	# show from the side windows.)
+	for p in parts:
+		var m: ArrayMesh = p.mesh
+		if not (p.name as String).to_lower().contains("floor"):
+			continue
+		var b := m.get_aabb()
+		b.position += p.center
+		box = b if box.size == Vector3.ZERO else box.merge(b)
+		if uv == Vector2.INF and m.get_surface_count() > 0:
+			# The texel at the vertex nearest the middle of the floor (an average may fall off it).
+			var a := m.surface_get_arrays(0)
+			var verts: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var uvs: PackedVector2Array = a[Mesh.ARRAY_TEX_UV]
+			var mid := m.get_aabb().get_center()
+			var best := INF
+			for i in mini(verts.size(), uvs.size()):
+				var d := Vector2(verts[i].x - mid.x, verts[i].z - mid.z).length_squared()
+				if d < best:
+					best = d
+					uv = uvs[i]
+	if uv == Vector2.INF:
+		return {}
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_normal(Vector3.UP)
+	st.set_uv(uv)
+	var lo := box.position
+	var hi := box.end
+	for c in [Vector2(lo.x, lo.z), Vector2(hi.x, lo.z), Vector2(hi.x, hi.z), Vector2(lo.x, lo.z), Vector2(hi.x, hi.z), Vector2(lo.x, hi.z)]:
+		st.add_vertex(Vector3(c.x, y, c.y))
+	return {"name": "floor under", "mesh": st.commit(), "center": Vector3.ZERO}
 
 
 ## Takes a dash mirror's glass (see DASH_MIRROR_GLASS) out of `part`'s mesh into part.glass,
@@ -170,6 +224,45 @@ static func _split_mirror_glass(f: Fce4, p: Dictionary, part: Dictionary, eye: V
 	part.glass = {"mesh": _translated(glass, normal * 0.003), "point": point, "normal": normal}
 
 
+## Moves a dash mirror's part (see _load_dash) onto the body's own mirror on its side
+## (FCE4_MIRRORS), turned about the vertical so its glass faces the eye as it did, where
+## that one sits on the wing: dash.fce hangs them all off the doors, but the CLK-GTR's are
+## well ahead, inboard of the wings' sides. (Door mirrors, standing out past the body's side,
+## stay as dash.fce has them: its cabin isn't to the body's scale, and moved they'd float
+## in front of its windscreen.)
+func _seat_dash_mirror(part: Dictionary, eye: Vector3) -> void:
+	var box := (part.mesh as Mesh).get_aabb()
+	var at: Vector3 = part.center + box.get_center()
+	var own := AABB()
+	for b in body_parts:
+		if FCE4_MIRRORS.has(b.name):
+			var bb := (b.mesh as Mesh).get_aabb()
+			if signf(b.center.x + bb.get_center().x) == signf(at.x):
+				own = AABB(bb.position + b.center, bb.size)
+	if not own.has_volume():
+		return
+	var target := own.get_center()
+	# The body's side about the mirror's station, against the mirror's outer edge.
+	var side := 0.0
+	for b in body_parts:
+		if b.name == ":hb":
+			for v in (b.mesh as Mesh).get_faces():
+				var w: Vector3 = v + b.center
+				if w.z > own.position.z - 0.1 and w.z < own.end.z + 0.1:
+					side = maxf(side, absf(w.x))
+	if maxf(absf(own.position.x), absf(own.end.x)) > side or target.distance_to(at) < DASH_MIRROR_SEATED:
+		return
+	var seen: Vector3 = part.center + (part.glass.point if part.has("glass") else box.get_center())
+	var was := Vector2(eye.x - seen.x, eye.z - seen.z).angle()
+	var now := Vector2(eye.x - (seen.x + target.x - at.x), eye.z - (seen.z + target.z - at.z)).angle()
+	var turn := Basis(Vector3.UP, was - now)
+	part.mesh = _transformed(part.mesh, Transform3D(turn, Vector3.ZERO))
+	if part.has("glass"):
+		part.glass = {"mesh": _transformed(part.glass.mesh, Transform3D(turn, Vector3.ZERO)),
+			"point": turn * (part.glass.point as Vector3), "normal": turn * (part.glass.normal as Vector3)}
+	part.center = target - turn * box.get_center()
+
+
 ## The officer, one surface per texture page of cop.art.
 func _load_officer(viv: Viv) -> void:
 	var f := Fce4.parse(viv.get_file("cop.fce"))
@@ -183,6 +276,41 @@ func _load_officer(viv: Viv) -> void:
 	for v in m.get_faces():
 		lowest = minf(lowest, v.y)
 	officer = _translated(m, Vector3(0, -lowest, 0))
+
+
+## `m` with no vertex below `y`, materials kept.
+static func _floored(m: ArrayMesh, y: float) -> ArrayMesh:
+	if not is_finite(y):
+		return m
+	var out := ArrayMesh.new()
+	for s in m.get_surface_count():
+		var arrays := m.surface_get_arrays(s)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for i in verts.size():
+			verts[i].y = maxf(verts[i].y, y)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		out.surface_set_material(s, m.surface_get_material(s))
+	return out
+
+
+## `m` with every surface's vertices and normals put through `xf`, materials kept.
+static func _transformed(m: ArrayMesh, xf: Transform3D) -> ArrayMesh:
+	var out := ArrayMesh.new()
+	for s in m.get_surface_count():
+		var arrays := m.surface_get_arrays(s)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for i in verts.size():
+			verts[i] = xf * verts[i]
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		if arrays[Mesh.ARRAY_NORMAL] != null:
+			var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+			for i in normals.size():
+				normals[i] = xf.basis * normals[i]
+			arrays[Mesh.ARRAY_NORMAL] = normals
+		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		out.surface_set_material(s, m.surface_get_material(s))
+	return out
 
 
 ## `m` with every surface moved by `by`, materials kept.

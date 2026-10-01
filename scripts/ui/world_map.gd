@@ -9,7 +9,7 @@ signal moved
 
 const MAP_PATH := "res://data/world_map.png"
 const TOP := 2.0016178          # miller(84°): the picture's top edge
-const MIN_ZOOM := 140.0         # px per map unit: the whole world about fits 900 px
+const MIN_ZOOM := 100.0         # px per map unit: the whole world about fits 640 px
 const MAX_ZOOM := 9000.0
 
 ## Where to fit things (this control's pixels): the rest of it is drawn but may be covered.

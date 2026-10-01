@@ -29,7 +29,7 @@ const WIDGET_RECTS := {
 	"standings": Rect2(36, 36, 290, 130), "police": Rect2(36, 184, 210, 66), "lap": Rect2(36, 440, 190, 50),
 	"map": Rect2(36, 494, 190, 190), "speed": Rect2(1008, 470, 236, 214), "mirror": Rect2(440, 16, 400, 100),
 	"messages": Rect2(400, 190, 480, 58), "countdown": Rect2(548, 196, 184, 184), "lights": Rect2(0, 0, 1280, 6),
-	"hints": Rect2(420, 654, 440, 30),
+	"hints": Rect2(420, 654, 440, 30), "banter": Rect2(500, 590, 280, 50),
 }
 const WIDGET_HELP := {
 	"speed": "The speed, gear and rev counter (or High Stakes' dials).",
@@ -42,6 +42,7 @@ const WIDGET_HELP := {
 	"countdown": "The 3, 2, 1 before the start.",
 	"lights": "The red and blue bar along the top while the police chase you.",
 	"hints": "The keys at the start of a race, and the camera's name when you change it.",
+	"banter": "A word from a rival as it gets past you, low in the middle.",
 }
 
 var in_race := false             # opened from the pause menu: some changes wait for the next race
@@ -114,7 +115,7 @@ func _define() -> void:
 			"help": "The car changes gear itself, or you do: Shift up, Ctrl down (a gamepad's stick clicks), and down from 1st at a standstill into reverse. Manual drives on the car's manual gearing, which on some has an extra gear or two."},
 		{"id": "abs", "caption": "ABS", "items": PackedStringArray(["Per car", "On", "Off"]), "later": true,
 			"get": func() -> int: return Game.abs_mode, "set": func(i: int): Game.abs_mode = i as Car.Abs,
-			"help": "Anti-lock brakes hold each wheel just short of locking, so the car still steers under full braking. Per car: as the car came (most from the mid-80s on). Without, a locked wheel slides and barely steers. Stability control always brings it."},
+			"help": "Anti-lock brakes hold each wheel just short of locking, so the car still steers under full braking. Per car: as the car came: from its own data (High Stakes, NFS3, Hot Pursuit 2, where some have it on one axle only), or for Porsche Unleashed's by year (from the mid-80s). Without, a locked wheel slides and barely steers. Stability control always brings it."},
 		{"id": "tc", "caption": "Traction control", "items": off_on, "later": true,
 			"get": func() -> int: return int(Game.traction_control), "set": func(i: int): Game.traction_control = i == 1,
 			"help": "Cuts the engine's power when the driven wheels start to spin, out of a bend or off the line. Stability control always brings it."},

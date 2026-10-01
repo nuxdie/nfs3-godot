@@ -77,6 +77,7 @@ const SPRINT_ENDS := 0.15
 const SPRINT_REACH := 10.0
 ## m a triangle may be above or below the course's line (the AI's points) and be its road.
 const COURSE_ROAD_GAP := 1.5
+const COURSE_ROAD_REACH := 3.0
 ## Scenery this high (m) over the course's road, this far inside its edges, is in the way
 ## (_blocks_course).
 const BLOCK_LOW := 0.3
@@ -91,6 +92,19 @@ const VARIANT_OVERLAP := 0.6
 const VARIANT_SAMPLES := 150
 ## Variants that each carry this many AI points of the course the other doesn't are both kept.
 const VARIANT_OWN := 10
+## _find_copies: the triangles sampled of a render method, the share of them within COPY_GAP
+## (m) of another's for it to be a copy, the cell (m) of its lookup, and how much more of the one
+## than the other (share of its triangles) must be in its compartment's own footprint to win.
+const COPY_SAMPLES := 48
+const COPY_SHARE := 0.6
+const COPY_GAP := 1.5
+const COPY_CELL := 8.0
+const COPY_OWN := 0.2
+## A stand-in (_find_copies) has less than STAND_IN_OWN of its triangles in its compartment's
+## footprint and COPY_SHARE of them within STAND_IN_GAP (m) of another's (a rough version is
+## further off the detailed one than a copy).
+const STAND_IN_OWN := 0.5
+const STAND_IN_GAP := 3.0
 ## Lanes are about this wide (m) at most.
 const LANE_WIDTH := 4.0
 ## Microcode -> [vertex stride, uv sets].
@@ -194,9 +208,14 @@ static func load_dir(dir: String, _night := false) -> Nfs6Track:
 	if not t.closed:
 		t._set_sprint()
 	t._place_nodes(_drvpath_nodes(DataPath.find_ci(dir, "drvpath.ini")), grids)
+	var objs := {}   # compartment -> its .o bytes
 	for c in comps:
 		var p := DataPath.find_ci(area_dir, "comp%02d.o" % c)
 		if p != "":
+			objs[c] = FileAccess.get_file_as_bytes(p)
+	var copies := t._find_copies(objs, feet)
+	for c in comps:
+		if objs.has(c):
 			# What lies in another's footprint and not its own is its view of the land round
 			# it (a kilometre-wide sheet of terrain, the next valley), for when that
 			# compartment isn't drawn: here it is, in detail.
@@ -206,7 +225,9 @@ static func load_dir(dir: String, _night := false) -> Nfs6Track:
 				if o != c:
 					t._others.merge(feet[o])
 			t._comp = c
-			t._add_object(FileAccess.get_file_as_bytes(p), names["track"])
+			t._skip = copies.get(c, {})
+			t._add_object(objs[c], names["track"])
+	t._skip = {}
 	t._comp = -1
 	t._own = {}
 	t._others = {}
@@ -757,6 +778,21 @@ func _blocks_course(pos: PackedVector3Array, idx: PackedInt32Array) -> bool:
 	return false
 
 
+## Whether a triangle (its middle, its normal) is part of the course's road, for
+## _find_copies to leave be: level, within its edges, within COURSE_ROAD_REACH of its line.
+func _carries_road(mid: Vector3, nrm: Vector3) -> bool:
+	if absf(nrm.y) < ROAD_LEVEL:
+		return false
+	for i in _slices_near(mid):
+		var vr := vroad[i]
+		var off := mid - vr.pos
+		if absf(off.dot(vr.forward)) <= SLICE_STEP and absf(off.y) < COURSE_ROAD_REACH:
+			var lat := off.dot(vr.right)
+			if lat > -vr.left_wall and lat < vr.right_wall:
+				return true
+	return false
+
+
 ## Whether a triangle (its middle, its normal) lies flat on the course's road.
 func _on_course_road(mid: Vector3, nrm: Vector3) -> bool:
 	if absf(nrm.y) < ROAD_LEVEL:
@@ -1027,6 +1063,188 @@ static func _footprint(grid: Dictionary) -> Dictionary:
 
 func _count(reason: String) -> void:
 	stats[reason] = stats.get(reason, 0) + 1
+
+
+## The objects drawn more than once: a compartment holds some in two versions (a rough one
+## and a detailed one, in its parts and their "LOD" parts), and its neighbours hold copies of
+## them to be seen from there (the Calypso Coast temple is in three). The game draws one;
+## loaded together they're drawn over each other. Render methods with the same textures whose
+## boxes meet are copies when most of the smaller's surface (a sample of its triangles'
+## middles, COPY_SHARE of them) is within COPY_GAP of the other's: the smaller goes, unless
+## the bigger lies on it too (the same thing twice) and is in different compartment's, less
+## in its own compartment's footprint (`feet`) than the smaller in its. Compartment -> {render method:
+## true} to leave out.
+func _find_copies(objs: Dictionary, feet: Dictionary) -> Dictionary:
+	var recs: Array[Dictionary] = []
+	var by_key := {}
+	for c in objs:
+		var e := Eagl.parse(objs[c])
+		if e.error != "":
+			continue
+		var rel := _relocations(objs[c])
+		for rm in _draw_order(e):
+			var g := _method_geometry(e, rel, rm)
+			if g.is_empty():
+				continue
+			var pos: PackedVector3Array = g.pos
+			var tris: PackedInt32Array = g.tris
+			var box := AABB(pos[tris[0]], Vector3.ZERO)
+			var mids := PackedVector3Array()
+			var own := 0
+			var road := false
+			var step := maxi(tris.size() / 3 / COPY_SAMPLES, 1)
+			for k in range(0, tris.size(), 3):
+				var m := (pos[tris[k]] + pos[tris[k + 1]] + pos[tris[k + 2]]) / 3.0
+				if not road:
+					road = _carries_road(m, (pos[tris[k + 1]] - pos[tris[k]]).cross(pos[tris[k + 2]] - pos[tris[k]]).normalized())
+				for j in 3:
+					box = box.expand(pos[tris[k + j]])
+				if feet.get(c, {}).has(Vector2i(floori(m.x / FOOT_CELL), floori(m.z / FOOT_CELL))):
+					own += 1
+				if (k / 3) % step == 0:
+					mids.append(m)
+			var rec := {"comp": c, "rm": rm, "pos": pos, "tris": tris, "box": box, "mids": mids,
+				"n": tris.size() / 3, "own": float(own) / (tris.size() / 3), "road": road}
+			recs.append(rec)
+			by_key.get_or_add(g.key, []).append(rec)
+	var out := {}
+	# Stand-ins: what lies mostly outside its compartment's footprint (its view of the next
+	# one's ground, a rough sheet of it), where the next one, loaded too, has its own (any
+	# textures): COPY_SHARE of it within STAND_IN_GAP of another compartment's triangles.
+	var grid := {}   # COPY_CELL cell -> [[rec, first corner index], ...] of every method
+	for rec in recs:
+		var pos: PackedVector3Array = rec.pos
+		var tris: PackedInt32Array = rec.tris
+		for k in range(0, tris.size(), 3):
+			var box := AABB(pos[tris[k]], Vector3.ZERO).expand(pos[tris[k + 1]]).expand(pos[tris[k + 2]]).grow(STAND_IN_GAP)
+			for x in range(floori(box.position.x / COPY_CELL), floori(box.end.x / COPY_CELL) + 1):
+				for z in range(floori(box.position.z / COPY_CELL), floori(box.end.z / COPY_CELL) + 1):
+					grid.get_or_add(Vector2i(x, z), []).append([rec, k])
+	var by_own := recs.duplicate()
+	by_own.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return x.own < y.own)
+	for rec in by_own:
+		# (A stretch of the course's road off its compartment's surface, a bridge's deck, stays.)
+		if rec.own >= STAND_IN_OWN or rec.road:
+			continue
+		var hits := 0
+		for p: Vector3 in rec.mids:
+			for entry: Array in grid.get(Vector2i(floori(p.x / COPY_CELL), floori(p.z / COPY_CELL)), []):
+				var o: Dictionary = entry[0]
+				# (Not on another stand-in: two of them for one place far from both, the
+				# temple across the bay, would take each other out.)
+				if o.comp == rec.comp or o.has("dropped"):
+					continue
+				var k: int = entry[1]
+				if _to_triangle(p, o.pos[o.tris[k]], o.pos[o.tris[k + 1]], o.pos[o.tris[k + 2]]) < STAND_IN_GAP:
+					hits += 1
+					break
+		if hits >= COPY_SHARE * rec.mids.size():
+			out.get_or_add(rec.comp, {})[rec.rm] = true
+			rec.dropped = true
+			_count("render methods: stand-ins")
+	for key in by_key:
+		var group: Array = by_key[key]
+		for i in group.size():
+			for j in range(i + 1, group.size()):
+				var a: Dictionary = group[i]
+				var b: Dictionary = group[j]
+				if a.has("dropped") or b.has("dropped") or not a.box.grow(COPY_GAP).intersects(b.box):
+					continue
+				var small: Dictionary = a if a.n <= b.n else b
+				var big: Dictionary = b if small == a else a
+				if not _lies_on(small.mids, big):
+					continue
+				# The smaller is a copy of (part of) the bigger. Only if the bigger lies on it too
+				# are they one thing twice, either of which can go: then the one at home.
+				var drop: Dictionary = small
+				if a.comp != b.comp and absf(a.own - b.own) > COPY_OWN:
+					var away: Dictionary = a if a.own < b.own else b
+					if away == small or _lies_on(big.mids, small):
+						drop = away
+				# (Two copies of the course's road: both stay, the same surface twice.)
+				if drop.road:
+					continue
+				out.get_or_add(drop.comp, {})[drop.rm] = true
+				drop.dropped = true
+				_count("render methods: copies")
+	return out
+
+
+## Whether COPY_SHARE of `points` are within COPY_GAP of `rec`'s triangles.
+func _lies_on(points: PackedVector3Array, rec: Dictionary) -> bool:
+	if not rec.has("grid"):
+		var grid := {}
+		var pos: PackedVector3Array = rec.pos
+		var tris: PackedInt32Array = rec.tris
+		for k in range(0, tris.size(), 3):
+			var box := AABB(pos[tris[k]], Vector3.ZERO).expand(pos[tris[k + 1]]).expand(pos[tris[k + 2]]).grow(COPY_GAP)
+			for x in range(floori(box.position.x / COPY_CELL), floori(box.end.x / COPY_CELL) + 1):
+				for z in range(floori(box.position.z / COPY_CELL), floori(box.end.z / COPY_CELL) + 1):
+					grid.get_or_add(Vector2i(x, z), PackedInt32Array()).append(k)
+		rec.grid = grid
+	var hits := 0
+	for p in points:
+		var cell: PackedInt32Array = rec.grid.get(Vector2i(floori(p.x / COPY_CELL), floori(p.z / COPY_CELL)), PackedInt32Array())
+		for k in cell:
+			if _to_triangle(p, rec.pos[rec.tris[k]], rec.pos[rec.tris[k + 1]], rec.pos[rec.tris[k + 2]]) < COPY_GAP:
+				hits += 1
+				break
+	return hits >= COPY_SHARE * points.size()
+
+
+## The distance from `p` to triangle a b c.
+static func _to_triangle(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> float:
+	var n := (b - a).cross(c - a)
+	if n.length_squared() > 1e-8:
+		n = n.normalized()
+		var q := p - n * n.dot(p - a)
+		var inside := (b - a).cross(q - a).dot(n) >= 0.0 and (c - b).cross(q - b).dot(n) >= 0.0 \
+			and (a - c).cross(q - c).dot(n) >= 0.0
+		if inside:
+			return absf(n.dot(p - a))
+	var d := p.distance_to(Geometry3D.get_closest_point_to_segment(p, a, b))
+	d = minf(d, p.distance_to(Geometry3D.get_closest_point_to_segment(p, b, c)))
+	return minf(d, p.distance_to(Geometry3D.get_closest_point_to_segment(p, c, a)))
+
+
+## A render method's corners and triangles (the strip's, degenerate ones out) and its
+## textures' names as a key: {pos, tris, key}, or {} when it can't be read.
+static func _method_geometry(e: Eagl, rel: Dictionary, rm: int) -> Dictionary:
+	var mc: String = rel.get(rm + 8, "").trim_suffix("__EAGLMicroCode")
+	if not MICROCODES.has(mc):
+		return {}
+	var pairs: Array[Vector2i] = []
+	var a := rm + 0x34
+	while rel.has(a + 4) and a + 8 <= e.data.size():
+		pairs.append(Vector2i(e.u32(a), e.u32(a + 4)))
+		a += 8
+	if pairs.size() < 3:
+		return {}
+	var key := mc
+	for k in pairs.size() - 2:
+		if e.symbol_at(pairs[k].y).begins_with("__EAGL::TAR:::"):
+			key += " " + e.data.slice(pairs[k].y + 4, pairs[k].y + 8).get_string_from_ascii()
+	var vb := pairs[pairs.size() - 2]
+	var ib := pairs[pairs.size() - 1]
+	var stride: int = MICROCODES[mc][0]
+	if vb.x == 0 or vb.y + vb.x * stride > e.data.size() or ib.y + ib.x * 2 > e.data.size():
+		return {}
+	var w := stride / 4
+	var f := e.data.slice(vb.y, vb.y + vb.x * stride).to_float32_array()
+	var pos := PackedVector3Array()
+	pos.resize(vb.x)
+	for k in vb.x:
+		pos[k] = Vector3(f[k * w], f[k * w + 1], f[k * w + 2])
+	var tris := PackedInt32Array()
+	for k in ib.x - 2:
+		var i0 := e.data.decode_u16(ib.y + k * 2)
+		var i1 := e.data.decode_u16(ib.y + k * 2 + 2)
+		var i2 := e.data.decode_u16(ib.y + k * 2 + 4)
+		if i0 != i1 and i1 != i2 and i0 != i2 and i0 < vb.x and i1 < vb.x and i2 < vb.x:
+			tris.append_array([i0, i1, i2])
+	if tris.is_empty():
+		return {}
+	return {"pos": pos, "tris": tris, "key": key}
 
 
 ## The render methods of an EAGL object's models in the order they draw them (each

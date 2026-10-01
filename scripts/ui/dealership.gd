@@ -2,10 +2,11 @@ class_name Dealership
 extends BrowserBase
 ## Every car, the way Gran Turismo 2 sells them: by maker, not by game. One screen for both
 ## the race's car and the career's garage.
-##   the makers    a grid of their badges (NFS3's own wordmarks where it has them), grouped by
-##                 country; in the career "My garage" first. Pointing at a maker shows its car
-##                 you last looked at (or the one in use).
-##   a maker       its models from every game, each tagged with the game; a maker with many
+##   the makers    on the world map, each where it builds its cars (MakerMap, as the tracks'
+##                 map). Pointing at a maker shows its car you last looked at (or the one in
+##                 use). In the career "My garage" sits in the head (G).
+##   a maker       under its badge (NFS3's own wordmark where it has one) its models from
+##                 every game, each tagged with the game; a maker with many
 ##                 (Porsche Unleashed's) split by model line. Tab / Shift+Tab (or the pad's
 ##                 shoulders) step to the next maker, Esc or Backspace back to the makers.
 ## Typing searches every car at once, by name, maker, country, class, game or drive.
@@ -23,14 +24,15 @@ signal chosen(car: int)           # entering a circuit: race it with this car
 signal transacted                 # bought, sold, upgraded, resprayed or repaired
 
 const GARAGE := "\u0001garage"     # the career's own cars, as a maker of their own
-## Countries in the order the grid shows them, with their makers (by the name shown).
+## Countries with their makers (by the name shown): Tab's order through the makers.
 const COUNTRIES := [
-	["Germany", ["BMW", "Mercedes", "Opel", "Porsche"]],
-	["Italy", ["Ferrari", "Italdesign", "Lamborghini"]],
-	["Great Britain", ["Aston Martin", "Jaguar", "Lister", "Lotus", "McLaren", "Spectre", "Vauxhall"]],
-	["United States", ["Chevrolet", "Dodge", "Ford", "Pontiac"]],
+	["Germany", ["Audi", "BMW", "Mercedes", "Opel", "Porsche", "RUF", "Volkswagen"]],
+	["Italy", ["Alfa Romeo", "Ferrari", "Fiat", "Italdesign", "Lamborghini", "Lancia"]],
+	["France", ["Citroen", "Peugeot", "Renault", "Venturi"]],
+	["Great Britain", ["Aston Martin", "Jaguar", "Lister", "Lotus", "McLaren", "Rover", "Spectre", "TVR", "Vauxhall"]],
+	["United States", ["Chevrolet", "Dodge", "Ford", "Plymouth", "Pontiac", "Shelby", "Vector"]],
 	["Australia", ["HSV"]],
-	["Japan", ["Nissan"]],
+	["Japan", ["Acura", "Daihatsu", "Honda", "Isuzu", "Mazda", "Mitsubishi", "Nissan", "Subaru", "Suzuki", "Tommykaira", "Toyota"]],
 ]
 const SPECIALS := "Specials"      # EA's own and the police's, after the countries
 ## The car files' makes, as their makers are shown here.
@@ -40,8 +42,6 @@ const LOGO_SHEETS := [["Aston Martin", "Lamborghini", "Chevrolet", "Mercedes", "
 	["Ford", "HSV", "Ferrari", "Lister", "Spectre"]]
 const LINE_SPLIT := 12            # a maker with more models than this is split by model line
 
-const TILE_H := 76.0
-const TILE_GAP := 8.0
 const ROW_H := 40.0               # a race's row
 const CAREER_ROW_H := 50.0        # a career's: with where it gets you under the name
 const DETAIL_H := 140.0
@@ -50,7 +50,7 @@ const HS_CLASSES := ["AAA", "AA", "A", "B"]
 const SORT_MODEL := 0             # by model line (the maker's own order)
 ## The figures' columns: [heading, width]. Sorts 1.. are these.
 const COLS := [["POWER", 52.0], ["TOP", 58.0], ["0-100", 50.0], ["WEIGHT", 62.0]]
-const GAME_TAGS := ["NFS III", "HS", "PU", "HP2"]
+const GAME_TAGS := ["NFS III", "HS", "PU", "HP2", "GEN", "GT2"]
 
 static var _logos := {}           # maker -> Texture2D (silvered)
 static var _logos_read := false
@@ -64,11 +64,13 @@ var paint_names: Callable
 var sort := SORT_MODEL
 var desc := false
 
-var _brand := ""                  # the maker open ("" the grid of them)
+var _brand := ""                  # the maker open ("" the map of them)
+var _maker_map: MakerMap
+var _makers: Array = []           # the map's items: [{brand, cars, in_use, tag}]
 var _lead := {}                   # maker -> the car of it last looked at
 var _meta := {}                   # car index -> what's listed and drawn of it (_read_car)
 var _col_x: Array[float] = []     # the figures' right edges, list space
-var _head_hover := -3             # -4 the way back, -2 the model heading, 0.. a figure
+var _head_hover := -3             # -5 my garage, -4 the way back, -2 the model heading, 0.. a figure
 var _events := {}                 # car -> [events still to win it may enter, of those none of yours may]
 var _paint_try := -1              # a paint of yours being tried on (-1 none)
 var _buttons: Array = []          # [Rect2, Callable, ok] of the foot's buttons, as last drawn
@@ -83,6 +85,14 @@ func _init() -> void:
 	title = "DEALERS"
 	noun = "cars"
 	filters.visible = false
+	hover_previews = false
+	_maker_map = MakerMap.new()
+	_maker_map.focus_changed.connect(_on_map_focus)
+	_maker_map.previewed.connect(func(k: int): previewed.emit(_maker_lead(k)))
+	_maker_map.confirmed.connect(func(k: int): _open_brand(_makers[k].brand))
+	_maker_map.cancelled.connect(_cancel)
+	add_child(_maker_map)
+	move_child(_maker_map, 0)
 
 
 func open(item: int) -> void:
@@ -92,15 +102,15 @@ func open(item: int) -> void:
 		for i in Game.cars.size():
 			_meta[i] = _read_car(i)
 	_count_events()
-	# On the maker of the car in use; in the career on your cars (those that fit) if any.
+	# A race's on the map (on the maker of the car in use); the career's on your cars (those
+	# that fit) if any.
 	var listed := _listed_cars()
 	_brand = ""
 	sort = SORT_MODEL
 	desc = false
+	_maker_map.close()
 	if career and listed.any(func(i: int) -> bool: return Game.owns(i)):
 		_brand = GARAGE
-	elif item in listed:
-		_brand = _meta[item].brand
 	total = listed.size()
 	super(item if item in listed else (listed[0] if not listed.is_empty() else -1))
 	# Not the car on show (one this event doesn't take): this one is.
@@ -109,8 +119,10 @@ func open(item: int) -> void:
 	changed.emit()
 
 
-## The car in focus (-1 none); on the makers, the one their focused badge shows.
+## The car in focus (-1 none); on the map, the one the maker in focus shows.
 func car() -> int:
+	if at_makers():
+		return _maker_lead(_maker_map.focused_item())
 	return focused_item()
 
 
@@ -125,6 +137,10 @@ func at_makers() -> bool:
 ## The maker open ("" none), as its name.
 func brand_name(b := _brand) -> String:
 	return "My garage" if b == GARAGE else b
+
+
+func _maker_lead(k: int) -> int:
+	return _lead_of(_makers[k].brand, _makers[k].cars) if k >= 0 and k < _makers.size() else -1
 
 
 # ------------------------------------------------------------------ the cars
@@ -204,7 +220,7 @@ func _cars_of(b: String, listed: Array) -> Array:
 	return listed.filter(func(i: int) -> bool: return _meta[i].brand == b)
 
 
-## The makers with cars here, in the grid's order (your garage first, then by country).
+## The makers with cars here, your garage first, then by country (Tab's order).
 func _brands(listed: Array) -> Array:
 	var have := {}
 	for i in listed:
@@ -260,7 +276,6 @@ func _ordered(b: String, cars: Array) -> Array:
 func _build_entries() -> Array[Dictionary]:
 	var listed := _listed_cars()
 	total = listed.size()
-	grid = at_makers()
 	var out: Array[Dictionary] = []
 	if query != "":
 		# Every car that matches, under its maker.
@@ -273,15 +288,7 @@ func _build_entries() -> Array[Dictionary]:
 				out.append({"item": i, "text": Game.cars[i].name})
 		return out
 	if _brand == "":
-		var last := ""
-		for b in _brands(listed):
-			var cars := _cars_of(b, listed)
-			var head: String = "Yours" if b == GARAGE else _meta[cars[0]].country
-			if head != last:
-				last = head
-				out.append({"item": -1, "text": head})
-			out.append({"item": _lead_of(b, cars), "text": brand_name(b), "tile": b, "cars": cars})
-		return out
+		return out   # (the map has them)
 	var cars := _cars_of(_brand, listed)
 	if cars.is_empty():
 		return out
@@ -300,7 +307,7 @@ func _haystack(i: int) -> String:
 	var g: int = mt.group
 	return ("%s %s %s %s %s %s %s %d" % [Game.cars[i].name, mt.brand, mt.make, mt.country,
 		"police pursuit" if g == 4 else "class " + "abcx"[g], ["nfs3 hot pursuit", "high stakes hs nfs4",
-		"porsche unleashed pu nfs5", "hot pursuit 2 hp2 nfs6"][Game.car_game(i)], mt.drive, mt.year]).to_lower()
+		"porsche unleashed pu nfs5", "hot pursuit 2 hp2 nfs6", "generated procedural", "gran turismo 2 gt2"][Game.car_game(i)], mt.drive, mt.year]).to_lower()
 
 
 ## A maker's cars in the order chosen: its own, or by a figure.
@@ -335,24 +342,6 @@ func _layout_entries(w: float) -> float:
 		_col_x.push_front(x)
 		x -= COLS[k][1]
 	var y := 4.0
-	if grid:
-		var cols := 3 if w >= 470.0 else 2
-		var tw := (w - 14 - TILE_GAP * (cols - 1)) / cols
-		var c := 0
-		for e in entries:
-			if e.item < 0:
-				if c > 0:
-					y += TILE_H + TILE_GAP
-				c = 0
-				e.rect = Rect2(0, y, w - 14, 32)
-				y += 36
-				continue
-			e.rect = Rect2(c * (tw + TILE_GAP), y, tw, TILE_H)
-			c += 1
-			if c == cols:
-				c = 0
-				y += TILE_H + TILE_GAP
-		return y + (TILE_H if c > 0 else 0.0) + 12.0
 	var rh := CAREER_ROW_H if career else ROW_H
 	for e in entries:
 		var h := 32.0 if e.item < 0 else rh
@@ -382,23 +371,58 @@ func _open_brand(b: String) -> void:
 	changed.emit()
 
 
-## Back to the makers, on the one just left.
+## Back to the map, on the maker just left (from your garage, the car's maker).
 func _up() -> void:
-	var was := _brand
-	if focused_item() >= 0:
-		_lead[was] = focused_item()
+	var was := focused_item()
+	if was >= 0:
+		_lead[_brand] = was
+		_lead[_meta[was].brand] = was
 	_brand = ""
 	_layout()
 	_rebuild(-1)
-	for k in entries.size():
-		if entries[k].get("tile", "") == was:
-			focus = k
-			if current != entries[k].item:
-				current = entries[k].item
-				focus_changed.emit(current)
-	_ensure_visible()
-	_scroll = _scroll_to
-	_list.queue_redraw()
+	if car() >= 0 and car() != was:
+		current = car()
+		focus_changed.emit(current)
+	queue_redraw()
+	changed.emit()
+
+
+## Shows the map while it's the makers (not a maker, not a search), on the maker of the car
+## last in focus.
+func _sync_map() -> void:
+	var on := at_makers() and visible
+	_list.visible = not on
+	if on and not _maker_map.visible:
+		var listed := _listed_cars()
+		_makers = []
+		var brand: String = _meta[current].brand if current >= 0 and _meta.has(current) else ""
+		var at := 0
+		for b in _brands(listed):
+			if b == GARAGE:
+				continue
+			var cars := _cars_of(b, listed)
+			if b == brand:
+				at = _makers.size()
+			_makers.append({"brand": b, "cars": cars, "in_use": not career and picked in cars, "tag": _maker_tag(cars)})
+		_maker_map.set_makers(_makers)
+		_maker_map.open(at)
+	elif not on and _maker_map.visible:
+		_maker_map.close()
+
+
+## After a maker's name on the map: how many cars; in the career how many are yours.
+func _maker_tag(cars: Array) -> String:
+	var n := cars.size()
+	var yours := cars.filter(func(i: int) -> bool: return Game.owns(i)).size() if career else 0
+	return "%d YOURS" % yours if yours > 0 else "%d CAR%s" % [n, "" if n == 1 else "S"]
+
+
+## The map's focus moved: its maker's car is the one on show.
+func _on_map_focus(_k: int) -> void:
+	var i := car()
+	if i >= 0:
+		current = i
+		focus_changed.emit(i)
 	queue_redraw()
 	changed.emit()
 
@@ -416,7 +440,7 @@ func _step_brand(dir: int) -> void:
 func _set_focus(k: int) -> void:
 	super(k)
 	_paint_try = -1
-	if not grid and focused_item() >= 0 and query == "":
+	if focused_item() >= 0 and query == "":
 		_lead[_brand] = focused_item()
 	queue_redraw()
 	changed.emit()
@@ -424,6 +448,7 @@ func _set_focus(k: int) -> void:
 
 func _rebuild(keep := -2) -> void:
 	super(keep)
+	_sync_map()
 	queue_redraw()
 	changed.emit()
 
@@ -431,9 +456,6 @@ func _rebuild(keep := -2) -> void:
 func _confirm() -> void:
 	var k := focus
 	if k < 0 or k >= entries.size() or entries[k].item < 0:
-		return
-	if entries[k].has("tile"):
-		_open_brand(entries[k].tile)
 		return
 	if query != "":
 		# A car found: its maker is where it's chosen from.
@@ -466,7 +488,7 @@ func _side_step(dir: int, shift := false, ctrl := false) -> void:
 
 func hints() -> Array:
 	if at_makers():
-		return [["↑↓←→", "MAKER"], ["ENTER", "VISIT"], ["", "TYPE TO SEARCH"] if not career else ["ESC", "BACK"]]
+		return _maker_map.hints() + ([["G", "MY GARAGE"]] if _has_garage() else [["", "TYPE TO SEARCH"]] if not career else [])
 	var h := [["↑↓", "BROWSE"], ["TAB", "NEXT MAKER"], ["ESC", "MAKERS"], ["←→", "PAINT"]]
 	if not career:
 		h.append(["SHIFT ←→", "TRIM"])
@@ -489,13 +511,15 @@ func _unhandled_input(e: InputEvent) -> void:
 				done = query == "" and _brand != ""
 				if done:
 					_up()
-			KEY_U when career:
+			KEY_G when _has_garage() and at_makers():
+				_open_brand(GARAGE)
+			KEY_U when career and not at_makers():
 				upgrade()
-			KEY_R when career:
+			KEY_R when career and not at_makers():
 				repair()
-			KEY_P when career:
+			KEY_P when career and not at_makers():
 				respray()
-			KEY_S when career:
+			KEY_S when career and not at_makers():
 				sell()
 			_:
 				done = false
@@ -516,22 +540,25 @@ func _unhandled_input(e: InputEvent) -> void:
 				_step_brand(-1 if pad.button_index == JOY_BUTTON_LEFT_SHOULDER else 1)
 			get_viewport().set_input_as_handled()
 			return
-		if career and pad.button_index == JOY_BUTTON_X:
+		if career and pad.button_index == JOY_BUTTON_X and not at_makers():
 			upgrade()
 			get_viewport().set_input_as_handled()
 			return
 		if career and pad.button_index == JOY_BUTTON_Y:
-			repair()
+			if at_makers():
+				if _has_garage():
+					_open_brand(GARAGE)
+			else:
+				repair()
 			get_viewport().set_input_as_handled()
 			return
 	super(e)
 
 
-## In the career a click picks a car out and a second does what Enter does (buys it, say);
-## in a race one click uses it.
+## A click picks a car out (puts it on show) and a second on it does what Enter does (races
+## it, buys it, say): browsing never takes a car by itself.
 func _on_list_input(e: InputEvent) -> void:
-	if career and e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT \
-			and not grid and query == "":
+	if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT and not grid:
 		var k := _entry_at(e.position)
 		if k >= 0 and entries[k].item != current:
 			focus = -1
@@ -566,7 +593,9 @@ func _gui_input(e: InputEvent) -> void:
 		accept_event()
 		return
 	var h := _head_at(e.position)
-	if h == -4:
+	if h == -5:
+		_open_brand(GARAGE)
+	elif h == -4:
 		_up()
 	elif h == -2:
 		sort = SORT_MODEL
@@ -605,8 +634,8 @@ func _process(dt: float) -> void:
 ## What Enter does, for the main button ("" nothing).
 func primary_text() -> String:
 	if at_makers():
-		var k := focus
-		return ("VISIT " + brand_name(entries[k].tile).to_upper()) if k >= 0 and k < entries.size() and entries[k].has("tile") else ""
+		var k := _maker_map.focused_item()
+		return "VISIT " + str(_makers[k].brand).to_upper() if k >= 0 and k < _makers.size() else ""
 	var i := car()
 	if i < 0:
 		return ""
@@ -631,7 +660,9 @@ func primary_ok() -> bool:
 
 func primary() -> void:
 	if at_makers():
-		_confirm()
+		var k := _maker_map.focused_item()
+		if k >= 0 and k < _makers.size():
+			_open_brand(_makers[k].brand)
 		return
 	var i := car()
 	if i < 0:
@@ -756,7 +787,21 @@ func _layout() -> void:
 	_list.position = Vector2(0, head_h)
 	_list.size = Vector2(size.x, maxf(size.y - head_h - (DETAIL_H if career else 0.0), 40))
 	_layout_list()
+	_maker_map.position = Vector2(0, head_h + 6)
+	_maker_map.size = _list.size - Vector2(0, 6)
+	_sync_map()
 	queue_redraw()
+
+
+## Whether "My garage" is there to open (the career's, with a car of yours that fits).
+func _has_garage() -> bool:
+	return career and _listed_cars().any(func(i: int) -> bool: return Game.owns(i))
+
+
+func _garage_rect() -> Rect2:
+	var label := "MY GARAGE  ·  %d" % _cars_of(GARAGE, _listed_cars()).size()
+	var bw := UiKit.key_width("G", 12) + UiKit.text_width("cond", label, 14, 1) + 28
+	return Rect2(size.x - bw, 26, bw, 30)
 
 
 ## The head: the way back and the title; the search (a race's); the columns' headings (a
@@ -782,6 +827,8 @@ func _head_rects() -> Dictionary:
 	var out := {}
 	if _brand != "" and query == "":
 		out[-4] = Rect2(-4, 0, 200, 52)
+	if at_makers() and _has_garage():
+		out[-5] = _garage_rect()
 	if not career and not at_makers():
 		var y := head_h - 26
 		out[-2] = Rect2(0, y, 160, 24)
@@ -814,21 +861,31 @@ func _head_hot() -> bool:
 
 func _draw() -> void:
 	var w := size.x
-	var listed_n := entries.filter(func(en: Dictionary) -> bool: return en.item >= 0 and not en.has("tile")).size()
-	# The way back, then where you are.
-	var crumb := "Dealers" if _brand == "" or query != "" else "‹  Dealers"
-	if _brand != "" and query == "" and _brand != GARAGE:
-		crumb += "  ·  " + (SPECIALS if _brand == "Police" else str(_meta[entries[_next_item(-1, 1)].item].country if _next_item(-1, 1) >= 0 else ""))
-	UiKit.kicker(self, Vector2(0, 14), crumb, w * 0.6, UiKit.INK if _head_hover == -4 else UiKit.ACCENT)
-	var big := "ALL MAKERS" if _brand == "" or query != "" else brand_name().to_upper()
-	if query != "":
-		big = "SEARCH"
-	var tf := UiKit.font("display")
-	var right_w := 0.0
-	var fs := UiKit.fit("display", big, w - right_w - 90, 32, 20)
-	draw_string(tf, Vector2(-2, 50), big, HORIZONTAL_ALIGNMENT_LEFT, w - right_w - 90, fs, UiKit.INK)
-	var tw := minf(tf.get_string_size(big, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x, w - right_w - 90)
-	var n := entries.filter(func(en: Dictionary) -> bool: return en.has("tile")).size() if at_makers() else listed_n
+	var listed_n := entries.filter(func(en: Dictionary) -> bool: return en.item >= 0).size()
+	var in_maker := _brand != "" and query == ""
+	# The way back, then where you are (where the maker builds its cars).
+	var crumb := "‹  Dealers" if in_maker else "Dealers"
+	if in_maker and _brand != GARAGE:
+		crumb += "  ·  " + MakerMap.where(_brand)
+	UiKit.kicker(self, Vector2(0, 14), crumb, w * 0.8, UiKit.INK if _head_hover == -4 else UiKit.ACCENT)
+	var big := "SEARCH" if query != "" else ("ALL MAKERS" if _brand == "" else brand_name().to_upper())
+	var right_w := _garage_rect().size.x + 16 if at_makers() and _has_garage() else 0.0
+	var max_w := w - right_w - 90
+	var tw := 0.0
+	var logo := _logo(_brand) if in_maker else null
+	if logo:
+		# The maker's own badge for its name.
+		var s := minf(34.0 / logo.get_height(), max_w / logo.get_width())
+		draw_texture_rect(logo, Rect2(0, 20, logo.get_width() * s, logo.get_height() * s), false, UiKit.INK)
+		tw = logo.get_width() * s
+	else:
+		var tf := UiKit.font("display")
+		var fs := UiKit.fit("display", big, max_w, 32, 20)
+		draw_string(tf, Vector2(-2, 50), big, HORIZONTAL_ALIGNMENT_LEFT, max_w, fs, UiKit.INK)
+		tw = minf(tf.get_string_size(big, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x, max_w)
+	if right_w > 0.0:
+		_draw_garage_button(_garage_rect())
+	var n := _makers.size() if at_makers() else listed_n
 	var count := "%d %s" % [n, ("maker" if n == 1 else "makers") if at_makers() else ("car" if n == 1 else "cars")]
 	draw_string(UiKit.font("cond", 1, true), Vector2(tw + 10, 49), count, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, UiKit.ACCENT)
 	if career and not circuit.is_empty():
@@ -853,6 +910,16 @@ func _draw() -> void:
 	draw_line(Vector2(0, head_h - 1), Vector2(w, head_h - 1), UiKit.LINE, 1.0)
 	if career:
 		_draw_detail(Rect2(0, size.y - DETAIL_H, w, DETAIL_H))
+
+
+## "My garage" on the map's head: its key, its name and how many cars, lit under the pointer.
+func _draw_garage_button(r: Rect2) -> void:
+	var hot := _head_hover == -5
+	var ink := UiKit.ACCENT if hot else UiKit.INK
+	UiKit.box(self, r, Color(1, 1, 1, 0.08 if hot else 0.04), 4, Color(UiKit.ACCENT, 0.7 if hot else 0.35), 1)
+	var kw := UiKit.draw_key(self, Vector2(r.position.x + 8, r.get_center().y), "G", 12, ink)
+	draw_string(UiKit.font("cond", 1), Vector2(r.position.x + 16 + kw, r.get_center().y + 5),
+		"MY GARAGE  ·  %d" % _cars_of(GARAGE, _listed_cars()).size(), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, ink)
 
 
 func _draw_search(sr: Rect2) -> void:
@@ -898,68 +965,10 @@ func _draw_columns() -> void:
 
 
 func _draw_entry(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered: bool) -> void:
-	if e.has("tile"):
-		_draw_tile(ci, e, r, focused, hovered)
-	elif career:
+	if career:
 		_draw_career_row(ci, e.item, r, focused, hovered)
 	else:
 		_draw_race_row(ci, e.item, r, focused, hovered)
-
-
-## A maker's badge: its wordmark (or name), how many cars, and in the career what's yours
-## and the cheapest to buy.
-func _draw_tile(ci: CanvasItem, e: Dictionary, r: Rect2, focused: bool, hovered: bool) -> void:
-	var b: String = e.tile
-	var cars: Array = e.cars
-	var mine := b == GARAGE
-	var in_use := not career and picked in cars
-	UiKit.box(ci, r, Color(1, 1, 1, 0.07 if focused else (0.05 if hovered else 0.03)), 4,
-		UiKit.ACCENT if focused else Color(1, 1, 1, 0.16 if hovered else 0.07), 2 if focused else 1)
-	if focused:
-		UiKit.glow(ci, r.grow(-2), 0.8, UiKit.ACCENT, false)
-	var ink := UiKit.INK if focused or hovered else Color(UiKit.INK, 0.8)
-	var art := Rect2(r.position.x + 12, r.position.y + 8, r.size.x - 24, r.size.y - 32)
-	var logo := _logo(b)
-	if logo:
-		var s := minf(art.size.x / logo.get_width(), art.size.y / logo.get_height())
-		var sz := Vector2(logo.get_width(), logo.get_height()) * s
-		ci.draw_texture_rect(logo, Rect2(art.position + Vector2(0, (art.size.y - sz.y) * 0.5), sz), false, ink)
-	else:
-		var name := brand_name(b).to_upper()
-		var fs := UiKit.fit("display", name, art.size.x, 22, 13)
-		ci.draw_string(UiKit.font("display"), Vector2(art.position.x, art.get_center().y + fs * 0.36), name,
-			HORIZONTAL_ALIGNMENT_LEFT, art.size.x, fs, UiKit.ACCENT if mine else ink)
-	# The foot: how many, and what's of note.
-	var f := UiKit.font("cond", 1)
-	var y := r.end.y - 10
-	var x := r.position.x + 12
-	var w := r.size.x - 24
-	ci.draw_string(f, Vector2(x, y), "%d CAR%s" % [cars.size(), "" if cars.size() == 1 else "S"], HORIZONTAL_ALIGNMENT_LEFT,
-		w, 11, UiKit.INK_DIM)
-	var note := ""
-	var note_col := UiKit.INK_DIM
-	if in_use:
-		note = "IN USE"
-		note_col = UiKit.ACCENT
-	elif career and not mine:
-		var owned_n := cars.filter(func(i: int) -> bool: return Game.owns(i)).size()
-		var sale := cars.filter(func(i: int) -> bool: return not Game.owns(i))
-		if owned_n > 0:
-			note = "%d YOURS" % owned_n
-			note_col = UiKit.ACCENT
-		elif _moneyed() and not sale.is_empty():
-			var low: int = sale.map(func(i: int) -> int: return Game.career_price(i)).min()
-			note = "FROM " + UiKit.money(low)
-			note_col = UiKit.INK if low <= Game.career_money else Color(UiKit.COP_RED, 0.85)
-	elif not career:
-		var games := PackedStringArray()
-		for g in 4:
-			if cars.any(func(i: int) -> bool: return Game.car_game(i) == g):
-				games.append(GAME_TAGS[g])
-		note = " · ".join(games)
-		note_col = UiKit.INK_FAINT
-	if note != "":
-		ci.draw_string(f, Vector2(x, y), note, HORIZONTAL_ALIGNMENT_RIGHT, w, 11, note_col)
 
 
 ## The class badge and the name with its year and tags, shared by both kinds of row; returns
@@ -1092,18 +1101,17 @@ func _draw_detail(r: Rect2) -> void:
 		return
 	var lines := []   # [label, value, colour, pips (int) or null, button or []]
 	if at_makers():
-		var k := focus
-		var b: String = entries[k].tile if k >= 0 and k < entries.size() and entries[k].has("tile") else ""
-		if b == "":
+		var k := _maker_map.focused_item()
+		if k < 0 or k >= _makers.size():
 			return
-		var cars: Array = entries[k].cars
+		var cars: Array = _makers[k].cars
 		var sale := cars.filter(func(c: int) -> bool: return not Game.owns(c))
 		var yours := cars.size() - sale.size()
 		lines.append(["Yours", "%d car%s" % [yours, "" if yours == 1 else "s"] if yours > 0 else "None yet", UiKit.INK, null, []])
 		if not sale.is_empty() and _moneyed():
 			var prices := sale.map(func(c: int) -> int: return Game.career_price(c))
-			lines.append(["For sale", "%d · %s to %s" % [sale.size(), UiKit.money(prices.min()), UiKit.money(prices.max())],
-				UiKit.INK, null, []])
+			var span := UiKit.money(prices.min()) + ("" if prices.min() == prices.max() else " to " + UiKit.money(prices.max()))
+			lines.append(["For sale", "%d · %s" % [sale.size(), span], UiKit.INK, null, []])
 		var fits := cars.filter(func(c: int) -> bool: return _events.get(c, [0, 0])[1] > 0).size()
 		if fits > 0:
 			lines.append(["New events", "%d of its cars open one" % fits, UiKit.GOOD, null, []])

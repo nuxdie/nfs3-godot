@@ -9,7 +9,8 @@ const ROW_H := 46.0
 const BANDS := 28
 const SECTIONS := [["NEED FOR SPEED III", "RACES"], ["NEED FOR SPEED III", "MENUS"], ["HIGH STAKES", "RACES"],
 	["HIGH STAKES", "MENUS"], ["PORSCHE UNLEASHED", "RACES"], ["PORSCHE UNLEASHED", "MENUS"],
-	["HOT PURSUIT 2", "RACES"], ["HOT PURSUIT 2", "MENUS"]]
+	["HOT PURSUIT 2", "RACES"], ["HOT PURSUIT 2", "MENUS"], ["GENERATED", "RACES"], ["GENERATED", "MENUS"],
+	["GRAN TURISMO 2", "RACES"], ["GRAN TURISMO 2", "MENUS"]]
 
 var songs: Array[String] = []   # items: every song there is, in the sections' order
 ## Where the card with what's playing goes, in panel space (the menu sets it).

@@ -191,6 +191,7 @@ var shift_blip := PackedFloat32Array()   # [5] rpm the engine keeps over the new
 var brake_blip := PackedFloat32Array()   # [6] rpm blipped over the new gear on a braking downshift
 var front_drive := 0.0     # [16] share of the drive on the front wheels (0.5 = four-wheel drive)
 var has_abs := true        # [17]
+var has_abs_rear := true   # [17]'s second value where a car has one (Hot Pursuit 2's per axle), else the same
 var brake_front := 0.55    # [19] + brake balance [61]
 var gas_up := PackedFloat32Array()       # [20] per gear, pedal steps per tick
 var gas_down := PackedFloat32Array()     # [21]
@@ -374,6 +375,10 @@ const REAR_MIRROR_RIM := 0.008
 const REAR_MIRROR_DEPTH := 0.03
 const REAR_MIRROR_DROP := 0.065
 const REAR_MIRROR_BACK := 0.075
+## ...unless the view back from there is walled off (see _rear_view_share): less than this
+## share of it gets further than REAR_VIEW_REACH (m) through the cabin.
+const REAR_VIEW_MIN_SHARE := 0.25
+const REAR_VIEW_REACH := 2.0
 ## How far Porsche Unleashed's speedo and rev needles sweep, full scale (turns): the files
 ## don't say; their dials run about three quarters of the way round.
 const CABIN_NEEDLE_TURNS := 0.75
@@ -449,6 +454,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			paint = data.colours[0] if data.colours.size() > 0 else Color.WHITE
 		sm.set_shader_parameter("paint", paint)
 		sm.set_shader_parameter("interior_paint", _interior_of(paint))
+		_paint_skin(sm, data, paint)
 		mat = sm
 		_skin_mat = sm
 		_paint = paint
@@ -464,7 +470,8 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 	if data.texture:
 		driver_mat = ShaderMaterial.new()
 		driver_mat.shader = Game.shader("res://shaders/car_driver.gdshader")
-		driver_mat.set_shader_parameter("albedo_tex", data.texture)
+		# (Hot Pursuit 2's driver has a texture of his own.)
+		driver_mat.set_shader_parameter("albedo_tex", data.driver_texture if data.get("driver_texture") else data.texture)
 		driver_mat.set_shader_parameter("paint", _paint)
 		_driver_mat = driver_mat
 	for p in data.body_parts:
@@ -484,6 +491,7 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 				cm.set_shader_parameter("clarity", p.clarity)
 				mi.material_override = cm
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.set_meta("glass", true)
 		elif p.get("driver", false) and driver_mat:
 			mi.material_override = driver_mat
 		elif mat:
@@ -835,6 +843,7 @@ func _load_spec(data: Object) -> void:
 	brake_blip = _table(carp, [6], [0.0])
 	front_drive = clampf(data.carp_value(16, 0.0), 0.0, 1.0)
 	has_abs = data.carp_value(17, 1.0) != 0.0
+	has_abs_rear = data.carp_value(17, float(has_abs), 1) != 0.0
 	brake_front = clampf(data.carp_value(19, 0.55) + data.carp_value(61, 0.0), 0.2, 0.8)
 	gas_up = _table(carp, [20], [16.0])
 	gas_down = _table(carp, [21], [32.0])
@@ -934,8 +943,8 @@ func set_aids(abs_setting: Abs, tc: bool, stab: Stability) -> void:
 	_tc_cut = 1.0
 
 
-func _abs_on() -> bool:
-	return stability == Stability.ESC or abs_mode == Abs.ON or (abs_mode == Abs.CAR and has_abs)
+func _abs_on(front: bool) -> bool:
+	return stability == Stability.ESC or abs_mode == Abs.ON or (abs_mode == Abs.CAR and (has_abs if front else has_abs_rear))
 
 
 func set_manual(on: bool) -> void:
@@ -1545,7 +1554,19 @@ func set_paint(tint: Color) -> void:
 			m.set_shader_parameter("paint", c)
 			if m.get_shader_parameter("interior_paint") != null:
 				m.set_shader_parameter("interior_paint", _interior_of(c))
+			_paint_skin(m, car_data, c)
 			done[m] = true
+
+
+## Gran Turismo 2's cars have a texture per paint (its two-tones and liveries): the one for
+## `paint` (one of the car's colours) goes on the skin's material, untinted.
+static func _paint_skin(m: ShaderMaterial, data: Object, paint: Color) -> void:
+	if data == null or not data.has_method("paint_texture"):
+		return
+	var tex: Texture2D = data.paint_texture(maxi(data.colours.find(paint), 0))
+	if tex:
+		m.set_shader_parameter("albedo_tex", tex)
+		m.set_shader_parameter("paint", Color.WHITE)
 
 
 ## The cabin colour that goes with `paint`, one of the car's colours (Porsche Unleashed's
@@ -2066,7 +2087,6 @@ func _physics_process(dt: float) -> void:
 			esc_cut = 1.0 - clampf((absf(err) - ESC_CUT_ERR) * 2.0, 0.0, 0.7)
 	var tc_need := 1.0      # the most of the asked torque the driven tyres could take
 	abs_active = false
-	var abs_on := _abs_on()
 	_abs_phase = fmod(_abs_phase + dt * TAU * ABS_HZ, TAU)
 
 	var space := get_world_3d().direct_space_state
@@ -2176,7 +2196,7 @@ func _physics_process(dt: float) -> void:
 			b = brake_decel * mass * braking * 1.25 * (brake_front if w.front else 1.0 - brake_front) * 0.5
 		if esc_side != 0 and w.front == esc_front and w.left == (esc_side > 0):
 			b += esc_force
-		var abs_now := abs_on and absf(v_long) > ABS_CUTOUT
+		var abs_now := _abs_on(w.front) and absf(v_long) > ABS_CUTOUT
 		if not abs_now and b > max_f and absf(v_long) > 1.0:
 			lat_grip = minf(lat_grip, 0.3)
 		# Lateral: cancel sideways sliding (capped by grip). Nearly stopped it cancels all of it,
@@ -2512,13 +2532,18 @@ func _drop_dash_mirrors() -> void:
 ## leaning glass, until they pass over the car or meet the roof's lining, a jump nearer.
 ## Either glass is taken as turned to show the eye what lies straight behind.
 func _build_rear_mirror(parent: Node3D, space: Node3D, eye: Vector3) -> void:
+	# None in a cabin walled off behind the seats (the CLK-GTR's, the F1 GTR's, the 911 GT1's):
+	# there it would show only the bulkhead. (What looks like a modelled one in them is the
+	# windscreen header's trim.)
+	if _rear_view_share(space, eye) < REAR_VIEW_MIN_SHARE:
+		return
 	var tris := _rear_mirror_tris(space, eye)
+	var model_glass := _model_rear_glass(tris, eye)
 	_rear_mirror = Node3D.new()
 	_rear_mirror.name = "RearMirror"
 	parent.add_child(_rear_mirror)
 	var glass := MeshInstance3D.new()
 	var glass_at: Vector3
-	var model_glass := _model_rear_glass(tris, eye)
 	if not model_glass.is_empty():
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -2605,6 +2630,77 @@ func _rear_mirror_tris(space: Node3D, eye: Vector3) -> PackedVector3Array:
 	return tris
 
 
+## How much of the view straight back through the cabin gets out of the car (0 .. 1): rays
+## from about where a rear-view mirror hangs (`eye` in `space`), a little down, through what
+## the mirror's view draws (the dash's cabin, or a Porsche Unleashed / Hot Pursuit 2 car's own
+## body less its glass), cut-outs in their skins let through as car.gdshader cuts them.
+func _rear_view_share(space: Node3D, eye: Vector3) -> float:
+	var inv := space.global_transform.affine_inverse()
+	var meshes: Array = _dash.find_children("*", "MeshInstance3D", true, false) if _dash \
+		else _body_meshes.filter(func(mi: MeshInstance3D) -> bool: return not mi.has_meta("glass"))
+	var pos := PackedVector3Array()
+	var uv := PackedVector2Array()
+	var see: Array[Callable] = []   # per triangle: (uv) -> whether the skin lets the ray through there
+	var images := {}
+	for mi: MeshInstance3D in meshes:
+		if mi.mesh == null or not mi.is_inside_tree() or not mi.visible:
+			continue
+		var tex: Variant = (mi.get_active_material(0) as ShaderMaterial).get_shader_parameter("albedo_tex") \
+			if mi.get_active_material(0) is ShaderMaterial else null
+		var img: Image
+		if tex is Texture2D:
+			if not images.has(tex):
+				var im := (tex as Texture2D).get_image()
+				if im and im.is_compressed():
+					im.decompress()
+				images[tex] = im
+			img = images[tex]
+		var xf := inv * mi.global_transform
+		for s in mi.mesh.get_surface_count():
+			var a := mi.mesh.surface_get_arrays(s)
+			var v: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var t: PackedVector2Array = a[Mesh.ARRAY_TEX_UV] if a[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
+			var col: PackedColorArray = a[Mesh.ARRAY_COLOR] if a[Mesh.ARRAY_COLOR] != null else PackedColorArray()
+			var idx: PackedInt32Array = a[Mesh.ARRAY_INDEX] if a[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+			var n := idx.size() if not idx.is_empty() else v.size()
+			for k in range(0, n - 2, 3):
+				var ii := [idx[k], idx[k + 1], idx[k + 2]] if not idx.is_empty() else [k, k + 1, k + 2]
+				var p0 := xf * v[ii[0]]
+				var p1 := xf * v[ii[1]]
+				var p2 := xf * v[ii[2]]
+				if minf(p0.z, minf(p1.z, p2.z)) > eye.z + 0.3 or absf(p0.x) > 0.6 and absf(p1.x) > 0.6 and absf(p2.x) > 0.6:
+					continue
+				pos.append_array([p0, p1, p2])
+				for i: int in ii:
+					uv.append(t[i] if i < t.size() else Vector2.ZERO)
+				var b := col[ii[0]].b if ii[0] < col.size() else 0.0
+				see.append(func(at: Vector2) -> bool:
+					if img == null:
+						return false
+					var px := Vector2i(posmod(int(at.x * img.get_width()), img.get_width()), posmod(int(at.y * img.get_height()), img.get_height()))
+					var alpha := img.get_pixelv(px).a
+					return alpha < (0.23 if b < 0.5 else 0.08) or absf(b - 0.25) < 0.1 and absf(alpha - 128.0 / 255.0) < 0.01)
+	var dir := Vector3(0.0, -0.05, -1.0).normalized()
+	var out := 0
+	var rays := 0
+	for dx in [-0.1, 0.0, 0.1]:
+		for dy in [0.05, 0.1, 0.15]:
+			var from := Vector3(dx, eye.y + dy, eye.z + 0.3)
+			rays += 1
+			var blocked := false
+			for i in range(0, pos.size(), 3):
+				var hit: Variant = Geometry3D.ray_intersects_triangle(from, dir, pos[i], pos[i + 1], pos[i + 2])
+				if hit == null or from.distance_to(hit) > REAR_VIEW_REACH:
+					continue
+				var bc := Geometry3D.get_triangle_barycentric_coords(hit, pos[i], pos[i + 1], pos[i + 2])
+				if not see[i / 3].call(uv[i] * bc.x + uv[i + 1] * bc.y + uv[i + 2] * bc.z):
+					blocked = true
+					break
+			if not blocked:
+				out += 1
+	return float(out) / rays
+
+
 ## A Porsche Unleashed cabin's own rear-view mirror glass, as seen from outside (the menu's
 ## showroom reflects on it): {faces, point, normal (facing back)} in the body's space, or {}
 ## where the cabin has none.
@@ -2612,6 +2708,8 @@ func model_rear_glass() -> Dictionary:
 	if not _dash_data.get("own_cabin", false):
 		return {}
 	var eye: Vector3 = _dash_data.eye
+	if _rear_view_share(_body_tilt, eye) < REAR_VIEW_MIN_SHARE:
+		return {}
 	var g := _model_rear_glass(_rear_mirror_tris(_body_tilt, eye), eye)
 	if not g.is_empty():
 		var bn: Vector3 = g.normal

@@ -273,6 +273,13 @@ void fragment() {
 		ALBEDO *= mix(1.0, 0.45, rubber * (1.0 - smoothstep(0.25, 0.5, luma)) * (1.0 - smoothstep(0.05, 0.15, sat)));
 		ROUGHNESS = mix(0.35, 0.9, rubber);
 		SPECULAR = mix(SPECULAR, 0.3, rubber);
+		// Metal by the vertices' finish (COLOR.r, where marked: COLOR.b 0): the generated cars'
+		// alloys and Porsche Unleashed's chrome, polished whatever their texels' alpha.
+		float metal = COLOR.b < 0.5 ? smoothstep(0.55, 0.95, COLOR.r) * (1.0 - paint_area) : 0.0;
+		ALBEDO = mix(ALBEDO, c.rgb, metal);
+		METALLIC = mix(METALLIC, 0.9, metal);
+		ROUGHNESS = mix(ROUGHNESS, mix(0.32, 0.12, smoothstep(0.85, 1.0, COLOR.r)), metal);
+		SPECULAR = mix(SPECULAR, 0.5, metal);
 #ifndef LOW_QUALITY
 		CLEARCOAT = 0.0;
 #endif

@@ -114,7 +114,8 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[PASS_OPAQUE], Nfs3TrackBuilder.DRAW_DISTANCE)
 			rail_mesh = Nfs3TrackBuilder._rail_arrays()
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
-	_add_props(t, geo, see_through, mats)
+	var night_only: Array = root.get_meta("night_only", [])
+	night_only.append_array(_add_props(t, geo, see_through, mats))
 	var particles := PuParticles.build(t, Game.pu_root) if Game.quality != Game.Quality.LOW else null
 	if particles:
 		geo.add_child(particles)
@@ -122,9 +123,8 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 	var glows := PuGlows.build(t, Game.pu_root)
 	if glows:
 		geo.add_child(glows)
-		var night_only: Array = root.get_meta("night_only", [])
 		night_only.append(glows)
-		root.set_meta("night_only", night_only)
+	root.set_meta("night_only", night_only)
 	_add_ground(terrain, t.backdrop[Nfs5Track.Kind.GROUND], SURFACE_GROUND)
 
 	var path := Nfs3TrackBuilder._make_path(t)
@@ -221,6 +221,8 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 				var tex := pc.tex[tri]
 				if (see_through[tex] == 2) != (pass_i == PASS_GLASS):
 					continue
+				# (UV2.y bit 0: the shader's one_sided.)
+				var side := 1.0 if tri < pc.one_sided.size() and pc.one_sided[tri] else 0.0
 				var i := tri * 3
 				var n := (pc.pos[i + 2] - pc.pos[i]).cross(pc.pos[i + 1] - pc.pos[i]).normalized()
 				for k in 3:
@@ -230,7 +232,7 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 					c.a = wet
 					col.append(c)
 					uv.append(pc.uv[i + k])
-					uv2.append(Vector2(tex, 0.0))
+					uv2.append(Vector2(tex, side))
 					var sc := pc.scroll[tri]
 					scroll.append_array([sc.x, sc.y])
 					scrolls = scrolls or sc != Vector2.ZERO
@@ -332,9 +334,11 @@ static func _take_rails(pieces: Array, rail_images: Dictionary, out: Array) -> A
 
 
 ## The animated props (Nfs5Track.props), each a node KeyframeMover loops through its keys
-## (Nfs5Track.ANIM_KEYS_PER_SECOND) with its meshes under it. They're passable.
+## (Nfs5Track.ANIM_KEYS_PER_SECOND) with its meshes and lights' flares (PuGlows) under it.
+## They're passable. The flares, for showing only at night.
 static func _add_props(t: Nfs5Track, geo: Node3D, see_through: PackedByteArray,
-		mats: Array[ShaderMaterial]) -> void:
+		mats: Array[ShaderMaterial]) -> Array:
+	var flares := []
 	for pr: Dictionary in t.props:
 		var node := Node3D.new()
 		node.name = "Prop_" + String(pr.name).validate_node_name()
@@ -346,7 +350,51 @@ static func _add_props(t: Nfs5Track, geo: Node3D, see_through: PackedByteArray,
 		node.set("delay", 1)
 		node.set("tick_rate", Nfs5Track.ANIM_KEYS_PER_SECOND)
 		_add_meshes(node, "Mesh", [pr.piece], see_through, mats, Nfs3TrackBuilder.DRAW_DISTANCE)
+		_add_vertex_frames(node, pr, see_through, mats)
+		var glows := PuGlows.glows(pr.lights, Game.pu_root)
+		if glows:
+			node.add_child(glows)
+			flares.append(glows)
 		geo.add_child(node)
+	return flares
+
+
+## A person's motion (the prop's frames) as a mesh per frame for each of `node`'s meshes,
+## swapped by vertex_frames.gd.
+static func _add_vertex_frames(node: Node3D, pr: Dictionary, see_through: PackedByteArray,
+		mats: Array[ShaderMaterial]) -> void:
+	var targets: Array[MeshInstance3D] = []
+	for c in node.get_children():
+		if c is MeshInstance3D:
+			targets.append(c)
+	if pr.frames.is_empty() or targets.is_empty():
+		return
+	var piece: Nfs5Track.Piece = pr.piece
+	var frames := []
+	for pos: PackedVector3Array in pr.frames:
+		if pos.size() != piece.pos.size():
+			return
+		var pc := Nfs5Track.Piece.new()
+		pc.kind = piece.kind
+		pc.pos = pos
+		pc.uv = piece.uv
+		pc.colour = piece.colour
+		pc.tex = piece.tex
+		pc.scroll = piece.scroll
+		var tmp := Node3D.new()
+		_add_meshes(tmp, "Mesh", [pc], see_through, mats, 0.0)
+		var meshes := tmp.get_children().map(func(m: MeshInstance3D) -> Mesh: return m.mesh)
+		tmp.free()
+		if meshes.size() != targets.size():
+			return
+		frames.append(meshes)
+	var vf := Node.new()
+	vf.name = "Motion"
+	vf.set_script(preload("res://scripts/track/vertex_frames.gd"))
+	vf.set("targets", targets)
+	vf.set("frames", frames)
+	vf.set("fps", Nfs5Track.ANIM_KEYS_PER_SECOND)
+	node.add_child(vf)
 
 
 ## The piece's triangles as a collision shape of `body`, each tagged with its surface and

@@ -46,6 +46,8 @@ const HP2_TRAFFIC_PREFIX := "hp2traffic:"
 ## Its police: the cars whose skin.viv has a police livery (skincop.fsh), with the light bar.
 ## The Crown Victoria, its cruiser, leads.
 const HP2_CRUISER := "crnvic"
+## Gran Turismo 2's cars (from its disc image, Gt2Vol): ids GT2_PREFIX + its five-letter car id.
+const GT2_PREFIX := "gt2_"
 const PROCEDURAL_TRACK := "procedural"
 const SETTINGS_PATH := "user://settings.cfg"
 
@@ -58,6 +60,10 @@ var _hp2_photos: Fsh = null  # its courses' pictures (hp2_track_photo), once rea
 var _hp2_cars := {}          # car path "hp2:<folder>" (or "hp2cop:<folder>") -> its Cars/cars.ini record (Nfs6Car.car_table)
 var hp2_cop_cars: Array[String] = []     # Hot Pursuit 2's police (its cars in police livery) and traffic, for its tracks
 var hp2_traffic_cars: Array[String] = []
+var gt2_image := ""          # Gran Turismo 2's disc image (.bin/.iso) or GT2.VOL, or ""
+var _gt2_vol: Gt2Vol = null
+var _gt2_cars := {}          # car path "gt2:<id>" -> its .carinfoa record (Gt2Car.car_table)
+var _gt2_tracks := {}        # track id -> {course (crsobj/<course>.tro), name, night, dirt, sprint}
 var _pu_cars := {}           # car path "pu:<n>" -> its FeData/Data/nfs5.car record (Nfs5Car.car_table)
 var pu_cop_cars: Array[String] = []      # Porsche Unleashed's police and traffic ("pu:<n>"), for its tracks
 var pu_traffic_cars: Array[String] = []
@@ -85,6 +91,7 @@ var hud_style := 0          # 0 this game's tach; High Stakes' own dials (Classi
 const HUD_WIDGETS := {
 	"speed": "Speed", "standings": "Standings", "police": "Police", "lap": "Lap", "map": "Map",
 	"mirror": "Mirror", "messages": "Messages", "countdown": "Countdown", "lights": "Light bar", "hints": "Key hints",
+	"banter": "Rival banter",
 }
 var hud_on := true          # the whole HUD (F1 in a race)
 var hud_hidden: Array[String] = []   # HUD_WIDGETS ids turned off
@@ -217,6 +224,18 @@ func candidate_hp2_roots() -> PackedStringArray:
 	])
 
 
+## Where a Gran Turismo 2 disc image may be (a file, or a folder holding one), first match wins.
+func candidate_gt2_images() -> PackedStringArray:
+	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var out := PackedStringArray([OS.get_environment("GT2_DATA")])
+	var d := DirAccess.open(res.get_base_dir())
+	if d:
+		for f in d.get_directories():
+			if f.to_lower().begins_with("gran turismo 2"):
+				out.append(res.get_base_dir().path_join(f))
+	return out
+
+
 func scan_data() -> void:
 	tracks.clear()
 	cars.clear()
@@ -265,10 +284,12 @@ func scan_data() -> void:
 			break
 	_scan_hp2_cars()
 	_scan_hp2_tracks()
+	_scan_gt2_cars()
+	_scan_gt2_tracks()
 	tracks.append(PROCEDURAL_TRACK)
-	if cars.is_empty():
-		for i in ProceduralCar.PRESETS.size():
-			cars.append({"id": "proc%d" % i, "name": ProceduralCar.PRESETS[i].name, "path": ""})
+	# The generated cars, after the games' (all there is without one).
+	for i in ProceduralCar.PRESETS.size():
+		cars.append({"id": "proc%d" % i, "name": ProceduralCar.PRESETS[i].name, "path": ProceduralCar.PATH_PREFIX + str(i)})
 	if track_id not in tracks:
 		track_id = tracks[0]
 	for i in cars.size():
@@ -422,6 +443,80 @@ func _scan_hp2_cars() -> void:
 				hp2_cop_cars.append("hp2cop:" + folder)
 
 
+## Gran Turismo 2's cars join the list after Hot Pursuit 2's, in .carinfoa's order.
+func _scan_gt2_cars() -> void:
+	_gt2_cars.clear()
+	var images := PackedStringArray([gt2_image]) + candidate_gt2_images()
+	gt2_image = ""
+	_gt2_vol = null
+	for r in images:
+		var f := Gt2Vol.find_image(r) if r != "" and DirAccess.dir_exists_absolute(r) else r
+		if f != "" and FileAccess.file_exists(f):
+			_gt2_vol = Gt2Vol.open(f)
+			if _gt2_vol:
+				gt2_image = f
+				break
+	Gt2Track.vol = _gt2_vol
+	if _gt2_vol == null:
+		return
+	for rec in Gt2Car.car_table(_gt2_vol):
+		_gt2_cars["gt2:" + rec.id] = rec
+		cars.append({"id": GT2_PREFIX + rec.id, "name": rec.name, "path": "gt2:" + rec.id})
+
+
+## Gran Turismo 2's courses (.crsinfo: "CRS", u16 version, u16 count, then 24 bytes each:
+## its name's offset, its file's hash, flags (night, evening, dirt, 2 players, reverse, point
+## to point), skybox...), in its order: the races' courses, one way round (the reverse
+## option runs them the other), not the two-player, license and test ones.
+func _scan_gt2_tracks() -> void:
+	_gt2_tracks.clear()
+	if _gt2_vol == null:
+		return
+	var d := _gt2_vol.read(".crsinfo")
+	if d.size() < 8 or d.slice(0, 3).get_string_from_ascii() != "CRS":
+		return
+	var files := {}
+	for f in _gt2_vol.list("crsobj"):
+		if f.ends_with(".tro.gz"):
+			var stem := f.trim_suffix(".tro.gz")
+			files[_gt2_course_hash(stem)] = stem
+	var seen := {}
+	var all: Array[Dictionary] = []
+	for i in d.decode_u16(6):
+		var p := 8 + i * 24
+		var at := d.decode_u32(p)
+		var name := d.slice(at, d.find(0, at)).get_string_from_utf8() if at < d.size() else ""
+		var course: String = files.get(d.decode_u32(p + 4), "")
+		var flags := d[p + 8]
+		if course == "" or name == "" or flags & 0x08 or name.begins_with("L_") or name[0] == name[0].to_lower():
+			continue
+		all.append({"course": course, "name": name, "night": flags & 0x01 != 0, "dirt": flags & 0x04 != 0,
+			"reverse": flags & 0x10 != 0, "sprint": flags & 0x20 != 0})
+		if not flags & 0x10:
+			seen[name] = true
+	for c in all:
+		# (A reverse layout of a course listed forwards is the reverse option's.)
+		if c.reverse and seen.has(c.name):
+			continue
+		var id: String = GT2_PREFIX + (c.course as String).to_lower()
+		_gt2_tracks[id] = c
+		tracks.append(id)
+
+
+## A course file's hash in .crsinfo (pez2k's TrackNameConversion): each character added
+## after rotating the sum left 6 bits.
+static func _gt2_course_hash(s: String) -> int:
+	var h := 0
+	for b in s.to_ascii_buffer():
+		h = (((h << 6) | (h >> 26)) & 0xFFFFFFFF) + b
+		h &= 0xFFFFFFFF
+	return h
+
+
+func is_gt2_track(id: String) -> bool:
+	return _gt2_tracks.has(id)
+
+
 ## High Stakes cars join the list after NFS3's; one NFS3 also has ("Ferrari 550 Maranello")
 ## is marked "HS". Its police cars and traffic are kept for its own tracks.
 func _scan_hs_cars(cdir: String) -> void:
@@ -511,6 +606,8 @@ func is_pu_track(id: String) -> bool:
 ## Whether the track is a point-to-point run (Porsche Unleashed's, but for the Monte Carlo
 ## circuits and the skid pad), raced once from start to finish.
 func is_sprint(id: String) -> bool:
+	if is_gt2_track(id):
+		return _gt2_tracks[id].sprint
 	if is_hp2_track(id):
 		return not _hp2_tracks[id].loop
 	return is_pu_track(id) and not id.trim_prefix(PU_PREFIX).begins_with("monaco") and id != PU_PREFIX + "skidpad"
@@ -526,6 +623,8 @@ func track_name(id: String) -> String:
 		return ProcPlaces.names(ProceduralTrack.SEED).town
 	if is_hp2_track(id):
 		return _hp2_tracks[id].name
+	if is_gt2_track(id):
+		return _gt2_tracks[id].name
 	if is_hs_track(id):
 		var folder := id.trim_prefix(HS_PREFIX)
 		return HS_TRACK_NAMES.get(folder, folder.capitalize())
@@ -542,6 +641,8 @@ func track_dir(id: String) -> String:
 		return ""
 	if is_hp2_track(id):
 		return _hp2_tracks[id].dir
+	if is_gt2_track(id):
+		return "gt2:" + _gt2_tracks[id].course
 	if is_hs_track(id):
 		return find_ci(find_ci(hs_root, "tracks"), id.trim_prefix(HS_PREFIX))
 	if is_pu_track(id):
@@ -566,16 +667,21 @@ func _sorted_dirs(path: String) -> PackedStringArray:
 	return out
 
 
-## Loaded car data (cached). `path` == "" means a procedural car preset. `who` puts that
-## driver in a Porsche Unleashed car (0: its own).
+## Loaded car data (cached). `path` == "" means procedural car preset `preset`, as does a
+## generated car's (ProceduralCar.PATH_PREFIX + its preset). `who` puts that driver in a
+## Porsche Unleashed car (0: its own).
 func load_car(path: String, preset := 0, who := 0) -> Object:
+	if is_proc_path(path):
+		preset = _proc_preset(path)
+		path = ""
 	var key := _car_key(path, preset, who)
 	if not _car_cache.has(key):
 		if path == "":
 			_car_cache[key] = ProceduralCar.make(preset)
 		else:
 			var car: Nfs3Car = Nfs5Car.load_car(pu_root, _pu_cars[path], who) if is_pu_path(path) \
-				else Nfs6Car.load_car(_hp2_cars[path], path.begins_with("hp2cop:")) if is_hp2_path(path) else Nfs3Car.load_dir(path)
+				else Nfs6Car.load_car(_hp2_cars[path], path.begins_with("hp2cop:")) if is_hp2_path(path) \
+				else Gt2Car.load_car(_gt2_vol, _gt2_cars[path]) if is_gt2_path(path) else Nfs3Car.load_dir(path)
 			if car.error != "" or car.body_parts.is_empty():
 				# A damaged car file: race a stand-in rather than an invisible car.
 				push_warning("Car %s failed to load (%s), using a stand-in" % [path, car.error])
@@ -588,6 +694,8 @@ func load_car(path: String, preset := 0, who := 0) -> Object:
 
 
 func _car_key(path: String, preset: int, who: int) -> String:
+	if is_proc_path(path):
+		return "preset%d" % _proc_preset(path)
 	if path == "":
 		return "preset%d" % preset
 	return path + "#driver%d" % who if who > 0 and is_pu_path(path) else path
@@ -607,12 +715,14 @@ func own_car_loaded(i: int) -> bool:
 ## cheap enough to read all of them at once.
 func car_spec(i: int) -> Object:
 	var c: Dictionary = cars[i]
-	if _car_cache.has(c.path if c.path != "" else "preset%d" % i):
+	if _car_cache.has(_car_key(c.path, i, 0)):
 		return load_car(c.path, i)
 	if not _spec_cache.has(i):
-		_spec_cache[i] = ProceduralCar.make(i % ProceduralCar.PRESETS.size()) if c.path == "" \
+		_spec_cache[i] = ProceduralCar.make(_proc_preset(c.path) if is_proc_path(c.path) else i % ProceduralCar.PRESETS.size(),
+				Color(0, 0, 0, 0), true) if c.path == "" or is_proc_path(c.path) \
 			else Nfs5Car.peek(pu_root, _pu_cars[c.path]) if is_pu_path(c.path) \
-			else Nfs6Car.peek(_hp2_cars[c.path]) if is_hp2_path(c.path) else Nfs3Car.peek_spec(c.path)
+			else Nfs6Car.peek(_hp2_cars[c.path]) if is_hp2_path(c.path) \
+			else Gt2Car.peek(_gt2_vol, _gt2_cars[c.path]) if is_gt2_path(c.path) else Nfs3Car.peek_spec(c.path)
 	return _spec_cache[i]
 
 
@@ -636,20 +746,42 @@ func pu_track_photo(id: String) -> Image:
 
 
 ## Which game a car or track comes from: 0 NFS III (and the stand-ins), 1 High Stakes,
-## 2 Porsche Unleashed, 3 Hot Pursuit 2.
-const GAME_NAMES := ["NFS III", "HIGH STAKES", "PORSCHE", "HOT PURSUIT 2"]
+## 2 Porsche Unleashed, 3 Hot Pursuit 2, 4 generated, 5 Gran Turismo 2 (cars only).
+const GAME_NAMES := ["NFS III", "HIGH STAKES", "PORSCHE", "HOT PURSUIT 2", "GENERATED", "GRAN TURISMO 2"]
 
 
 func car_game(i: int) -> int:
-	return 3 if is_hp2_car(i) else 2 if is_pu_car(i) else 1 if is_hs_car(i) else 0
+	return 5 if is_gt2_car(i) else 4 if is_proc_path(cars[i].path) else 3 if is_hp2_car(i) else 2 if is_pu_car(i) else 1 if is_hs_car(i) else 0
+
+
+## A generated car's path (ProceduralCar.PATH_PREFIX + its preset), and that preset.
+func is_proc_path(path: String) -> bool:
+	return path.begins_with(ProceduralCar.PATH_PREFIX)
+
+
+func _proc_preset(path: String) -> int:
+	return clampi(path.trim_prefix(ProceduralCar.PATH_PREFIX).to_int(), 0, ProceduralCar.PRESETS.size() - 1)
 
 
 func track_game(id: String) -> int:
-	return 3 if is_hp2_track(id) else 2 if is_pu_track(id) else 1 if is_hs_track(id) else 0
+	return 5 if is_gt2_track(id) else 3 if is_hp2_track(id) else 2 if is_pu_track(id) else 1 if is_hs_track(id) else 0
 
 
 func is_hp2_path(path: String) -> bool:
 	return _hp2_cars.has(path)
+
+
+## Gran Turismo 2's disc (its GT2.VOL and MUSIC.DAT), or null.
+func gt2_vol() -> Gt2Vol:
+	return _gt2_vol
+
+
+func is_gt2_path(path: String) -> bool:
+	return _gt2_cars.has(path)
+
+
+func is_gt2_car(i: int) -> bool:
+	return str(cars[i].id).begins_with(GT2_PREFIX)
 
 
 func is_hp2_car(i: int) -> bool:
@@ -789,11 +921,13 @@ func rival_upgrade() -> int:
 
 
 ## The cars a single race's rivals are picked from (not the player's own, not the police
-## ones), shuffled, the first `n` of them the ones to take. With rival_class "Yours" those
+## ones, nor the generated ones beside the games'), shuffled, the first `n` of them the ones to take. With rival_class "Yours" those
 ## of the player's High Stakes class (hs_class) come first, then the nearer classes.
 func rival_pool(n: int) -> Array:
+	# (The generated cars race each other only when they're all there is.)
+	var games := cars.any(func(c: Dictionary) -> bool: return not is_proc_path(c.path))
 	var pool: Array = range(cars.size()).filter(func(i: int) -> bool:
-		return i != car_index and not is_pursuit_car(i))
+		return i != car_index and not is_pursuit_car(i) and not (games and is_proc_path(cars[i].path)))
 	pool.shuffle()
 	if rival_class == 1:
 		return pool

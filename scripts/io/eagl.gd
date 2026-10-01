@@ -120,13 +120,15 @@ func model_parts(name: String) -> Array[Dictionary]:
 
 
 ## A geoprim's triangles: {pos, normal, uv (PackedVector2Array), colour (PackedColorArray),
-## indices (PackedInt32Array, a triangle list, the strips' degenerate triangles dropped)}, in
-## the file's space; {} when its data buffer can't be read.
+## blend (PackedInt32Array, each vertex's u32), indices (PackedInt32Array, a triangle list,
+## the strips' degenerate triangles dropped)}, in the file's space; {} when its data buffer
+## can't be read.
 func geoprim(buffer: int) -> Dictionary:
 	var pos := PackedVector3Array()
 	var nrm := PackedVector3Array()
 	var uv := PackedVector2Array()
 	var col := PackedColorArray()
+	var blend := PackedInt32Array()
 	var tris := PackedInt32Array()
 	var o := buffer + 4
 	var stride := 0
@@ -153,6 +155,7 @@ func geoprim(buffer: int) -> Dictionary:
 				var c := data.decode_u32(p + 28)
 				col.append(Color8((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF, (c >> 24) & 0xFF))
 				uv.append(Vector2(data.decode_float(p + 32), data.decode_float(p + 36)))
+				blend.append(data.decode_u32(p + 12))
 		elif op == 0x07 and n >= 6 and stride > 0:
 			var prim := u32(o + 4)
 			var ioff := u32(o + 16)
@@ -164,6 +167,12 @@ func geoprim(buffer: int) -> Dictionary:
 				var v := data.decode_u16(ioff + k * 2)
 				# 0xFFFF restarts the strip; anything else past the vertices is dropped with its triangles.
 				idx.append(-1 if v == 0xFFFF or vbase + v >= pos.size() else vbase + v)
+			# The count is rounded up to an even one: the pad is junk, out of range (dropped above)
+			# or 0, which strips (their vertices in order of first use) never end on otherwise;
+			# kept as 0 it drew a sliver to the part's first vertex (CLK-GTR: star to bumper).
+			if icount >= 4 and icount % 2 == 0 and idx[icount - 1] == vbase \
+					and not idx.slice(icount - 4, icount - 1).has(vbase):
+				idx[icount - 1] = -1
 			if prim == 2:
 				var start := 0
 				for k in icount - 2:
@@ -184,4 +193,4 @@ func geoprim(buffer: int) -> Dictionary:
 					if idx[k] >= 0 and idx[k + 1] >= 0 and idx[k + 2] >= 0:
 						tris.append_array([idx[k], idx[k + 1], idx[k + 2]])
 		o += n * 4
-	return {"pos": pos, "normal": nrm, "uv": uv, "colour": col, "indices": tris}
+	return {"pos": pos, "normal": nrm, "uv": uv, "colour": col, "blend": blend, "indices": tris}

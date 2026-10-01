@@ -399,7 +399,7 @@ func _read_spec(pu_root: String, rec: Dictionary) -> void:
 		14: PackedFloat32Array([top]),
 		15: PackedFloat32Array([top]),
 		16: PackedFloat32Array([front_share]),
-		17: PackedFloat32Array([1.0 if _year(rec.name) >= 1985 else 0.0]),
+		17: PackedFloat32Array([1.0 if _has_abs(rec) else 0.0]),
 		18: PackedFloat32Array([clampf(brake, 5.0, 12.0) if brake > 0.0 else 9.0]),
 		24: PackedFloat32Array([f.call(0x44) / 1000.0]),
 		25: PackedFloat32Array([weight_front]),
@@ -407,6 +407,12 @@ func _read_spec(pu_root: String, rec: Dictionary) -> void:
 		35: _tyre(info.get("tyres_front", ""), width, aspect, rim),
 		36: _tyre(info.get("tyres_rear", ""), width, aspect, rim),
 	}
+
+
+## The .sim has no ABS flag: Porsche's road cars have it from the mid-80s (the 944 S, 959
+## and 964 on), the Cup racer (the GT3 Cup) went without.
+static func _has_abs(rec: Dictionary) -> bool:
+	return _year(rec.name) >= 1985 and rec.sim.to_lower() != "gt3race"
 
 
 ## The car table names one car's .sim with its letters out of order (993coupeS436 for the

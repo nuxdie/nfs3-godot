@@ -81,7 +81,7 @@ static func build(t: Nfs6Track, root: Node3D) -> TrackPath:
 ## the layers in CUSTOM1.zw (shadow uv), CUSTOM2 (overlay uv, mask uv) and CUSTOM3
 ## (overlay, mask, shadow image + 1).
 static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_through: PackedByteArray,
-		mats: Array[ShaderMaterial], range_end: float) -> void:
+		mats: Array[ShaderMaterial], range_end: float, range_begin := 0.0) -> void:
 	for pass_i in [Nfs5TrackBuilder.PASS_OPAQUE, Nfs5TrackBuilder.PASS_GLASS]:
 		var mesh := _mesh(pieces, see_through, pass_i)
 		if mesh == null:
@@ -95,6 +95,9 @@ static func _add_meshes(geo: Node3D, mesh_name: String, pieces: Array, see_throu
 			mi.visibility_range_end = range_end
 			mi.visibility_range_end_margin = 40.0
 			mi.set_meta("landscape", true)
+		if range_begin > 0.0:
+			mi.visibility_range_begin = range_begin
+			mi.visibility_range_begin_margin = 30.0
 		geo.add_child(mi)
 
 

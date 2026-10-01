@@ -48,6 +48,7 @@ var _stopped := {}  # Car -> race time of its last logged stop
 ## --aistats: the racers' hits (over 4 m/s closing), by what they hit, printed at the end.
 var _hits := {}
 var _look := NAN          # --look=DEG: the head held turned this far (+ left), e.g. to a side mirror
+var _pitch := NAN         # --pitch=DEG: ...and tilted this far (+ up), e.g. down into the footwell
 var _hit_armed := false
 
 
@@ -73,6 +74,8 @@ func _ready() -> void:
 			Game.camera_mode = clampi(int(arg.trim_prefix("--camera=")), 0, ChaseCamera.MODES.size() - 1)
 		elif arg.begins_with("--look="):
 			_look = deg_to_rad(float(arg.trim_prefix("--look=")))
+		elif arg.begins_with("--pitch="):
+			_pitch = deg_to_rad(float(arg.trim_prefix("--pitch=")))
 	Game.weather = "--weather" in args
 	# The start fly-by only with --intro (it would shift every run's timings).
 	Game.intro_flyby = "--intro" in args
@@ -205,6 +208,9 @@ func _ready() -> void:
 func _process(dt: float) -> void:
 	if not is_nan(_look) and race and race.get("cam"):
 		race.cam._yaw = _look
+		race.cam._idle = 0.0
+	if not is_nan(_pitch) and race and race.get("cam"):
+		race.cam._pitch = _pitch
 		race.cam._idle = 0.0
 	if _scale > 0.0:
 		get_viewport().scaling_3d_scale = _scale

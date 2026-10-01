@@ -19,8 +19,19 @@ extends AudioStreamPlayer
 ## songs and the game's own), track15..22, instrumental versions of the first eight, in
 ## the menus. The same split-block EA ADPCM as Porsche Unleashed's, at 32 kHz.
 ##
-## Songs are named "nfs3:<file>", "hs:<file>", "pu:<file>" or "hp2:<file>" (no extension);
-## only those whose files are there play.
+## Gran Turismo 2 (MUSIC.DAT on its disc image, Gt2Music): CD-XA audio, a song per channel
+## ("gt2:<channel>"). The disc names none of them: the US release's six race songs (after
+## RacingSoundtracks.com's list) are told apart by length and, for the two of 3:38, by tempo
+## (Sex Type Thing 134 bpm, I Think I'm Paranoid 113). The other eight, a minute or two
+## each, are its front-end pieces (Isamu Ohira's): five matched by their spectral motion
+## against the previews of the GRAN TURISMO 2 ORIGINAL GAME SOUNDTRACK album, three unnamed;
+## its jingles, seconds long, aren't played. Its credits songs aren't on this disc.
+## Its GT Mode screens' and Arcade mode's tunes are sequenced (Gt2Seq: sound/spu_02..10.seq,
+## arcade.seq, played on the game's own instruments), "gt2:<file>", in the menus. Five matched
+## to the album the same way; the rest go by their screen (SUBMANIAC's names for them).
+##
+## Songs are named "nfs3:<file>", "hs:<file>", "pu:<file>", "hp2:<file>" (no extension) or
+## "gt2:<channel>"; only those whose files are there play.
 ##
 ## The menu's music browser plays any of them (play_list), pauses, skips back and forth
 ## (skip, remembering what played) and shows where the song is (position_s, length_s).
@@ -122,6 +133,30 @@ const SONGS := {
 	"hp2:track20": ["Pulse Ultra", "Build Your Cages (Instrumental)"],
 	"hp2:track21": ["Rush", "One Little Victory (Instrumental)"],
 	"hp2:track22": ["Uncle Kracker", "Keep It Coming (Instrumental)"],
+	"gt2:1": ["Apollo 440", "Cold Rock The Mic"],
+	"gt2:2": ["Garbage", "I Think I'm Paranoid"],
+	"gt2:3": ["Rob Zombie", "Dragula (Hot Rod Herman Remix)"],
+	"gt2:4": ["Soul Coughing", "Super Bon Bon"],
+	"gt2:5": ["Stone Temple Pilots", "Sex Type Thing"],
+	"gt2:6": ["The Crystal Method", "Now Is The Time (Millennium Mix)"],
+	# (Its front-end pieces, matched against the soundtrack album's previews; three matched none.)
+	"gt2:7": ["Isamu Ohira", "Welcome Back G.T."],
+	"gt2:8": ["Isamu Ohira", "The \"Real\" Motorious City"],
+	"gt2:9": ["Isamu Ohira", "You Made It!"],
+	"gt2:10": ["Isamu Ohira", "From The East"],
+	"gt2:18": ["Isamu Ohira", "Gold Rush"],
+	"gt2:19": ["Isamu Ohira", "Front-end piece 1"], "gt2:20": ["Isamu Ohira", "Front-end piece 2"],
+	"gt2:21": ["Isamu Ohira", "Front-end piece 3"],
+	"gt2:arcade": ["Isamu Ohira", "Windroad"],
+	"gt2:spu_02": ["Isamu Ohira", "Car Wash theme"],
+	"gt2:spu_03": ["Isamu Ohira", "From The East"],
+	"gt2:spu_04": ["Isamu Ohira", "North City theme"],
+	"gt2:spu_05": ["Isamu Ohira", "South City theme"],
+	"gt2:spu_06": ["Isamu Ohira", "West City theme"],
+	"gt2:spu_07": ["Isamu Ohira", "Get Ready?"],
+	"gt2:spu_08": ["Isamu Ohira", "Soul of Garage"],
+	"gt2:spu_09": ["Isamu Ohira", "Map theme"],
+	"gt2:spu_10": ["Isamu Ohira", "Poker Face"],
 }
 const RACE_SONGS: Array[String] = [
 	"nfs3:homerock", "nfs3:hometech", "nfs3:lostrock", "nfs3:losttech", "nfs3:atlarock",
@@ -135,6 +170,7 @@ const RACE_SONGS: Array[String] = [
 	"hp2:track0", "hp2:track1", "hp2:track2", "hp2:track3", "hp2:track4", "hp2:track5",
 	"hp2:track6", "hp2:track7", "hp2:track8", "hp2:track9", "hp2:track10", "hp2:track11",
 	"hp2:track12", "hp2:track13", "hp2:track14",
+	"gt2:1", "gt2:2", "gt2:3", "gt2:4", "gt2:5", "gt2:6",
 ]
 const MENU_SONGS: Array[String] = [
 	"nfs3:show1", "nfs3:show2", "nfs3:show3", "nfs3:show4", "nfs3:show5", "nfs3:show6",
@@ -143,6 +179,9 @@ const MENU_SONGS: Array[String] = [
 	"pu:menu01", "pu:menu02", "pu:menu03", "pu:menu04", "pu:menu05",
 	"hp2:track15", "hp2:track16", "hp2:track17", "hp2:track18", "hp2:track19", "hp2:track20",
 	"hp2:track21", "hp2:track22",
+	"gt2:7", "gt2:8", "gt2:9", "gt2:10", "gt2:18", "gt2:19", "gt2:20", "gt2:21",
+	"gt2:arcade", "gt2:spu_02", "gt2:spu_03", "gt2:spu_04", "gt2:spu_05", "gt2:spu_06",
+	"gt2:spu_07", "gt2:spu_08", "gt2:spu_09", "gt2:spu_10",
 ]
 const BUFFER_S := 0.5
 const FADE_S := 1.0
@@ -282,9 +321,10 @@ func available(song: String) -> bool:
 	return _exists(song)
 
 
-## "NFS III", "HIGH STAKES", "PORSCHE" or "HOT PURSUIT 2" (as Game.GAME_NAMES).
+## "NFS III", "HIGH STAKES", "PORSCHE", "HOT PURSUIT 2" or "GRAN TURISMO 2" (as Game.GAME_NAMES).
 static func game_of(song: String) -> int:
-	return 1 if song.begins_with("hs:") else 2 if song.begins_with("pu:") else 3 if song.begins_with("hp2:") else 0
+	return 1 if song.begins_with("hs:") else 2 if song.begins_with("pu:") else 3 if song.begins_with("hp2:") \
+		else 5 if song.begins_with("gt2:") else 0
 
 
 ## Straight to `m` if nothing's playing, else after fading out what is.
@@ -418,6 +458,10 @@ func _exists(song: String) -> bool:
 		return _pu_entry(file) != ""
 	if song.begins_with("hp2:"):
 		return _hp2_path(file) != ""
+	if song.begins_with("gt2:"):
+		if not file.is_valid_int():
+			return Game.gt2_vol() != null and Game.gt2_vol().has("sound/%s.seq" % file)
+		return Gt2Music.songs(Game.gt2_vol(), 0.0).has(file.to_int())
 	return Game.hs_root != "" and DataPath.find_ci(Game.hs_root, "audio/music/" + file + ".asf") != ""
 
 
@@ -431,6 +475,8 @@ func _open(song: String) -> EaMusic:
 		m = _pu(file)
 	elif song.begins_with("hp2:"):
 		m = EaMusic.open_asf(_hp2_path(file))
+	elif song.begins_with("gt2:"):
+		m = Gt2Music.open(Game.gt2_vol(), file.to_int()) if file.is_valid_int() else Gt2Seq.open(Game.gt2_vol(), file)
 	else:
 		m = _hs(file + ".asf")
 	if m:

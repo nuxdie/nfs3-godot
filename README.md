@@ -321,6 +321,12 @@ The game streams compartments as the car goes, which a track loaded whole has to
 - A compartment carries its view of the land round it (a kilometre-wide sheet of rough
   terrain), drawn while its neighbours aren't: its coarse render methods (triangles 20 m and
   more) lying mostly within 80 m of another loaded compartment's road, not its own, are left out.
+- Neighbouring compartments hold copies of each other's objects, rough and detailed, to be
+  seen from there (Calypso Coast's temple is in three), and their own far views of the next
+  one's ground. Loaded together these were drawn over each other: a render method whose
+  surface lies on another of the same textures is left out (the smaller, or the one away
+  from home when both lie on each other), and so is one mostly outside its compartment's
+  footprint lying on another compartment's ground. The course's own road always stays.
 - The game draws the compartments round the car's node of `drvpath.ini`, so one far along the
   course can stand where the course is now (a hill over the road, terrain through a tunnel's
   wall). Each slice of the course gets its node; what of a compartment hangs over the road

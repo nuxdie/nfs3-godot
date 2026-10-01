@@ -25,6 +25,9 @@ var cop := false          # wearing the police livery (skincop.fsh) and light ba
 var hp2_class := 0        # cars.ini's class, 1 (the fastest) .. 5
 ## The skins' paints in the order of colours (skin00..): their swatches, for the paint choice.
 var wheel_texture: Texture2D
+var driver_texture: Texture2D   # the driver's own (Nfs6Driver), or null
+var _seat := Vector3.INF         # skeleton.o's PLAYER, HP2's space: the driver's seat
+var _head_glass: Array = [null, null]   # AABBs of the front lamp glass, left and right (our space), or null
 
 
 ## Cars/cars.ini: [{index, folder, name, traffic, class, price}], in its order.
@@ -101,6 +104,7 @@ static func load_car(rec: Dictionary, as_cop := false) -> Nfs6Car:
 	c._read_model(model, Nfs5Car._ini(FileAccess.get_file_as_string(DataPath.find_ci(c.folder, "geomdata.ini"))))
 	c._read_damage_texture(viv.get_file("damage.fsh"))
 	c._read_skeleton(Eagl.parse(viv.get_file("skeleton.o")))
+	c._read_driver()
 	c._read_sounds()
 	return c
 
@@ -140,7 +144,7 @@ static func peek(rec: Dictionary, as_cop := false) -> Nfs6Car:
 ## FrontGripBias; [engineblock] RedLine, MinRPM and torqueCurve_N (N m every 500 rpm from 0);
 ## [transmission] GearRatios_N (reverse, neutral, forward...); [rearend] FinalGearRatio;
 ## [tire_front]/[tire_rear] SectionWidth, AspectRatio, WheelDiameter (in), PeakFriction;
-## [brake_*] ABS.
+## [brake_front], [brake_rear] ABS (each axle its own).
 func _read_spec(ini: Dictionary) -> void:
 	var basic: Dictionary = ini.get("basic", {})
 	var eng: Dictionary = ini.get("engineblock", {})
@@ -215,7 +219,8 @@ func _read_spec(ini: Dictionary) -> void:
 		14: PackedFloat32Array([top]),
 		15: PackedFloat32Array([top]),
 		16: PackedFloat32Array([drive_front]),
-		17: PackedFloat32Array([1.0 if ini.get("brake_front", {}).get("abs", "1") == "1" else 0.0]),
+		17: PackedFloat32Array([1.0 if ini.get("brake_front", {}).get("abs", "1") == "1" else 0.0,
+			1.0 if ini.get("brake_rear", {}).get("abs", "1") == "1" else 0.0]),
 		18: PackedFloat32Array([clampf(8.0 + (grip - 1.2) * 4.0, 7.0, 12.0)]),
 		24: PackedFloat32Array([float(basic.get("wheelbase", "2.6"))]),
 		25: PackedFloat32Array([clampf(float(basic.get("frontgripbias", "0.5")), 0.35, 0.6)]),
@@ -284,11 +289,8 @@ func _read_textures(skins: Viv, car_fsh: Fsh) -> void:
 		imgs.append(car_fsh.by_name["skin"])
 	if imgs.is_empty():
 		return
-	var img: Image
-	if cop_img:
-		img = _opaque(cop_img)
-		colours.clear()
-	elif colours.size() >= 2 and imgs.size() >= 2:
+	var img: Image = null
+	if colours.size() >= 2 and imgs.size() >= 2:
 		# (The swatches themselves, not the double-strength colours: the grey comes out half as bright.)
 		var sw: Array[Color] = []
 		for c in colours:
@@ -296,7 +298,20 @@ func _read_textures(skins: Viv, car_fsh: Fsh) -> void:
 		img = _paint_mask(imgs, sw)
 	elif imgs.size() >= 2 and _estimate_swatches(imgs):
 		img = _paint_mask(imgs, _swatches)
-	else:
+	if cop_img:
+		# The livery as it is, but where the skins have their paint it's paint (marked, in its
+		# own colours: no tint), with the paint's finish rather than the matte of plastic trim.
+		var livery := _opaque(cop_img)
+		if img and img.get_size() == livery.get_size():
+			var lx := livery.get_data()
+			var mx := img.get_data()
+			for i in range(3, lx.size(), 4):
+				if mx[i] == PAINT_ALPHA:
+					lx[i] = PAINT_ALPHA
+			livery.set_data(livery.get_width(), livery.get_height(), false, Image.FORMAT_RGBA8, lx)
+		img = livery
+		colours.clear()
+	elif img == null:
 		img = _opaque(imgs[0])
 		colours.clear()
 	img.generate_mipmaps()
@@ -458,12 +473,16 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 		wit_hue.append(mean / sum)
 	# (The swatch at double strength: grey * 2 swatch gives back the skin.)
 	var k := 255.0 / maxf(_luma(swatches[a]) * 255.0, 1.0)
+	var edges: Array[int] = []        # texels neither paint nor alike in every skin
+	var edge_grey: Array[int] = []    # ... and their paint grey, were they paint
 	for i in range(0, px.size(), 4):
 		var diff := absi(px[i] - ox[i]) + absi(px[i + 1] - ox[i + 1]) + absi(px[i + 2] - ox[i + 2])
 		var paint := diff > PAINT_DIFF
+		# (Weaker: the edge of a panel, paint blended with the black round it.)
+		var weak := not paint and diff > PAINT_DIFF / 4 and not wit.is_empty()
 		var against := 0
 		for j in wit.size():
-			if not paint:
+			if not paint and not weak:
 				break
 			var t := Vector3(wit[j][i], wit[j][i + 1], wit[j][i + 2])
 			var sum := t.x + t.y + t.z
@@ -473,6 +492,9 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 		# (Most of them: a skin can be off its swatch.)
 		if paint and against * 2 > wit.size():
 			paint = false
+		# (An edge is paint only if every witness has it the paint's colour, or too dark to tell.)
+		if weak and against == 0:
+			paint = true
 		if paint:
 			var grey := clampi(int((px[i] * 0.2126 + px[i + 1] * 0.7152 + px[i + 2] * 0.0722) * k * 0.5), 0, 255)
 			px[i] = grey
@@ -490,6 +512,8 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 				lo = mini(lo, e[i + 1])
 				hi = maxi(hi, e[i + 1])
 			if hi - lo > 16 and every.size() >= 3:
+				edges.append(i)
+				edge_grey.append(clampi(int((px[i] * 0.2126 + px[i + 1] * 0.7152 + px[i + 2] * 0.0722) * k * 0.5), 0, 255))
 				var v: Array[int] = []
 				for e in every:
 					v.append(int(e[i] * 0.2126 + e[i + 1] * 0.7152 + e[i + 2] * 0.0722))
@@ -497,6 +521,22 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 				px[i] = v[v.size() / 2]
 				px[i + 1] = px[i]
 				px[i + 2] = px[i]
+	# Those touching the paint are its edge (DXT's blocks blend it with what's round it, off
+	# its colour): paint too, or they ring the panel in grey trim.
+	var row := light.get_width() * 4
+	var paint_edges: Array[int] = []
+	for n in edges.size():
+		var i: int = edges[n]
+		for o in [-4, 4, -row, row]:
+			if i + o >= 0 and i + o < px.size() and px[i + o + 3] == PAINT_ALPHA:
+				paint_edges.append(n)
+				break
+	for n in paint_edges:
+		var i: int = edges[n]
+		px[i] = edge_grey[n]
+		px[i + 1] = edge_grey[n]
+		px[i + 2] = edge_grey[n]
+		px[i + 3] = PAINT_ALPHA
 	light.set_data(light.get_width(), light.get_height(), false, Image.FORMAT_RGBA8, px)
 	return light
 
@@ -540,6 +580,8 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 		# (ALPHA_ADD_ glass black in its vertex colour is the lamps' covers and the like, which
 		# HP2 adds over them as a reflection only: clear glass, not a dark patch of the skin. A
 		# lit one, a light bar's, adds its texture: drawn with the body.)
+		if pname.contains("ALPHA_ADD_") and not pname.contains(ADDON_MARK):
+			_note_head_glass(g)
 		if pname.contains("ALPHA_ADD_") and _dark_part(g):
 			lens.add(g, Vector3.ZERO)
 			continue
@@ -569,13 +611,13 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 	for i: int in column.get("dropped", PackedInt32Array()):
 		for k in 3:
 			body.uv2[i + k] = Vector2.ZERO
-	var part := {"name": "body", "mesh": body.commit(), "center": Vector3.ZERO, "damaged": _damaged(body)}
+	body.drop(column.get("stray", PackedInt32Array()))
+	var eye := Vector3.INF
 	if not column.is_empty():
-		part.steering = {"pivot": column.pivot, "axis": column.axis}
 		# The in-car view from the modelled cabin (HP2 had none): the eye behind the wheel, up
 		# the seat's height above its hub, but under the roof (the top of the car over it).
-		var col: Dictionary = part.steering
-		var eye: Vector3 = col.pivot + Vector3(0.0, 0.0, -EYE_BEHIND_WHEEL) + Vector3.UP * EYE_ABOVE_WHEEL
+		var col := column
+		eye = col.pivot + Vector3(0.0, 0.0, -EYE_BEHIND_WHEEL) + Vector3.UP * EYE_ABOVE_WHEEL
 		var roof := -INF
 		for v in body.pos:
 			if absf(v.x - eye.x) < 0.2 and absf(v.z - eye.z) < 0.25:
@@ -595,7 +637,15 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 				break
 			eye.z += 0.03
 		dash = {"eye": eye, "own_cabin": true}
+	# The side mirrors' glass, out of the body (before its commit) for the in-car view's mirrors.
+	var mirrors: Array[Dictionary] = []
+	if eye != Vector3.INF:
+		mirrors = _split_mirrors(body, eye)
+	var part := {"name": "body", "mesh": body.commit(), "center": Vector3.ZERO, "damaged": _damaged(body)}
+	if not column.is_empty():
+		part.steering = {"pivot": column.pivot, "axis": column.axis}
 	body_parts.append(part)
+	body_parts.append_array(mirrors)
 	if not glass.pos.is_empty():
 		body_parts.append({"name": "glass", "mesh": glass.commit(), "center": Vector3.ZERO, "glass": true})
 	if not lens.pos.is_empty():
@@ -648,6 +698,112 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 		for p in body.pos:
 			box = box.expand(p)
 		half_size = box.size * 0.5
+
+
+## HP2's side mirrors are no parts of their own (a door's, a wing's, MISC's, or welded into the
+## body), and their glass is the skin, not a mirror: each side's is found as the biggest
+## huddle of faces turned back toward the eye, out at the car's side, ahead of the eye and
+## below it (the housing's back; on a rounded one, the 911's, its middle). Taken out of
+## `body` as mirror_glass parts (see Car: the in-car view shows the view back on them).
+const MIRROR_OUT := 0.68          # of the car's half width, at least
+const MIRROR_HEIGHT := Vector2(0.1, 0.55)
+const MIRROR_AHEAD := Vector2(0.1, 1.6)   # m ahead of the eye
+const MIRROR_FACING := 0.5        # its faces' normals at least this much toward the back
+const MIRROR_GAP := 0.07          # m between a huddle's faces' middles, at most
+const MIRROR_SIZE := Vector3(0.3, 0.25, 0.3)
+const MIRROR_MIN_AREA := 0.005    # m²
+
+
+static func _split_mirrors(body: _Tris, eye: Vector3) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	var half_x := 0.0
+	for p in body.pos:
+		half_x = maxf(half_x, absf(p.x))
+	var taken := PackedInt32Array()
+	for side: float in [1.0, -1.0]:   # left (+X), right
+		var faces: Array[int] = []
+		var mids := PackedVector3Array()
+		for i in range(0, body.pos.size() - 2, 3):
+			if body.uv2[i].x > 0.5:
+				continue   # (the steering wheel)
+			var m := (body.pos[i] + body.pos[i + 1] + body.pos[i + 2]) / 3.0
+			var n := _face_normal(body, i)
+			if n.z > -MIRROR_FACING or m.x * side < MIRROR_OUT * half_x or (eye - m).dot(n) <= 0.0 \
+					or m.y < MIRROR_HEIGHT.x or m.y > MIRROR_HEIGHT.y \
+					or m.z < eye.z + MIRROR_AHEAD.x or m.z > eye.z + MIRROR_AHEAD.y:
+				continue
+			faces.append(i)
+			mids.append(m)
+		# Huddles: faces whose middles are within MIRROR_GAP of one another's, chained.
+		var root := range(faces.size())
+		var top := func(k: int) -> int:
+			while root[k] != k:
+				k = root[k]
+			return k
+		for a in faces.size():
+			for b in range(a + 1, faces.size()):
+				if mids[a].distance_squared_to(mids[b]) < MIRROR_GAP * MIRROR_GAP:
+					var ra: int = top.call(a)
+					var rb: int = top.call(b)
+					if ra != rb:
+						root[rb] = ra
+		var huddles := {}
+		for k in faces.size():
+			var r: int = top.call(k)
+			if not huddles.has(r):
+				huddles[r] = []
+			huddles[r].append(k)
+		var best: Array = []
+		var best_area := MIRROR_MIN_AREA
+		for r in huddles:
+			var box := AABB(mids[r], Vector3.ZERO)
+			var area := 0.0
+			for k: int in huddles[r]:
+				box = box.expand(mids[k])
+				var i := faces[k]
+				area += (body.pos[i + 1] - body.pos[i]).cross(body.pos[i + 2] - body.pos[i]).length() * 0.5
+			if box.size.x <= MIRROR_SIZE.x and box.size.y <= MIRROR_SIZE.y and box.size.z <= MIRROR_SIZE.z \
+					and area > best_area:
+				best = huddles[r]
+				best_area = area
+		if best.is_empty():
+			continue
+		var glass := _Tris.new()
+		var point := Vector3.ZERO
+		var normal := Vector3.ZERO
+		for k: int in best:
+			var i := faces[k]
+			var w := (body.pos[i + 1] - body.pos[i]).cross(body.pos[i + 2] - body.pos[i]).length()
+			point += mids[k] * w
+			normal += _face_normal(body, i) * w
+			for j in 3:
+				glass.pos.append(body.pos[i + j])
+				glass.nrm.append(body.nrm[i + j])
+				glass.uv.append(body.uv[i + j])
+				glass.uv2.append(body.uv2[i + j])
+				glass.zone.append(body.zone[i + j])
+			taken.append(i)
+		out.append({"name": "mirror_glass_%s" % ("left" if side > 0.0 else "right"), "mesh": glass.commit(),
+			"center": Vector3.ZERO, "mirror_glass": {"point": point / (best_area * 2.0), "normal": normal.normalized()}})
+	taken.sort()
+	body.drop(taken)
+	return out
+
+
+## The way the triangle at `i` faces (_Tris winds them clockwise, as Godot draws its fronts).
+static func _face_normal(t: _Tris, i: int) -> Vector3:
+	return (t.pos[i + 2] - t.pos[i]).cross(t.pos[i + 1] - t.pos[i]).normalized()
+
+
+## Grows the left or right front lamp glass by a lamp glass part's vertices at the front (a
+## part spanning both sides, the Elise's, split down the middle).
+func _note_head_glass(g: Dictionary) -> void:
+	for p: Vector3 in g.pos:
+		var v := _to_car(p)
+		if v.z <= 0.0 or absf(v.x) < 0.05:
+			continue
+		var side := 0 if v.x > 0.0 else 1
+		_head_glass[side] = AABB(v, Vector3.ZERO) if _head_glass[side] == null else (_head_glass[side] as AABB).expand(v)
 
 
 ## Whether the part's vertex colours are near black on average (HP2 draws it dark whatever
@@ -730,6 +886,16 @@ class _Tris:
 				uv2.append(Vector2(1.0 if steering else 0.0, 0.0))
 				zone.append(part_zone)
 
+	## Leaves out the triangles starting at `tris` (ascending).
+	func drop(tris: PackedInt32Array) -> void:
+		for t in range(tris.size() - 1, -1, -1):
+			for k in 3:
+				pos.remove_at(tris[t])
+				nrm.remove_at(tris[t])
+				uv.remove_at(tris[t])
+				uv2.remove_at(tris[t])
+				zone.remove_at(tris[t])
+
 	func commit() -> ArrayMesh:
 		var arrays := []
 		arrays.resize(Mesh.ARRAY_MAX)
@@ -798,6 +964,11 @@ func _read_skeleton(sk: Eagl) -> void:
 			continue
 		var t := Vector3(sk.data.decode_float(r + 0x40), sk.data.decode_float(r + 0x44), sk.data.decode_float(r + 0x48))
 		at[s.trim_prefix("__Bone:::Root.").to_upper()] = _to_car(-t)
+		if s.ends_with(".PLAYER"):
+			# (The seat's matrix may turn a little, the Barchetta's and Carrera GT's.)
+			var row := func(o: int) -> Vector3:
+				return Vector3(sk.data.decode_float(r + o), sk.data.decode_float(r + o + 4), sk.data.decode_float(r + o + 8))
+			_seat = Transform3D(Basis(row.call(0x10), row.call(0x20), row.call(0x30)), t).affine_inverse().origin
 	var add := func(bone: String, kind: String, colour: String, flash := "N") -> void:
 		if at.has(bone):
 			lights.append({"pos": at[bone], "kind": kind, "colour": colour, "breakable": true, "flash": flash,
@@ -808,6 +979,14 @@ func _read_skeleton(sk: Eagl) -> void:
 		add.call("LIGHT_TAIL_%s1" % side, "B", "R")
 		add.call("LIGHT_TAIL_%s2" % side, "R", "W")
 	add.call("LIGHT_TAIL", "B", "R")
+	# Most cars have no headlamp bones (HP2 lights the lamp glass itself): the lamps at the
+	# middle of each side's glass at the front, where car.gd seats them onto the bodywork.
+	if not lights.any(func(l: Dictionary) -> bool: return l.kind == "H"):
+		for side in 2:
+			if _head_glass[side] != null:
+				var box: AABB = _head_glass[side]
+				lights.append({"pos": Vector3(box.get_center().x, box.get_center().y, box.end.z), "kind": "H",
+					"colour": "W", "breakable": true, "flash": "N", "intensity": 5, "time": 5, "delay": 0})
 	if cop:
 		add.call("LIGHT_COP_R", "S", "R", "O")
 		add.call("LIGHT_COP_B", "S", "B", "E")
@@ -815,6 +994,117 @@ func _read_skeleton(sk: Eagl) -> void:
 	for k in range(1, 5):
 		if at.has("EXHAUST_%d" % k):
 			exhausts.append(at["EXHAUST_%d" % k])
+
+
+# ---------------------------------------------------------------- driver
+
+## How far round (radians, either way) the driver's hands follow the steering wheel, a blend
+## shape at each: further, car.gd turns the wheel only so far (a driver would let go).
+const DRIVER_TURNS: Array[float] = [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5]
+## His eyes from his head bone (HP2's space: up, and toward the front, -Z): the bone is low
+## in his head, which reaches 0.19 m above it.
+const EYE_FROM_HEAD := Vector3(0.0, 0.11, -0.08)
+
+
+## The driver (Nfs6Driver's, the police's in a police car) in the seat, PLAYER's, his hands on
+## the steering wheel and following it round: a body part "driver" with "steer_shapes". His
+## head is marked (UV2.x -1, car_driver.gdshader's hide_head) for the in-car view. Not in
+## traffic, nor in a car without a seat or a turning wheel.
+func _read_driver() -> void:
+	if traffic or _seat == Vector3.INF:
+		return
+	var body: Dictionary = {}
+	for p in body_parts:
+		if p.name == "body" and p.has("steering"):
+			body = p
+	if body.is_empty():
+		return
+	var actor := Nfs6Driver.get_actor(folder.get_base_dir().get_base_dir(), "Copdriver" if cop else "Driver")
+	if actor == null:
+		return
+	# The wheel in HP2's space: its middle, its column toward the dash, and its rim (the
+	# furthest a turning vertex reaches from the column).
+	var pivot := _to_car(body.steering.pivot)
+	var axis := _to_car(body.steering.axis).normalized()
+	var arrays := (body.mesh as ArrayMesh).surface_get_arrays(0)
+	var vs: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var u2: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV2]
+	var rim := 0.0
+	for i in vs.size():
+		if u2[i].x > 0.5:
+			var d := _to_car(vs[i]) - pivot
+			rim = maxf(rim, (d - axis * d.dot(axis)).length())
+	if rim < 0.05:
+		return
+	var turns := PackedFloat32Array(DRIVER_TURNS)
+	var m := actor.seated_mesh(_seat, Nfs6Driver.wheel_frame(pivot, axis), rim, turns)
+	var mesh := _driver_mesh(m, turns.find(0.0))
+	if mesh == null:
+		return
+	body_parts.append({"name": "driver", "mesh": mesh, "center": Vector3.ZERO, "driver": true, "steer_shapes": turns})
+	driver_texture = actor.texture
+	# The in-car view from his eyes (in front of his head bone and a little above it).
+	var head := actor.bone("Head")
+	if head >= 0 and dash.has("eye"):
+		var f := actor.seated(_seat, Nfs6Driver.wheel_frame(pivot, axis), rim, 0.0)
+		var eye := _to_car(f[head].origin + EYE_FROM_HEAD)
+		# (No higher than the roof let the eye go: _read_model's.)
+		dash.eye = Vector3(eye.x, minf(eye.y, (dash.eye as Vector3).y), eye.z)
+
+
+## seated_mesh()'s poses, turned round to ours, as one mesh with a blend shape per pose (as
+## Porsche Unleashed's: normalized, a pose between two their weights summing to 1), `base`'s
+## its own.
+static func _driver_mesh(m: Dictionary, base: int) -> ArrayMesh:
+	var poses: Array = m.pos
+	if poses.is_empty() or (poses[0] as PackedVector3Array).is_empty():
+		return null
+	var head: PackedByteArray = m.head
+	var uv: PackedVector2Array = m.uv
+	var n := uv.size()
+	# Each triangle wound as _Tris's (against its normal), by the base pose.
+	var order := PackedInt32Array()
+	var bp: PackedVector3Array = poses[base]
+	var bn: PackedVector3Array = m.normal[base]
+	for t in range(0, n - 2, 3):
+		var a := _to_car(bp[t])
+		var face := (_to_car(bp[t + 1]) - a).cross(_to_car(bp[t + 2]) - a)
+		var flip := face.dot(_to_car(bn[t] + bn[t + 1] + bn[t + 2])) > 0.0
+		order.append_array([t, t + 2, t + 1] if flip else [t, t + 1, t + 2])
+	var shaped := func(k: int) -> Array:
+		var p := PackedVector3Array()
+		var nn := PackedVector3Array()
+		p.resize(n)
+		nn.resize(n)
+		for i in n:
+			p[i] = _to_car(poses[k][order[i]])
+			nn[i] = _to_car(m.normal[k][order[i]])
+		return [p, nn]
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	var b0: Array = shaped.call(base)
+	arrays[Mesh.ARRAY_VERTEX] = b0[0]
+	arrays[Mesh.ARRAY_NORMAL] = b0[1]
+	var tuv := PackedVector2Array()
+	var tuv2 := PackedVector2Array()
+	for i in n:
+		tuv.append(uv[order[i]])
+		tuv2.append(Vector2(Nfs5Car.HEAD_MARK if head[order[i]] else 0.0, 0.0))
+	arrays[Mesh.ARRAY_TEX_UV] = tuv
+	arrays[Mesh.ARRAY_TEX_UV2] = tuv2
+	var mesh := ArrayMesh.new()
+	mesh.blend_shape_mode = Mesh.BLEND_SHAPE_MODE_NORMALIZED
+	var blends := []
+	for k in poses.size():
+		mesh.add_blend_shape("steer%d" % k)
+		var s: Array = shaped.call(k)
+		var b := []
+		b.resize(Mesh.ARRAY_MAX)
+		b[Mesh.ARRAY_VERTEX] = s[0]
+		b[Mesh.ARRAY_NORMAL] = s[1]
+		blends.append(b)
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, blends)
+	return mesh
 
 
 # ---------------------------------------------------------------- sounds

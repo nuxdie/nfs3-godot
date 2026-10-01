@@ -390,8 +390,12 @@ func _layout() -> void:
 	# (Under the career's tabs while visiting the garage.)
 	var tabs := 44.0 if _screen == Screen.GARAGE and not _in_entry() else 0.0
 	_dealer.position = Vector2(M, TOP + tabs)
-	# (A race's has the figures' columns; the career's is narrower, the car beside it bigger.)
-	_dealer.size = Vector2(minf(560.0, W * 0.43) if _screen == Screen.CAR else minf(470.0, W * 0.37), body_h - tabs)
+	# The makers' map wants room (the car beside it smaller); a race's list has the figures'
+	# columns; the career's is narrower, the car beside it bigger.
+	var dw := minf(560.0, W * 0.43) if _screen == Screen.CAR else minf(470.0, W * 0.37)
+	if _dealer.visible and _dealer.at_makers():
+		dw = minf(760.0, W * 0.52)
+	_dealer.size = Vector2(dw, body_h - tabs)
 	_settings.position = Vector2(M, TOP)
 	_settings.size = Vector2(W - M * 2, body_h)
 	_music_list.position = Vector2(M, TOP)
@@ -534,6 +538,7 @@ func _go(s: Screen, animate := true) -> void:
 		_dealer.open(_car_i)
 	elif s != Screen.CAR:
 		_dealer.close()
+		_showroom.calm = false
 	if s == Screen.CAREER and not _tournaments.visible:
 		_tournaments.open()
 	elif s != Screen.CAREER:
@@ -691,6 +696,8 @@ func _open_car_picker() -> void:
 ## The dealership's focus moved, a maker opened, or (in the career) the money or cars
 ## changed: the main button, the hints and the bar.
 func _on_dealer_changed() -> void:
+	# On the makers' map the car keeps to its wide shots, off the map.
+	_showroom.calm = _dealer.visible and _dealer.at_makers()
 	if _screen == Screen.CAR or _screen == Screen.GARAGE:
 		_refresh_chrome()
 		_overlay.queue_redraw()

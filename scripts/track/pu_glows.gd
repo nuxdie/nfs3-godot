@@ -18,11 +18,16 @@ static var _flares := {}   # pu_root -> {type -> {sprites: [name, name], colours
 
 ## The lights of `t` as flares under a new node, or null when there are none.
 static func build(t: Nfs5Track, pu_root: String) -> Node3D:
-	if t.lights.is_empty() or pu_root == "":
+	return glows(t.lights, pu_root)
+
+
+## `lights` ({type, pos}, as Nfs5Track.lights) as flares under a new node, or null.
+static func glows(lights: Array, pu_root: String) -> Node3D:
+	if lights.is_empty() or pu_root == "":
 		return null
 	var flares := _load(pu_root)
 	var per_sprite := {}   # sprite -> [[position, colour, custom], ...]
-	for li: Dictionary in t.lights:
+	for li: Dictionary in lights:
 		var f: Dictionary = flares.get(li.type, {})
 		if f.is_empty():
 			continue

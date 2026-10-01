@@ -25,6 +25,7 @@ var entries: Array[Dictionary] = []
 var focus := -1               # index into entries
 var current := -1             # the item in focus (as picked for now)
 var picked := -1              # the item in use when it opened, tagged in the list
+var hover_previews := true    # pointing at an item previews it; off, it's only lit (a click picks it)
 var total := 0                # items before filtering, for the count
 
 var _list: Control
@@ -367,7 +368,7 @@ func _on_list_input(e: InputEvent) -> void:
 			_hover = k
 			_list.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if k >= 0 else Control.CURSOR_ARROW
 			# Pointing at an item previews it; a click picks it.
-			if k >= 0 and k != focus:
+			if hover_previews and k >= 0 and k != focus:
 				focus = k
 				previewed.emit(focused_item())
 			_list.queue_redraw()

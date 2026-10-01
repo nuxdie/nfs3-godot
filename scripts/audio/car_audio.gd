@@ -27,6 +27,8 @@ extends AudioStreamPlayer3D
 ##   around you crossfade their oppbnk.viv bank's patch 1 (on the throttle) with 0 (off);
 ##   traffic loops genopp.bnk. Each has its own horn (horn.bnk), and they use HP2's gen.bnk
 ##   and siren (GameSounds.hp2).
+## - Gran Turismo 2: the intake's and exhaust's recordings at several rpm (Gt2Car), each faded
+##   in round its own rpm and played at the car's rpm over it, for every car.
 
 const RATE := 22050
 ## Firing frequency the engine loop is baked at; pitch_scale moves it to the car's rpm.
@@ -181,6 +183,12 @@ func _build() -> void:
 				# Porsche Unleashed's: the exhaust's loop beside the engine's.
 				if f == "ocar.bnk" and data.sound_bank("ocarex.bnk"):
 					_single_voices(data.sound_bank("ocarex.bnk"), false)
+	if _voices.is_empty() and data is Gt2Car:
+		# Gran Turismo 2's: its recordings at several rpm, intake and exhaust, crossfaded by
+		# rpm (Gt2Car.engine_voices), each at the car's rpm over the one it was recorded at.
+		for v: Dictionary in data.engine_voices():
+			_add_voice(v.stream, v.table, -1, v.exhaust, v.gain, 1.0)
+			_voices[-1].rpm = v.rpm
 	if _voices.is_empty() and _sounds and data != null:
 		# Traffic: the shared engines, a truck's for the heavy ones.
 		bank = _sounds.traffic_truck if car.mass > TRUCK_MASS and _sounds.traffic_truck else _sounds.traffic_car
@@ -308,7 +316,7 @@ func _sampled_engine() -> void:
 			_:
 				level *= lerpf(0.55, 1.0, gas)
 		var p: AudioStreamPlayer3D = v.player
-		p.pitch_scale = pitch * v.tune
+		p.pitch_scale = clampf(maxf(car.rpm, 400.0) / v.rpm, 0.25, 4.0) if v.has("rpm") else pitch * v.tune
 		_set_level(p, level)
 
 

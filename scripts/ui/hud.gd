@@ -448,6 +448,7 @@ func _on_draw() -> void:
 		_draw_pursuit(size)
 	if Game.hud_shows("messages"):
 		_draw_banner(size)
+	if Game.hud_shows("banter"):
 		_draw_chatter(size)
 	if not _tri_idx.is_empty():
 		RenderingServer.canvas_item_add_triangle_array(_draw.get_canvas_item(), _tri_idx, _tri_pts, _tri_cols)

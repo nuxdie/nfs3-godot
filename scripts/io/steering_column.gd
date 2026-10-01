@@ -9,14 +9,17 @@ class_name SteeringColumn
 ## approach, in the plane they spread most), pointing forward. What reaches further forward
 ## than REACH from that plane stays put, the fit made again without it, closing in from
 ## further out (a fit dragged off by a long column has the rim's edges well off its plane).
-## The rest turns about the middle of the rim.
+## The rest turns about the middle of the rim. A piece left still that comes back to the
+## rim's plane out past the hub (the Speedster's: a sliver from the rim's edge into the dash,
+## on the hub's white) is stray: nothing in the car it could belong to, it's best not drawn.
 
 const REACH: Array[float] = [0.15, 0.1, 0.07, 0.07]   # m ahead of the plane a turning triangle may reach
+const HUB := 0.1   # m from the column: where a still piece meeting the wheel stops being hidden behind its hub
 
 
 ## `pos` a triangle soup, `turns` the first vertex of each triangle marked as turning.
 ## Returns {pivot, axis (pointing forward), dropped (the triangles of `turns` that don't
-## turn after all)}, or {} without any.
+## turn after all), stray (those of them best not drawn)}, or {} without any.
 static func fit(pos: PackedVector3Array, turns: PackedInt32Array) -> Dictionary:
 	if turns.is_empty():
 		return {}
@@ -44,7 +47,16 @@ static func fit(pos: PackedVector3Array, turns: PackedInt32Array) -> Dictionary:
 			dropped.append(i)
 	# (The rim's the outside of the wheel all round: its box's middle is the hub's, whichever
 	# way the spokes go.)
-	return {"pivot": box.get_center(), "axis": plane.axis, "dropped": dropped}
+	var pivot := box.get_center()
+	var stray := PackedInt32Array()
+	for i in dropped:
+		for k in 3:
+			var d := pos[i + k] - pivot
+			var along := d.dot(plane.axis)
+			if along <= plane.at - pivot.dot(plane.axis) + REACH[-1] and (d - plane.axis * along).length() > HUB:
+				stray.append(i)
+				break
+	return {"pivot": pivot, "axis": plane.axis, "dropped": dropped, "stray": stray}
 
 
 ## {axis, at (where the plane is along it: its corners' median)} of the triangles `tris`,

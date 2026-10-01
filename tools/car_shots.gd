@@ -1,6 +1,6 @@
 extends Node
 ## Photographs cars in a plain studio, parked on their springs:
-##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|pu|hp2|hp2cops|hp2traffic] [id ...] [--lights] [--big] [--low]
+##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|pu|hp2|hp2cops|hp2traffic|gt2] [id ...] [--lights] [--big] [--low]
 ##       [--yaw=DEG ...] [--dist=M] [--wire] [--track=ID [--at=LAP FRACTION] [--night] [--weather]]
 ##       [--tag=NAME] [--siren] [--steer=-1..1]
 ## Each car is shot from the front and rear three-quarters (or from each --yaw, 0 = dead
@@ -13,8 +13,8 @@ extends Node
 ## --wipeat=T, --spoilerat=T hold a Porsche Unleashed car's wipers or spoiler part-way (0 .. 1); --indicate=-1|1|2
 ## lights its left, right or all indicators. --open=6,7,8,9 opens its doors, bonnet, boot; --windows winds them down. --camy=M, --looky=M, --fov=DEG place the camera;
 ## --dent=N hits it N rounds (parts tear off), --tear=6,8,30 tears those groups off (Nfs5Car's).
-## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --paint=N the car's colour N.
-## --wheel=RAD holds the steering wheel turned; --cockpit shoots the in-car view (--rearmirror close on its rear-view mirror). --driver=N seats Porsche Unleashed driver N; --onlydriver hides all but the people.
+## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --steercam=M close on the steering wheel from each --yaw (180 the driver's side), M off; --paint=N the car's colour N.
+## --wheel=RAD holds the steering wheel turned; --cockpit shoots the in-car view (--rearmirror close on its rear-view mirror). --driver=N seats Porsche Unleashed driver N; --onlydriver hides all but the people, --nodriver the people.
 ## --dumpskin=PATH saves the car's skin as a PNG; --skin=PATH draws it with that one instead.
 ## --aa=msaa2|msaa4|msaa8|fxaa|smaa|none (comma-separated) overrides the view's antialiasing.
 
@@ -62,6 +62,7 @@ func _run() -> void:
 		"hp2": paths = Game.cars.filter(func(c): return Game.is_hp2_path(c.path)).map(func(c): return c.path)
 		"hp2cops": paths = Game.hp2_cop_cars
 		"hp2traffic": paths = Game.hp2_traffic_cars
+		"gt2": paths = Game.cars.filter(func(c): return Game.is_gt2_path(c.path)).map(func(c): return c.path)
 		"proc": paths = ProceduralCar.PRESETS.map(func(_p): return "")
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)
@@ -268,6 +269,11 @@ func _run() -> void:
 				var m := mi.get_active_material(0) as ShaderMaterial
 				if m == null or not m.shader.resource_path.ends_with("car_driver.gdshader"):
 					mi.visible = false
+		if "--nodriver" in args:   # hides the people (car_driver's material)
+			for mi: MeshInstance3D in car.find_children("*", "MeshInstance3D", true, false):
+				var m := mi.get_active_material(0) as ShaderMaterial
+				if m != null and m.shader.resource_path.ends_with("car_driver.gdshader"):
+					mi.visible = false
 		var hs: Vector3 = data.half_size
 		var dents := 0
 		for a: String in args:
@@ -327,7 +333,20 @@ func _run() -> void:
 						cam.fov = 14.0
 						cam.look_at((glass[0] as MeshInstance3D).global_transform * (glass[0] as MeshInstance3D).get_aabb().get_center(), Vector3.UP)
 			for a: String in args:
-				if a.begins_with("--eye="):   # --eye=x,y,z:tx,ty,tz in the car's own frame (+z ahead, +x left)
+				if a.begins_with("--steercam="):   # close on the steering wheel from --yaw (180 the driver's side of it), DIST m off
+					for p in data.body_parts:
+						if not p.has("steering"):
+							continue
+						for mi: MeshInstance3D in car.find_children("*", "MeshInstance3D", true, false):
+							if mi.mesh == p.mesh:
+								var piv := mi.global_transform * (p.steering.pivot as Vector3)
+								var off := Vector3(sin(yaw), 0.3, cos(yaw)).normalized() * float(a.get_slice("=", 1))
+								cam.global_position = piv + car.global_basis * off
+								cam.look_at(piv, Vector3.UP)
+								cam.near = 0.01
+								break
+						break
+				elif a.begins_with("--eye="):   # --eye=x,y,z:tx,ty,tz in the car's own frame (+z ahead, +x left)
 					var ab := a.get_slice("=", 1).split(":")
 					var e := ab[0].split_floats(","); var t := ab[1].split_floats(",")
 					cam.global_position = car.global_transform * Vector3(e[0], e[1], e[2])

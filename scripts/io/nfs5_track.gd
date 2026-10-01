@@ -82,6 +82,9 @@ class Piece:
 	var tex := PackedInt32Array()
 	## Per triangle: how fast its UVs scroll (texture units a second; _uv_scroll).
 	var scroll := PackedVector2Array()
+	## Per triangle, optional (empty: none are): 1 where only its front is drawn (Gran
+	## Turismo 2's objects, whose undersides the PS1 never shows).
+	var one_sided := PackedByteArray()
 
 
 ## Per chunk: {center, pieces: [Piece ROAD, Piece GROUND, Piece SCENERY]}.
@@ -90,7 +93,9 @@ var chunks: Array[Dictionary] = []
 var backdrop: Array = []
 ## The animated props ("Anim": people, the Alps' rescue helicopter, the Autobahn's train,
 ## Auvergne's van and church bell, Zone Industrielle's cranes): {name, piece (a Piece about
-## the prop's own origin), keys (KeyframeMover's {pos, rot}, ANIM_KEYS_PER_SECOND)}.
+## the prop's own origin), keys (KeyframeMover's {pos, rot, scale}, ANIM_KEYS_PER_SECOND),
+## lights (as `lights`, about its origin: the helicopter's beacons), frames (a person's
+## motion: per frame its Piece's corners, ANIM_KEYS_PER_SECOND; or [])}.
 var props: Array = []
 ## The particle emitters (waterfall spray, river rapids, fountains, chimney smoke, steam):
 ## {tag (Render/particle.ini's system), pos, x, y (its axes; it emits along y)}.
@@ -409,6 +414,13 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 			road_tex[tex_of.get(crp.data.decode_s16(pe.offset + 4), -1)] = true
 	road_tex.erase(-1)
 	var numbered := RegEx.create_from_string("^[A-Z]+?(\\d{4})")
+	# The people's motions: a knock-over article of the same name (the library every track
+	# carries) with the frames of its vertices ("Anim"'s second word their count).
+	var motions := {}
+	for art in crp.articles:
+		var an := crp.sub(art, "Anim")
+		if an != null and an.length >= 8 and crp.data.decode_s32(an.offset + 4) > 1:
+			motions[art.name] = art
 	for art in crp.articles:
 		var base := crp.sub(art, "Base")
 		var vt := crp.sub(art, "vt")
@@ -431,9 +443,12 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 				prop.kind = Kind.SCENERY
 				_add_parts(crp, art, verts, uvs, cols, tex_of, scroll_of, true, func(_tex: int) -> Piece: return prop)
 				if prop.tex.size() > 0:
-					props.append({"name": art.name, "piece": prop, "keys": keys})
+					var prop_lights := []
+					_read_emitters(crp, art, prop_lights, [], false)
+					props.append({"name": art.name, "piece": prop, "keys": keys, "lights": prop_lights,
+						"frames": _vert_frames(crp, motions.get(art.name), verts.size(), uvs, cols, tex_of, scroll_of)})
 			continue
-		_read_emitters(crp, art)
+		_read_emitters(crp, art, lights, emitters)
 		var box := AABB(verts[0], Vector3.ZERO) if verts.size() > 0 else AABB()
 		for v in verts:
 			box = box.expand(v)
@@ -484,30 +499,56 @@ func _add_parts(crp: Crp, art: Dictionary, verts: PackedVector3Array, uvs: Packe
 			dest.scroll.append(scroll_of.get(p.material, Vector2.ZERO))
 
 
-## The article's lights ("ef" of type 2) into `lights`, and its particle emitters ("ef" of
-## type 3, 56 bytes: 3, 0, where it is, 1, its X
-## and Y axes, the particle system's tag ("RPD1", "WF07": Render/particle.ini, see
-## PuParticles), 0) into `emitters`. Their X is the other way round from the meshes'.
-func _read_emitters(crp: Crp, art: Dictionary) -> void:
+## The article's lights ("ef" of type 2) into `lights_out`, and its particle emitters ("ef"
+## of type 3, 56 bytes: 3, 0, where it is, 1, its X and Y axes, the particle system's tag
+## ("RPD1", "WF07": Render/particle.ini, see PuParticles), 0) into `emitters_out`. In the
+## world their X is the other way round from the meshes'; an animated prop's are about its
+## own origin, the meshes' way round (`in_world` false).
+func _read_emitters(crp: Crp, art: Dictionary, lights_out: Array, emitters_out: Array,
+		in_world := true) -> void:
 	var d := crp.data
+	var sx := -1.0 if in_world else 1.0
 	for k in 64:
 		var e := crp.sub(art, "ef", k)
 		if e == null:
 			break
 		var o := e.offset
 		var v := func(at: int) -> Vector3:
-			return Vector3(-d.decode_float(o + at), d.decode_float(o + at + 4), d.decode_float(o + at + 8))
+			return Vector3(sx * d.decode_float(o + at), d.decode_float(o + at + 4), d.decode_float(o + at + 8))
 		if e.length >= 44 and d.decode_s32(o) == 2:
 			# A light: 2, 0, where it is, 0, 0, 1, 0, its type (4 characters, backwards:
 			# "yrts" for "stry", PuGlows) and a word per light.
 			var name := d.slice(o + 36, o + 40)
 			name.reverse()
-			lights.append({"type": name.get_string_from_ascii(), "pos": v.call(8)})
+			lights_out.append({"type": name.get_string_from_ascii(), "pos": v.call(8)})
 			continue
 		if e.length < 56 or d.decode_s32(o) != 3:
 			continue
-		emitters.append({"tag": d.slice(o + 48, o + 52).get_string_from_ascii(), "pos": v.call(8),
+		emitters_out.append({"tag": d.slice(o + 48, o + 52).get_string_from_ascii(), "pos": v.call(8),
 			"x": v.call(24), "y": v.call(36)})
+
+
+## A person's motion (`lib`, from `motions`: "vt" frame n at index n << 4, "Anim"'s second
+## word of them) as the corners of the prop's triangles per frame, in its Piece's order, or
+## [] when there's none or it doesn't fit (another vertex count).
+func _vert_frames(crp: Crp, lib: Variant, n_verts: int, uvs: PackedVector2Array,
+		cols: PackedColorArray, tex_of: Dictionary, scroll_of: Dictionary) -> Array:
+	var out := []
+	if lib == null:
+		return out
+	var art: Dictionary = lib
+	var count := crp.data.decode_s32(crp.sub(art, "Anim").offset + 4)
+	for f in count:
+		var vt := crp.sub(art, "vt", f << 4)
+		if vt == null:
+			break
+		var verts := crp.vec3s(vt)
+		if verts.size() != n_verts:
+			return []
+		var pc := Piece.new()
+		_add_parts(crp, art, verts, uvs, cols, tex_of, scroll_of, true, func(_tex: int) -> Piece: return pc)
+		out.append(pc.pos)
+	return out if out.size() > 1 else []
 
 
 ## An animated prop's keys ("Anim": their count; "Anqt": 52 bytes each, 15 a second
@@ -813,6 +854,16 @@ func mirror_world() -> void:
 		for key in ["pos", "x", "y"]:
 			em[key] = Vector3(-em[key].x, em[key].y, em[key].z)
 	for pr: Dictionary in props:
+		for f in pr.frames.size():
+			var pos: PackedVector3Array = pr.frames[f]
+			for i in range(0, pos.size(), 3):
+				var a := pos[i + 1]
+				pos[i + 1] = Vector3(-pos[i + 2].x, pos[i + 2].y, pos[i + 2].z)
+				pos[i + 2] = Vector3(-a.x, a.y, a.z)
+				pos[i] = Vector3(-pos[i].x, pos[i].y, pos[i].z)
+			pr.frames[f] = pos
+		for li: Dictionary in pr.lights:
+			li.pos = Vector3(-li.pos.x, li.pos.y, li.pos.z)
 		for k: Dictionary in pr.keys:
 			k.pos = Vector3(-k.pos.x, k.pos.y, k.pos.z)
 			var q: Quaternion = k.rot
