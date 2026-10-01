@@ -8,6 +8,10 @@ const MASS := 40.0
 ## Share of its speed a car keeps after knocking a sign over.
 const CAR_SPEED_KEPT := 0.92
 
+## Played (all together) when it's knocked over, louder the faster the car: Hot Pursuit 2's
+## props have theirs (Hp2PropSounds); the others none.
+var knock_sounds: Array = []
+
 var _trigger: Area3D
 var _knocked := false
 
@@ -75,3 +79,5 @@ func _knock(car: Car) -> void:
 	var axis := v.cross(up).normalized() if speed > 0.5 else Vector3.RIGHT
 	angular_velocity = -axis * (2.0 + speed * 0.25)
 	car.linear_velocity *= CAR_SPEED_KEPT
+	for snd: AudioStream in knock_sounds:
+		GameSounds.play_once(self, snd, linear_to_db(clampf(speed / 25.0, 0.3, 1.0)), randf_range(0.94, 1.06))

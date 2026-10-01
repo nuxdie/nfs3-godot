@@ -19,9 +19,6 @@ uniform float gloss = 0.4;
 uniform bool wheel = false;
 // Panel shut lines: how deep (model units) the dark lines drawn in the paint are cut.
 uniform float seam_depth = 0.006;
-// SkinHD's upscaled skins: log2 of their scale (0 the game's own). Their cut-outs' contours are
-// smooth already, and the tests on "the skin round a texel" look that many mips further up.
-uniform int skin_lod = 0;
 // High Stakes' cockpit (the in-car view's dash, seats and doors): shut in under the roof, it
 // sees neither the sky nor the reflection probe's open road, so it takes no clearcoat and
 // only a faint sheen instead of mirroring them as a blue-grey film.
@@ -148,7 +145,7 @@ void fragment() {
 	// a shape, bulging it into its neighbours.
 	float cut = COLOR.b < 0.5 ? 0.23 : 0.08;
 	float cut_alpha = textureLod(albedo_tex, UV, 0.0).a;
-	if (skin_lod == 0 && abs(textureLod(albedo_tex, UV, 2.0).a - cut_alpha) > 0.01) {
+	if (abs(textureLod(albedo_tex, UV, 2.0).a - cut_alpha) > 0.01) {
 		vec4 cell = textureGather(albedo_tex, UV, 3);
 		float cell_max = max(max(cell.x, cell.y), max(cell.z, cell.w));
 		float seen_min = min4(mix(vec4(1.0), cell, step(cut, cell)));
@@ -189,7 +186,7 @@ void fragment() {
 	// (As the lines blur into their surroundings further off, they fade out by themselves.)
 	float seam = 0.0;
 	if (!wheel && !interior) {
-		vec4 around = texture(albedo_tex, UV, 3.0 + float(skin_lod));
+		vec4 around = texture(albedo_tex, UV, 3.0);
 		float around_luma = dot(around.rgb, vec3(0.2126, 0.7152, 0.0722));
 		float around_paint = 1.0 - smoothstep(0.7, 0.85, around.a);
 		// (Not beside a cut-out, whose transparent texels darken the mips round its edge.)

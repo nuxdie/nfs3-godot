@@ -95,11 +95,13 @@ func _read_game() -> void:
 		var c: Dictionary = Game.career_data().circuits.get(run.circuit, {})
 		for t in Game.career_data().tournaments:
 			if t.id == run.tournament and not c.is_empty():
-				_over = "%s  ·  CIRCUIT %d  ·  RACE %d OF %d" % [t.name.to_upper(), t.circuits.find(run.circuit) + 1,
-					run.race + 1, c.races.size()]
+				var which: String = c.name.to_upper() if c.has("name") else "CIRCUIT %d" % (t.circuits.find(run.circuit) + 1)
+				_over = "%s  ·  %s  ·  RACE %d OF %d" % [t.name.to_upper(), which, run.race + 1, c.races.size()]
 		tips.append("tournament")
 	var facts := PackedStringArray()
-	if Game.is_pu_track(id):
+	if Game.is_hp2_track(id):
+		_over += "  ·  HOT PURSUIT 2"
+	elif Game.is_pu_track(id):
 		_over += "  ·  PORSCHE UNLEASHED"
 	elif Game.is_hs_track(id):
 		_over += "  ·  HIGH STAKES"

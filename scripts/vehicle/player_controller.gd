@@ -10,6 +10,7 @@ func _ready() -> void:
 	car = get_parent() as Car
 	process_physics_priority = -10
 	car.set_manual(Game.manual_gears)
+	car.set_aids(Game.abs_mode, Game.traction_control, Game.stability)
 
 
 func _physics_process(_dt: float) -> void:

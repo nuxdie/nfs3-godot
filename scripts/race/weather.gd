@@ -17,6 +17,9 @@ const WET_GRIP := 0.8     # tyre grip on a soaked road...
 const SNOW_GRIP := 0.68   # ...and on a snowy one
 const WET_TIME := 20.0    # seconds of rain to soak the road
 const DRY_TIME := 90.0    # seconds for it to dry once the rain stops
+## Grip per second a car's tyres gain or lose going under cover and out again: the road
+## dries out and gets wet over a car length or two, not at a line.
+const GRIP_EASE := 0.6
 ## Render layer bit of the rain and snow, which reflection probes leave out.
 const PRECIP_LAYER := 8
 
@@ -48,6 +51,7 @@ var _snow := false
 var _cover: RainCover
 var _wet := 0.0            # 0 dry - 1 soaked (always 1 in snow)
 var _grip_t := 0.0
+var _grip_to := {}         # Car -> the grip it's easing towards
 
 var _lightning := false
 var _next_roll := 0.0
@@ -366,16 +370,20 @@ func _physics_process(dt: float) -> void:
 		return
 	if not _snow:
 		_wet = move_toward(_wet, _amount, dt / (WET_TIME if _amount > _wet else DRY_TIME))
-	# Only a few times a second: the road doesn't change under a car much faster.
+	# Where it's sheltered only a few times a second: the road doesn't change under a car
+	# much faster. The grip eases to it every step.
 	_grip_t -= dt
-	if _grip_t > 0.0:
-		return
-	_grip_t = 0.1
-	var open := lerpf(1.0, SNOW_GRIP if _snow else WET_GRIP, _wet)
-	for c in get_parent().get_children():
-		if c is Car:
-			c.sheltered = _cover.covered(c.global_position)
-			c.surface_grip = 1.0 if c.sheltered else open
+	if _grip_t <= 0.0:
+		_grip_t = 0.1
+		var open := lerpf(1.0, SNOW_GRIP if _snow else WET_GRIP, _wet)
+		_grip_to.clear()
+		for c in get_parent().get_children():
+			if c is Car:
+				c.sheltered = _cover.covered(c.global_position)
+				_grip_to[c] = 1.0 if c.sheltered else open
+	for c in _grip_to:
+		if is_instance_valid(c):
+			c.surface_grip = move_toward(c.surface_grip, _grip_to[c], GRIP_EASE * dt)
 
 
 # ------------------------------------------------------------------ lightning

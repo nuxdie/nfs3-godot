@@ -29,7 +29,8 @@ const TYPE_CAR_RACE := 2
 ## A circuit's car restriction, its value in brackets: a class [0..3: AAA, AA, A, B], that
 ## class and under, any car, a model [fedata serial], a make [man.dat line], any model
 ## (as open), or a car lent for it (none of yours).
-enum { CLASS, CLASS_AND_UNDER, OPEN, MODEL, MANUFACTURER, OPEN_MODEL, LOANER }
+## CARS: the circuit's list of car ids (`cars`), for the other games' tournaments.
+enum { CLASS, CLASS_AND_UNDER, OPEN, MODEL, MANUFACTURER, OPEN_MODEL, LOANER, CARS }
 const CLASS_NAMES := ["AAA", "AA", "A", "B"]
 ## A car race's prize (its first "prize", 1..9) as the serial of the car won; -1 none. A
 ## tournament circuit whose first prize is as small (the Pro Cups: 1, 2, 9) gives that car
@@ -39,6 +40,12 @@ const AWARD_CARS := [41, 42, -1, -1, 4, 35, 31, 16, 39]
 ## Below this a circuit's first "prize" is an AWARD_CARS number, not dollars.
 const AWARD_MAX := 100.0
 
+## "hs", "nfs3" or "pu": whose tournaments these are (a career each).
+var series := "hs"
+var start_money := 25000
+## The cars of this series' dealer (and of its opponents), by id: {} for High Stakes' own
+## (Game.dealer_cars works them out).
+var dealer := {}
 var tournaments: Array[Dictionary] = []   # {id, name, open, circuits: [id], unlocks: [id]}
 ## id -> {id, type, fee, races: [{track, reverse, mirror, night, weather}], opponents, laps,
 ## restriction, value, prizes: [$], award (serial of the car the winner gets, or -1), pace,
@@ -126,7 +133,16 @@ func restriction_text(c: Dictionary) -> String:
 			return makes[v] if v >= 0 and v < makes.size() else ""
 		LOANER:
 			return "Loaned car"
+		CARS:
+			return c.get("only", "")
 	return ""
+
+
+## Race `r`'s track id ("" if it isn't installed): its own `id`, or High Stakes' number.
+static func race_track(r: Dictionary) -> String:
+	if r.has("id"):
+		return r.id if r.id in Game.tracks else ""
+	return track_id(r.track)
 
 
 ## High Stakes' track number `n` as a track id ("hs_germany"), or "" if it isn't installed.

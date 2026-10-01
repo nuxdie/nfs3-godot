@@ -30,7 +30,9 @@ var channels := 2
 var min_length_s := 0.0              # a song shorter than this plays its loop again
 var finished := false                # played through (next_block then returns nothing)
 var played := 0                      # frames handed out so far
+var length_frames := 0               # an .asf's length from its header (0 not known)
 var _pcm := false
+var _split := false                  # EA ADPCM with each channel's data apart (Porsche Unleashed)
 
 var _data: PackedByteArray
 var _offsets := PackedInt32Array()   # section starts; [0] for an .asf
@@ -46,8 +48,13 @@ var _seen := {}                      # sections played this time round
 static func open_asf(path: String) -> EaMusic:
 	if path == "" or not FileAccess.file_exists(path):
 		return null
+	return open_asf_bytes(FileAccess.get_file_as_bytes(path))
+
+
+## An .asf already read (a Porsche Unleashed song out of its .viv), or null.
+static func open_asf_bytes(data: PackedByteArray) -> EaMusic:
 	var m := EaMusic.new()
-	m._data = FileAccess.get_file_as_bytes(path)
+	m._data = data
 	m._offsets = PackedInt32Array([0])
 	m._branches = [[]]
 	return m if m._read_header(0) else null
@@ -78,6 +85,7 @@ static func open_mus(path: String, map_path: String) -> EaMusic:
 		m._offsets.append((map[q] << 24) | (map[q + 1] << 16) | (map[q + 2] << 8) | map[q + 3])
 	if m._first >= count or not m._read_header(m._offsets[m._first]):
 		return null
+	m.length_frames = 0   # (that was the first section's)
 	return m
 
 
@@ -139,6 +147,7 @@ func _read_header(at: int) -> bool:
 		return false
 	p += 4
 	var codec := 0
+	var version := 0
 	var end := at + d.decode_u32(at + 4)
 	while p < end:
 		var t := d[p]
@@ -157,8 +166,12 @@ func _read_header(at: int) -> bool:
 			0x82: channels = v
 			0x83: codec = v
 			0x84: rate = v
-	# 0 PCM, 7 EA ADPCM. (Split blocks, newer games', aren't handled.)
-	_pcm = codec == 0
+			0x80: version = v
+			0x85: length_frames = v
+	# 0 PCM, 7 EA ADPCM; no codec tag in a version 1 header (Porsche Unleashed's) is EA
+	# ADPCM in split blocks.
+	_split = codec == 0 and version >= 1
+	_pcm = codec == 0 and not _split
 	return (codec == 0 or codec == 7) and (channels == 1 or channels == 2)
 
 
@@ -170,6 +183,8 @@ func _decode(p: int, size: int) -> PackedVector2Array:
 		return out
 	out.resize(n)
 	var stereo := channels == 2
+	if _split:
+		return _decode_split(p, size, n, out)
 	if _pcm:
 		n = mini(n, (size - 4) / (4 if stereo else 2))
 		out.resize(n)
@@ -233,3 +248,74 @@ func _decode(p: int, size: int) -> PackedVector2Array:
 	if o < n:
 		out.resize(o)
 	return out
+
+
+## A split block: after the sample count, each channel's offset (from the end of the
+## offsets); at each, its two starting samples (current, previous) and then frames of 28
+## samples: a byte of predictor (high nibble) and shift, then 14 bytes, high nibble first;
+## or, the byte 0xEE, two (unused) samples and 28 plain ones, 16-bit big-endian.
+func _decode_split(p: int, size: int, n: int, out: PackedVector2Array) -> PackedVector2Array:
+	var d := _data
+	var end := p + size
+	var base := p + 4 + channels * 4
+	if base > end:
+		return PackedVector2Array()
+	var got := n
+	for c in channels:
+		var i := base + d.decode_u32(p + 4 + c * 4)
+		if i + 4 > end:
+			return PackedVector2Array()
+		var cur := d.decode_s16(i)
+		var prev := d.decode_s16(i + 2)
+		i += 4
+		var o := 0
+		while o < n:
+			if i >= end:
+				break
+			var todo := mini(28, n - o)
+			var hdr := d[i]
+			if hdr == 0xEE:
+				if i + 61 > end:
+					break
+				for k in todo:
+					var at := i + 5 + k * 2
+					var v := (d[at] << 8) | d[at + 1]
+					_put(out, o + k, c, (v - 65536 if v > 32767 else v) / 32768.0)
+				# The frame's last two samples carry on.
+				var a := i + 5 + 26 * 2
+				var s1 := (d[a + 2] << 8) | d[a + 3]
+				var s2 := (d[a] << 8) | d[a + 1]
+				cur = s1 - 65536 if s1 > 32767 else s1
+				prev = s2 - 65536 if s2 > 32767 else s2
+				i += 61
+			else:
+				if i + 15 > end:
+					break
+				var c1: int = XA_COEF[(hdr >> 4) & 3][0]
+				var c2: int = XA_COEF[(hdr >> 4) & 3][1]
+				var sh := (hdr & 0x0F) + 8
+				for k in 28:
+					var b := d[i + 1 + (k >> 1)]
+					var nib := (b >> 4) if (k & 1) == 0 else (b & 0x0F)
+					var v := clampi((((((nib - 16) if nib > 7 else nib) << 28) >> sh) + cur * c1 + prev * c2 + 128) >> 8, -32768, 32767)
+					prev = cur
+					cur = v
+					if k < todo:
+						_put(out, o + k, c, v / 32768.0)
+				i += 15
+			o += todo
+		got = mini(got, o)
+	if got < n:
+		out.resize(got)
+	return out
+
+
+func _put(out: PackedVector2Array, at: int, channel: int, v: float) -> void:
+	var f := out[at]
+	if channels == 1:
+		f = Vector2(v, v)
+	elif channel == 0:
+		f.x = v
+	else:
+		f.y = v
+	out[at] = f

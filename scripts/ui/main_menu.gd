@@ -6,11 +6,12 @@ extends Control
 ##             comes back here with the pick (Esc keeps the old one).
 ##   CAREER    High Stakes' tournaments and the garage their cars live in, with the money and
 ##             trophies. Entering a circuit goes on to choosing (or buying) a car for it.
+##   MUSIC     every song of the games found, to play, skip and pause (MusicBrowser).
 ##   SETTINGS  gameplay, graphics, audio, the race HUD, the controls and the game data found.
 ## The chosen car stands on a turntable over the track's picture. Mouse, keyboard and pad
 ## work throughout: every action is on screen as something to click, with its key beside it.
 
-enum Screen { RACE, TRACK, CAR, CAREER, GARAGE, SETTINGS }
+enum Screen { RACE, TRACK, CAR, CAREER, GARAGE, SETTINGS, MUSIC }
 
 const MODE_NOTES := [
 	"Up to seven rivals over one to eight laps.",
@@ -97,6 +98,7 @@ var _tracks: TrackBrowser
 var _cars: CarBrowser
 var _tournaments: TournamentPanel
 var _garage: GaragePanel
+var _music_list: MusicBrowser
 var _fade: ColorRect
 var _photo_back: TextureRect
 var _photo_front: TextureRect
@@ -327,9 +329,13 @@ func _build_browsers() -> void:
 		if i >= 0:
 			_preview_car_later(i))
 	_garage.changed.connect(_on_garage_changed)
+	_garage.paint_names = _paint_names
 	_garage.chosen.connect(func(i: int): _car_i = i; _enter_circuit())
 	_garage.back.connect(_back)
 	add_child(_garage)
+	_music_list = MusicBrowser.new()
+	_music_list.cancelled.connect(_back)
+	add_child(_music_list)
 
 
 func _build_chrome() -> void:
@@ -344,6 +350,8 @@ func _build_chrome() -> void:
 	if Game.career_data():
 		names.append("Career")
 		_nav_screens.append(Screen.CAREER)
+	names.append("Music")
+	_nav_screens.append(Screen.MUSIC)
 	names.append("Settings")
 	_nav_screens.append(Screen.SETTINGS)
 	_nav.set_items(names, 0)
@@ -392,6 +400,9 @@ func _layout() -> void:
 	_garage.size = Vector2(minf(470.0, W * 0.37), body_h - (0.0 if _in_entry() else 44.0))
 	_settings.position = Vector2(M, TOP)
 	_settings.size = Vector2(W - M * 2, body_h)
+	_music_list.position = Vector2(M, TOP)
+	_music_list.size = Vector2(minf(620.0, W * 0.48), body_h)
+	_music_list.card_rect = Rect2(_music_list.size.x + 60, 40, W - M * 2 - _music_list.size.x - 60, body_h - 40)
 	if _screen == Screen.TRACK:
 		var x0 := _tracks.position.x + _tracks.size.x + 36
 		var mw := W - M - x0
@@ -489,7 +500,8 @@ func _place_car() -> void:
 # ------------------------------------------------------------------ screens
 
 func _top_level(s: Screen) -> bool:
-	return s == Screen.RACE or s == Screen.CAREER or s == Screen.SETTINGS or (s == Screen.GARAGE and _tour.is_empty())
+	return s == Screen.RACE or s == Screen.CAREER or s == Screen.SETTINGS or s == Screen.MUSIC \
+		or (s == Screen.GARAGE and _tour.is_empty())
 
 
 func _in_career() -> bool:
@@ -537,6 +549,10 @@ func _go(s: Screen, animate := true) -> void:
 		_tournaments.open()
 	elif s != Screen.CAREER:
 		_tournaments.close()
+	if s == Screen.MUSIC and not _music_list.visible:
+		_music_list.open(0)
+	elif s != Screen.MUSIC:
+		_music_list.close()
 	if s == Screen.SETTINGS and not _settings.visible:
 		_settings.open(0)
 	elif s != Screen.SETTINGS:
@@ -556,7 +572,7 @@ func _go(s: Screen, animate := true) -> void:
 	_show_backdrop(animate)
 	_tint_backdrop()
 	# (The pickers slide themselves in.)
-	if animate and was != s and s != Screen.TRACK and s != Screen.CAR:
+	if animate and was != s and s != Screen.TRACK and s != Screen.CAR and s != Screen.MUSIC:
 		var panel: Control = {Screen.RACE: _hub, Screen.CAREER: _tournaments, Screen.GARAGE: _garage,
 			Screen.SETTINGS: _settings}[s]
 		panel.modulate.a = 0.0
@@ -575,7 +591,7 @@ func _refresh_chrome() -> void:
 	if Game.career_data():
 		var badges := PackedStringArray()
 		for sc in _nav_screens:
-			badges.append(UiKit.money(Game.career_money) if sc == Screen.CAREER else "")
+			badges.append(UiKit.money(Game.career_money) if sc == Screen.CAREER and Game.career_series != "nfs3" else "")
 		_nav.set_badges(badges)
 	_sub.visible = _in_career() and not _in_entry()
 	if _sub.visible:
@@ -609,10 +625,14 @@ func _update_hints() -> void:
 		Screen.CAREER:
 			h = [["↑↓", "CIRCUIT"], ["←→", "TOURNAMENT"], ["G", "GARAGE", func(): _tour = {}; _go(Screen.GARAGE)],
 				["N", "NEW CAREER", _tournaments.new_career]]
+			if Game.career_series_list().size() > 1:
+				h.insert(2, ["TAB", "GAME", _tournaments.next_series])
 		Screen.GARAGE:
 			h = [["↑↓", "BROWSE"], ["DRAG", "ROTATE CAR"]]
 		Screen.SETTINGS:
 			h = _settings.hints()
+		Screen.MUSIC:
+			h = _music_list.hints()
 	if _top_level(_screen):
 		h.append(["Q E", "SWITCH TAB"])
 	_hints.set_hints(h)
@@ -892,7 +912,8 @@ func _entry_title() -> String:
 		return ""
 	var t: Dictionary = _tour.t
 	var c: Dictionary = Game.career_data().circuits.get(_tour.cid, {})
-	var bits := PackedStringArray(["Choose a car for %s, circuit %d" % [t.get("name", ""), t.get("circuits", []).find(_tour.cid) + 1]])
+	var which: String = c.name if c.has("name") else "circuit %d" % (t.get("circuits", []).find(_tour.cid) + 1)
+	var bits := PackedStringArray(["Choose a car for %s, %s" % [t.get("name", ""), which]])
 	var only := Game.career_data().restriction_text(c)
 	if only != "":
 		bits.append(only)
@@ -1007,7 +1028,7 @@ func _preview_car_later(i: int) -> void:
 	_show_backdrop(true)
 	_stats.set_car(Game.car_spec(i), Game.units_kmh, _upgrade_shown(i))
 	_sheet.show_car(i, _upgrade_shown(i), _sheet_context(i))
-	_car_pending = i if _showroom.shown_id() != i else -1
+	_car_pending = i if _showroom.shown_id() != i or not is_equal_approx(_showroom.shown_wear(), _wear_shown(i)) else -1
 	_car_pending_t = CAR_PREVIEW_DELAY
 	if i == _car_i:
 		_refresh_car_card()
@@ -1017,6 +1038,12 @@ func _preview_car_later(i: int) -> void:
 
 ## Car `i` in paint `p` (remembered per car): repainted on the stand where it's the one on show.
 func _set_paint(i: int, p: int) -> void:
+	# Your tournament car keeps its paint: in the garage another is only tried on (a respray).
+	if _screen == Screen.GARAGE and Game.owns(i):
+		_garage.try_paint(p)
+		if _showroom.shown_id() == i:
+			_showroom.repaint(Game.paint_tint(i, Game.own_car(i), p))
+		return
 	Game.paints[Game.cars[i].id] = p
 	if _showroom.shown_id() == i:
 		var data: Object = Game.own_car(i)
@@ -1064,13 +1091,29 @@ func _refresh_pick_rows() -> void:
 	var i := _car_shown
 	var names := _paint_names(i)
 	_pick_paint.swatches = _paint_swatches(i)
-	_pick_paint.set_items(names, mini(Game.paint_of(i), names.size() - 1))
+	_pick_paint.set_items(names, mini(_paint_shown(i), names.size() - 1))
+	# (A paint only tried on goes when the focus does.)
+	if _showroom.shown_id() == i and _showroom.car:
+		_showroom.repaint(Game.paint_tint(i, Game.own_car(i), _paint_shown(i)))
 	_pick_trim.set_items(_pick_trim.items, Game.upgrade_of(i))
 
 
 ## The upgrade level car `i`'s ratings show: in the garage, as it's fitted there.
 func _upgrade_shown(i: int) -> int:
 	return Game.garage_upgrade(i) if _screen == Screen.GARAGE else Game.upgrade_of(i)
+
+
+## The paint car `i` shows: in the garage yours wear their own (or one being tried on).
+func _paint_shown(i: int) -> int:
+	if _screen == Screen.GARAGE and Game.owns(i):
+		var t := _garage.paint_tried(i)
+		return t if t >= 0 else Game.garage_paint(i)
+	return Game.paint_of(i)
+
+
+## The damage car `i` shows dented on the stand: in the garage, what it carries.
+func _wear_shown(i: int) -> float:
+	return Game.garage_damage(i) if _screen == Screen.GARAGE else 0.0
 
 
 ## The showroom's car lit for the time of day and wiping the rain chosen.
@@ -1083,9 +1126,10 @@ func _show_car_now(i: int) -> void:
 	_car_pending = -1
 	var data: Object = Game.own_car(i)
 	_stats.set_car(data, Game.units_kmh, _upgrade_shown(i))
-	_showroom.show_car(data, Game.paint_tint(i, data), _upgrade_shown(i), i)
+	_showroom.show_car(data, Game.paint_tint(i, data, _paint_shown(i)), _upgrade_shown(i), i, Showroom.DROP_HEIGHT, _wear_shown(i))
 	# Its colours are known now.
 	_refresh_pick_rows()
+	_garage.queue_redraw()
 	if i == _car_i:
 		_refresh_car_rows()
 	_overlay.queue_redraw()
@@ -1132,7 +1176,7 @@ func _tint_backdrop() -> void:
 		tint = Color(0.5, 0.5, 0.53)
 	elif _screen == Screen.CAREER:
 		tint = Color(0.42, 0.42, 0.45)
-	elif _screen == Screen.SETTINGS:
+	elif _screen == Screen.SETTINGS or _screen == Screen.MUSIC:
 		tint = Color(0.25, 0.25, 0.28)
 	if _weather.index == 1 and not _in_career():
 		tint = tint.darkened(0.25).lerp(Color(0.3, 0.33, 0.36), 0.3)
@@ -1162,9 +1206,9 @@ func _track_photo(id: String) -> Texture2D:
 	var tex: Texture2D = null
 	var fsh: Fsh = null
 	var top := 60
-	if Game.is_pu_track(id):
-		# Porsche Unleashed's photo of the track, its middle.
-		var photo := Game.pu_track_photo(id)
+	if Game.is_pu_track(id) or Game.is_hp2_track(id):
+		# Porsche Unleashed's (Hot Pursuit 2's) photo of the track, its middle.
+		var photo := Game.hp2_track_photo(id) if Game.is_hp2_track(id) else Game.pu_track_photo(id)
 		if photo:
 			var img := photo.get_region(Rect2i(0, photo.get_height() / 2 - 64, 256, 128))
 			img.convert(Image.FORMAT_RGBA8)
@@ -1219,6 +1263,7 @@ func show_screen(name: String) -> void:
 			_go(Screen.CAREER, false)
 			_tournaments.choose()
 		"settings": _go(Screen.SETTINGS, false)
+		"music": _go(Screen.MUSIC, false)
 		_: _go(Screen.RACE, false)
 
 

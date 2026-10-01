@@ -40,6 +40,8 @@ func hints() -> Array:
 func section(id: String) -> String:
 	if id == Game.PROCEDURAL_TRACK:
 		return "GENERATED"
+	if Game.is_hp2_track(id):
+		return "HOT PURSUIT 2 · POINT TO POINT" if Game.is_sprint(id) else "HOT PURSUIT 2 · CIRCUITS"
 	if Game.is_pu_track(id):
 		return "PORSCHE UNLEASHED · POINT TO POINT" if Game.is_sprint(id) else "PORSCHE UNLEASHED · CIRCUITS"
 	if not Game.is_hs_track(id):

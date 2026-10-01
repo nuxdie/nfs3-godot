@@ -154,6 +154,14 @@ func _ready() -> void:
 			Game.quality = int(arg.trim_prefix("--quality=")) as Game.Quality
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://shots"))
+	# --series=nfs3|hs|pu: that game's tournaments (on a scratch career file), for the menu's
+	# tournaments or --circuit.
+	for arg in args:
+		if arg.begins_with("--series="):
+			Game.career_path = "user://career_autotest.cfg"
+			Game._career_loaded = false
+			Game.career_data()
+			Game.set_career_series(arg.trim_prefix("--series="))
 	if Game.track_id == "menu":
 		# Just photograph the front end.
 		if "--settings" in args:
@@ -177,7 +185,7 @@ func _ready() -> void:
 			get_viewport().get_texture().get_image().save_png("shots/menu.png")
 		get_tree().quit()
 		return
-	# --circuit=N: High Stakes' circuit N (its first race), on a scratch career file.
+	# --circuit=N: circuit N (its first race) of High Stakes' (or --series'), on a scratch career file.
 	for arg in args:
 		if arg.begins_with("--circuit="):
 			Game.career_path = "user://career_autotest.cfg"

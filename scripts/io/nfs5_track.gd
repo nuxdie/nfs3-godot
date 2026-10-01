@@ -19,6 +19,9 @@ const SIMD_SIZE := 80
 ## Slices per chunk: the articles are named for the slice their chunk starts at, in steps
 ## of 8 ("CNK0016L", "RD1136C").
 const SLICES_PER_CHUNK := 8
+## The animated props' keys a second: the rescue helicopter's rotor then turns ~325 rpm,
+## the Autobahn's train runs 280 km/h, Auvergne's van 32 km/h.
+const ANIM_KEYS_PER_SECOND := 15.0
 ## A UV-animated material's speed unit (texture units a second): see _uv_scroll.
 const UV_SCROLL_UNIT := 0.01
 ## An article's base flags: ground the car can be on (the "secondary" terrain: verges,
@@ -85,6 +88,13 @@ class Piece:
 var chunks: Array[Dictionary] = []
 ## Scenery on the horizon (see BACKDROP_REACH), one Piece per kind.
 var backdrop: Array = []
+## The animated props ("Anim": people, the Alps' rescue helicopter, the Autobahn's train,
+## Auvergne's van and church bell, Zone Industrielle's cranes): {name, piece (a Piece about
+## the prop's own origin), keys (KeyframeMover's {pos, rot}, ANIM_KEYS_PER_SECOND)}.
+var props: Array = []
+## The particle emitters (waterfall spray, river rapids, fountains, chimney smoke, steam):
+## {tag (Render/particle.ini's system), pos, x, y (its axes; it emits along y)}.
+var emitters: Array = []
 ## Whether the virtual road closes into a lap; if not, the start and finish nodes of each
 ## way round: [forward start, forward finish, backward start, backward finish].
 var closed := true
@@ -411,6 +421,16 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 		var verts := crp.vec3s(vt)
 		var uvs := crp.uvs(crp.sub(art, "uv"))
 		var cols := crp.colours(crp.sub(art, "df"))
+		if animated:
+			var keys := _anim_keys(crp, art)
+			if keys.size() > 0:
+				var prop := Piece.new()
+				prop.kind = Kind.SCENERY
+				_add_parts(crp, art, verts, uvs, cols, tex_of, scroll_of, true, func(_tex: int) -> Piece: return prop)
+				if prop.tex.size() > 0:
+					props.append({"name": art.name, "piece": prop, "keys": keys})
+			continue
+		_read_emitters(crp, art)
 		var box := AABB(verts[0], Vector3.ZERO) if verts.size() > 0 else AABB()
 		for v in verts:
 			box = box.expand(v)
@@ -424,35 +444,78 @@ func _read_geometry(crp: Crp, fsh: Fsh, simd: Array[Dictionary]) -> void:
 		var reach: float = box.get_center().distance_to(simd[slice].pos) + box.size.length() * 0.5
 		var into: Piece = backdrop[kind] if kind != Kind.ROAD and reach > BACKDROP_REACH \
 			else chunks[chunk].pieces[kind]
-		for k in 256:
-			var pe := crp.sub(art, "pr", k)
-			if pe == null:
-				break
-			# Parts without index rows run their corners in order (Schwarzwald's covered
-			# bridges, waterfalls, the sea's and the harbours' scrolling layers), but not
-			# the animated props' ("Anim": people, trains, the helicopter, loaders),
-			# modelled at the origin for the game to place.
-			var p := crp.part(pe, not animated)
-			var tex: int = tex_of.get(p.material, -1)
-			if tex < 0:
-				continue
-			var dest := into
+		# Parts without index rows run their corners in order (Schwarzwald's covered bridges,
+		# waterfalls, the sea's and the harbours' scrolling layers).
+		_add_parts(crp, art, verts, uvs, cols, tex_of, scroll_of, true, func(tex: int) -> Piece:
 			if kind == Kind.GROUND and road_tex.has(tex) and into != backdrop[kind]:
-				dest = chunks[chunk].pieces[Kind.ROAD]
-			var vi: PackedInt32Array = p.vertex
-			var ui: PackedInt32Array = p.uv
-			var ci: PackedInt32Array = p.colour
-			for t3 in range(0, vi.size() - 2, 3):
-				if vi[t3] >= verts.size() or vi[t3 + 1] >= verts.size() or vi[t3 + 2] >= verts.size():
-					continue
-				for c in [0, 2, 1]:
-					dest.pos.append(verts[vi[t3 + c]])
-					var u: int = ui[t3 + c] if ui.size() > t3 + c else -1
-					dest.uv.append(uvs[u] if u >= 0 and u < uvs.size() else Vector2.ZERO)
-					var col: int = ci[t3 + c] if ci.size() > t3 + c else -1
-					dest.colour.append(cols[col] if col >= 0 and col < cols.size() else Color(0.5, 0.5, 0.5))
-				dest.tex.append(tex)
-				dest.scroll.append(scroll_of.get(p.material, Vector2.ZERO))
+				return chunks[chunk].pieces[Kind.ROAD]
+			return into)
+
+
+## An article's parts (level 0) as triangles into the Piece `dest_of` gives for each texture.
+func _add_parts(crp: Crp, art: Dictionary, verts: PackedVector3Array, uvs: PackedVector2Array,
+		cols: PackedColorArray, tex_of: Dictionary, scroll_of: Dictionary, sequential: bool,
+		dest_of: Callable) -> void:
+	for k in 256:
+		var pe := crp.sub(art, "pr", k)
+		if pe == null:
+			break
+		var p := crp.part(pe, sequential)
+		var tex: int = tex_of.get(p.material, -1)
+		if tex < 0:
+			continue
+		var dest: Piece = dest_of.call(tex)
+		var vi: PackedInt32Array = p.vertex
+		var ui: PackedInt32Array = p.uv
+		var ci: PackedInt32Array = p.colour
+		for t3 in range(0, vi.size() - 2, 3):
+			if vi[t3] >= verts.size() or vi[t3 + 1] >= verts.size() or vi[t3 + 2] >= verts.size():
+				continue
+			for c in [0, 2, 1]:
+				dest.pos.append(verts[vi[t3 + c]])
+				var u: int = ui[t3 + c] if ui.size() > t3 + c else -1
+				dest.uv.append(uvs[u] if u >= 0 and u < uvs.size() else Vector2.ZERO)
+				var col: int = ci[t3 + c] if ci.size() > t3 + c else -1
+				dest.colour.append(cols[col] if col >= 0 and col < cols.size() else Color(0.5, 0.5, 0.5))
+			dest.tex.append(tex)
+			dest.scroll.append(scroll_of.get(p.material, Vector2.ZERO))
+
+
+## The article's particle emitters ("ef" of type 3, 56 bytes: 3, 0, where it is, 1, its X
+## and Y axes, the particle system's tag ("RPD1", "WF07": Render/particle.ini, see
+## PuParticles), 0) into `emitters`. Their X is the other way round from the meshes'.
+func _read_emitters(crp: Crp, art: Dictionary) -> void:
+	var d := crp.data
+	for k in 64:
+		var e := crp.sub(art, "ef", k)
+		if e == null:
+			break
+		if e.length < 56 or d.decode_s32(e.offset) != 3:
+			continue
+		var o := e.offset
+		var v := func(at: int) -> Vector3:
+			return Vector3(-d.decode_float(o + at), d.decode_float(o + at + 4), d.decode_float(o + at + 8))
+		emitters.append({"tag": d.slice(o + 48, o + 52).get_string_from_ascii(), "pos": v.call(8),
+			"x": v.call(24), "y": v.call(36)})
+
+
+## An animated prop's keys ("Anim": their count; "Anqt": 52 bytes each, 15 a second
+## (ANIM_KEYS_PER_SECOND), a rotation (x, y, z, w), where it is in the world, 1, a scale
+## (the Autobahn's train is modelled at 2/3 and keyed at 1.5: its carriages then couple a
+## metre apart), and 2 words not used) as KeyframeMover keys {pos, rot, scale}.
+static func _anim_keys(crp: Crp, art: Dictionary) -> Array:
+	var e := crp.sub(art, "Anqt")
+	var out := []
+	if e == null:
+		return out
+	var d := crp.data
+	for k in mini(e.count, e.length / 52):
+		var o := e.offset + k * 52
+		var q := Quaternion(d.decode_float(o), d.decode_float(o + 4), d.decode_float(o + 8), d.decode_float(o + 12))
+		out.append({"pos": Vector3(d.decode_float(o + 16), d.decode_float(o + 20), d.decode_float(o + 24)),
+			"rot": q.normalized() if q.length_squared() > 0.0 else Quaternion.IDENTITY,
+			"scale": Vector3(d.decode_float(o + 32), d.decode_float(o + 36), d.decode_float(o + 40))})
+	return out
 
 
 ## A material's UV animation (render methods "UVAnimate", "FA_UVAnim", "FA_UVAnMatState";
@@ -717,7 +780,8 @@ static func _nearest_slice(simd: Array[Dictionary], p: Vector3) -> int:
 
 func mirror_world() -> void:
 	super.mirror_world()
-	for group in [backdrop] + chunks.map(func(c: Dictionary) -> Array: return c.pieces):
+	for group in [backdrop, props.map(func(pr: Dictionary) -> Piece: return pr.piece)] \
+			+ chunks.map(func(c: Dictionary) -> Array: return c.pieces):
 		for pc: Piece in group:
 			for i in range(0, pc.pos.size(), 3):
 				var a := pc.pos[i + 1]
@@ -732,6 +796,14 @@ func mirror_world() -> void:
 				pc.colour[i + 2] = col
 	for c in chunks:
 		c.center = Vector3(-c.center.x, c.center.y, c.center.z)
+	for em: Dictionary in emitters:
+		for key in ["pos", "x", "y"]:
+			em[key] = Vector3(-em[key].x, em[key].y, em[key].z)
+	for pr: Dictionary in props:
+		for k: Dictionary in pr.keys:
+			k.pos = Vector3(-k.pos.x, k.pos.y, k.pos.z)
+			var q: Quaternion = k.rot
+			k.rot = Quaternion(q.x, -q.y, -q.z, q.w)
 	for road: Array in side_roads:
 		for vr: Nfs3Track.VRoad in road:
 			mirror_vroad(vr)

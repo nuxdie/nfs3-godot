@@ -112,6 +112,15 @@ func _define() -> void:
 		{"id": "gearbox", "caption": "Gearbox", "items": PackedStringArray(["Automatic", "Manual"]), "later": true,
 			"get": func() -> int: return int(Game.manual_gears), "set": func(i: int): Game.manual_gears = i == 1,
 			"help": "The car changes gear itself, or you do: Shift up, Ctrl down (a gamepad's stick clicks), and down from 1st at a standstill into reverse. Manual drives on the car's manual gearing, which on some has an extra gear or two."},
+		{"id": "abs", "caption": "ABS", "items": PackedStringArray(["Per car", "On", "Off"]), "later": true,
+			"get": func() -> int: return Game.abs_mode, "set": func(i: int): Game.abs_mode = i as Car.Abs,
+			"help": "Anti-lock brakes hold each wheel just short of locking, so the car still steers under full braking. Per car: as the car came (most from the mid-80s on). Without, a locked wheel slides and barely steers. Stability control always brings it."},
+		{"id": "tc", "caption": "Traction control", "items": off_on, "later": true,
+			"get": func() -> int: return int(Game.traction_control), "set": func(i: int): Game.traction_control = i == 1,
+			"help": "Cuts the engine's power when the driven wheels start to spin, out of a bend or off the line. Stability control always brings it."},
+		{"id": "stability", "caption": "Stability", "items": PackedStringArray(["Arcade", "ESC", "Off"]), "later": true,
+			"get": func() -> int: return Game.stability, "set": func(i: int): Game.stability = i as Car.Stability,
+			"help": "Arcade: the original's slide assist, which quietly holds the car straight. ESC: a real car's stability control, braking one wheel to stop a slide or a nose running wide, and the engine if it must. Off: the car is all yours."},
 		{"id": "tops", "caption": "Cabriolets", "items": PackedStringArray(["Top down", "Top up"]), "later": true,
 			"get": func() -> int: return 0 if Game.tops_down else 1, "set": func(i: int): Game.tops_down = i == 0,
 			"help": "How Porsche Unleashed's cabriolets, roadsters and Speedsters start a race: hood folded or raised. T raises or lowers it in the race."},
@@ -159,7 +168,7 @@ func _define() -> void:
 				if i == 0:
 					Game.hud_hidden.append(id),
 			"help": WIDGET_HELP[id]})
-	_pages = [["units", "damage", "gearbox", "tops", "intro"], ["quality", "display", "vsync"], ["volume", "music", "sfx", "ambience", "voice"],
+	_pages = [["units", "damage", "gearbox", "abs", "tc", "stability", "tops", "intro"], ["quality", "display", "vsync"], ["volume", "music", "sfx", "ambience", "voice"],
 		["hud_on", "hud_style"] + widgets, [], []]
 
 
@@ -235,6 +244,8 @@ func _data_text() -> String:
 			Game.hs_cop_cars.size(), Game.hs_traffic_cars.size()]
 	if Game.pu_root != "":
 		t += "\n\nPorsche Unleashed\n%s\n%d tracks" % [Game.pu_root, Game.tracks.filter(func(id: String) -> bool: return Game.is_pu_track(id)).size()]
+	if Game.hp2_root != "":
+		t += "\n\nHot Pursuit 2 (music)\n%s" % Game.hp2_root
 	return t
 
 

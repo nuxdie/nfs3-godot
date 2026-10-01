@@ -1,6 +1,6 @@
 extends Node
 ## Photographs cars in a plain studio, parked on their springs:
-##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|pu] [id ...] [--lights] [--big] [--low]
+##   godot --path . -- --carshots [traffic|cops|cars|hstraffic|hscops|pu|hp2|hp2cops|hp2traffic] [id ...] [--lights] [--big] [--low]
 ##       [--yaw=DEG ...] [--dist=M] [--wire] [--track=ID [--at=LAP FRACTION] [--night] [--weather]]
 ##       [--tag=NAME] [--siren] [--steer=-1..1]
 ## Each car is shot from the front and rear three-quarters (or from each --yaw, 0 = dead
@@ -15,7 +15,6 @@ extends Node
 ## --dent=N hits it N rounds (parts tear off), --tear=6,8,30 tears those groups off (Nfs5Car's).
 ## --eye=x,y,z:tx,ty,tz (car frame) puts it anywhere, looking at a point; --paint=N the car's colour N.
 ## --wheel=RAD holds the steering wheel turned; --cockpit shoots the in-car view (--rearmirror close on its rear-view mirror). --driver=N seats Porsche Unleashed driver N; --onlydriver hides all but the people.
-## --nohd draws the skins as loaded, without SkinHD's upscales.
 ## --dumpskin=PATH saves the car's skin as a PNG; --skin=PATH draws it with that one instead.
 ## --aa=msaa2|msaa4|msaa8|fxaa|smaa|none (comma-separated) overrides the view's antialiasing.
 
@@ -60,6 +59,9 @@ func _run() -> void:
 		"pu": paths = Game.cars.filter(func(c): return Game.is_pu_path(c.path)).map(func(c): return c.path)
 		"pucops": paths = Game.pu_cop_cars
 		"putraffic": paths = Game.pu_traffic_cars
+		"hp2": paths = Game.cars.filter(func(c): return Game.is_hp2_path(c.path)).map(func(c): return c.path)
+		"hp2cops": paths = Game.hp2_cop_cars
+		"hp2traffic": paths = Game.hp2_traffic_cars
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)
 	if not ids.is_empty():
@@ -67,8 +69,8 @@ func _run() -> void:
 		var id_of := {}
 		for c in Game.cars:
 			id_of[c.path] = c.id
-		paths = paths.filter(func(p: String) -> bool: return p.get_file() in ids or id_of.get(p, "") in ids)
-	SkinHD.enabled = not "--nohd" in args   # --nohd: the game's own skins, not SkinHD's upscales
+		paths = paths.filter(func(p: String) -> bool: return p.get_file() in ids or id_of.get(p, "") in ids \
+			or p.get_slice(":", 1) in ids)
 	var lights := "--lights" in args
 	var big := "--big" in args
 	var low := "--low" in args

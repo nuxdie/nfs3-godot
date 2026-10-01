@@ -8,21 +8,30 @@ class_name EaBnk
 ##
 ## Tags used here (byte tag, byte length, big-endian value):
 ##   0x0E volume 0..127 (127 when absent)   0x10 fine tune, signed, in cents
+##   0x80 version: present (1) only in Porsche Unleashed's banks, whose samples are EA-XA
+##        with no codec tag
 ##   0x82 channels (1)                      0x83 codec: 0 PCM, 7 EA-XA ADPCM, 9 MicroTalk (speech)
 ##   0x84 sample rate (22050)               0x85 sample count
 ##   0x86 loop start, 0x87 loop end (last looped sample)   0x88 data offset in the file
+##   0x89 the right channel's data offset (Porsche Unleashed's stereo EA-XA: each channel apart)
+##   0xA0 codec2, Hot Pursuit 2's banks (they also carry 0x80): 8 16-bit little-endian PCM,
+##        7 the same big-endian, 9 8-bit signed, 0x0A EA-XA; a stereo one's channels apart
+##        (0x88, 0x89) as above. Without it, 0x83 / 0x80 decide.
 ## The rest (priority, pan, bend range, random pitch...) are kept in `tags` unread.
 ## Samples are decoded to AudioStreamWAVs on first use and cached.
 
 const DEFAULT_RATE := 22050
 const CODEC_EAXA := 7
 const CODEC_MICROTALK := 9
+## Codec2 (tag 0xA0) values read here, and the 0x83 codec each stands for (-1: its own PCM).
+const CODEC2 := {0x07: -1, 0x08: -1, 0x09: -1, 0x0A: CODEC_EAXA}
 ## EA-XA predictor pairs, picked by a frame's high nibble.
 const XA_COEF := [[0, 0], [240, 0], [460, -208], [392, -220]]
 
 var _data: PackedByteArray
 var _patches := {}   # patch -> Array of layer Dictionaries (tag -> value)
 var _streams := {}   # "patch:layer" -> AudioStreamWAV, or null when it can't be decoded
+var _parts := {}     # patch -> the bank it's patch 0 of, in a bank put together by join()
 
 
 static func parse(d: PackedByteArray) -> EaBnk:
@@ -43,6 +52,18 @@ static func parse(d: PackedByteArray) -> EaBnk:
 		var layers := b._read_header(slot + off)
 		if not layers.is_empty():
 			b._patches[i] = layers
+	return b
+
+
+## One bank out of several one-patch ones (Hot Pursuit 2's engine, a bank per recording):
+## patch N is patch 0 of `parts[N]`.
+static func join(parts: Dictionary) -> EaBnk:
+	var b := EaBnk.new()
+	for k: int in parts:
+		var src: EaBnk = parts[k]
+		if src and src.has(0):
+			b._patches[k] = src._patches[0]
+			b._parts[k] = src
 	return b
 
 
@@ -80,6 +101,8 @@ func tune(patch: int, layer := 0) -> float:
 
 ## The layer's sound, looping if it has a loop; null for a missing patch or an unknown codec.
 func stream(patch: int, layer := 0) -> AudioStreamWAV:
+	if _parts.has(patch):
+		return _parts[patch].stream(0, layer)
 	var key := "%d:%d" % [patch, layer]
 	if not _streams.has(key):
 		_streams[key] = _decode(patch, layer)
@@ -134,9 +157,17 @@ func _decode(patch: int, layer: int) -> AudioStreamWAV:
 	var n: int = h[0x85]
 	var ch: int = h.get(0x82, 1)
 	var off: int = h[0x88]
-	var codec: int = h.get(0x83, 0)
+	var codec: int = h.get(0x83, CODEC_EAXA if h.has(0x80) else 0)
 	var pcm: PackedByteArray
-	if codec == 0:
+	if h.has(0xA0):
+		if not CODEC2.has(h[0xA0]):
+			return null
+		codec = CODEC2[h[0xA0]]
+	if codec < 0:
+		pcm = _planar_pcm(h[0xA0], off, h.get(0x89, -1), n, ch)
+		if pcm.is_empty():
+			return null
+	elif codec == 0:
 		if ch < 1 or ch > 2 or off + n * ch * 2 > _data.size():
 			return null
 		pcm = _data.slice(off, off + n * ch * 2)
@@ -144,6 +175,15 @@ func _decode(patch: int, layer: int) -> AudioStreamWAV:
 		pcm = _eaxa(off, n)
 		if pcm.is_empty():
 			return null
+	elif codec == CODEC_EAXA and ch == 2 and h.has(0x89):
+		var left := _eaxa(off, n)
+		var right := _eaxa(h[0x89], n)
+		if left.is_empty() or right.is_empty():
+			return null
+		pcm.resize(n * 4)
+		for i in n:
+			pcm.encode_s16(i * 4, left.decode_s16(i * 2))
+			pcm.encode_s16(i * 4 + 2, right.decode_s16(i * 2))
 	elif codec == CODEC_MICROTALK and ch == 1 and off < _data.size():
 		pcm = EaMicroTalk.decode(_data, off, n)
 	else:
@@ -160,6 +200,36 @@ func _decode(patch: int, layer: int) -> AudioStreamWAV:
 		w.loop_begin = ls
 		w.loop_end = le
 	return w
+
+
+## Codec2 PCM (7 s16 big-endian, 8 s16 little-endian, 9 s8), a stereo sound's right channel
+## at `right`; returns interleaved 16-bit little-endian PCM, or empty if it runs short.
+func _planar_pcm(c2: int, off: int, right: int, n: int, ch: int) -> PackedByteArray:
+	var bps := 1 if c2 == 0x09 else 2
+	var starts := [off] if ch == 1 else [off, right if right >= 0 else off + n * bps]
+	if ch < 1 or ch > 2:
+		return PackedByteArray()
+	for st: int in starts:
+		if st < 0 or st + n * bps > _data.size():
+			return PackedByteArray()
+	if c2 == 0x08 and ch == 1:
+		return _data.slice(off, off + n * 2)
+	var out := PackedByteArray()
+	out.resize(n * ch * 2)
+	for c in ch:
+		var st: int = starts[c]
+		for i in n:
+			var v: int
+			if c2 == 0x09:
+				v = _data.decode_s8(st + i) << 8
+			elif c2 == 0x07:
+				v = (_data[st + i * 2] << 8) | _data[st + i * 2 + 1]
+				if v >= 32768:
+					v -= 65536
+			else:
+				v = _data.decode_s16(st + i * 2)
+			out.encode_s16((i * ch + c) * 2, v)
+	return out
 
 
 ## EA-XA ADPCM, mono: frames of one header byte (predictor, shift) and 14 bytes of 4-bit

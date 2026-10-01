@@ -34,7 +34,10 @@ static func load_track(track_id: String, night := false, layout := 0) -> TrackWo
 				t.borrow_mirror_images(Fsh.load_file(Game.find_ci(Game.track_dir(remake), "tr0.qfs")))
 			t.mirror_world()
 		if t.error == "" and t.vroad.size() > 10:
-			w.path = Nfs5TrackBuilder.build(t, w.root) if t is Nfs5Track else Nfs3TrackBuilder.build(t, w.root)
+			if t is Nfs6Track:
+				w.path = Nfs6TrackBuilder.build(t, w.root)
+			else:
+				w.path = Nfs5TrackBuilder.build(t, w.root) if t is Nfs5Track else Nfs3TrackBuilder.build(t, w.root)
 			w.track_mat = w.root.get_meta("track_material")
 			w.track = t
 		else:

@@ -99,6 +99,9 @@ const BUMPER_REAR := 31
 const SILL_LEFT := 32
 const SILL_RIGHT := 33
 const SPOILER := 34
+## ... and the side mirrors (MIRROR_SLOT), off their doors: a door torn off takes its mirror,
+## but a mirror can go on its own.
+const MIRROR_OFF := {DOOR_LEFT: 35, DOOR_RIGHT: 36}
 const SKIRT_SLOTS := {5: BUMPER_FRONT, 4: BUMPER_REAR, 3: SILL_LEFT}
 const FIXED_SPOILER_SLOT := 6
 ## The engine bay and the luggage space (level 0x1D, no group): shown while the lid over
@@ -226,6 +229,8 @@ var _window_pages := {}   # page -> its image as the game has it (before _paint_
 ## a lamp's glare (common.fsh), "SMX1" the tail pipe smoke (particle.fsh, the car's "Tail pipe
 ## smoke" system in carpart.ini); null without the game.
 static var _fx := {}
+static var _others_viv: Viv      # Sounds/zzzwzzz.viv (_others_engines), and the root it came from
+static var _others_root := "-"
 
 
 static func fx(sprite: String) -> Texture2D:
@@ -904,6 +909,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	var wheel_meshes: Array = [null, null, null, null]
 	var needles := {}   # SPEEDO_NEEDLE / TACH_NEEDLE -> [its _Mesh, hub, the dial's normal] (car space)
 	var mirrors := {}   # MIRROR_LEFT / MIRROR_RIGHT -> its glass (_Mesh); the first article each side
+	var housings := {}  # ... -> [its housing, any glass of it] (_Mesh), riding on the door
 	var wheel_hubs: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
 	var full_arms := false   # the style's hands slot has a variant in the model
 	for art in crp.articles:
@@ -1098,6 +1104,11 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			if not skirts.has(SKIRT_SLOTS[slot]):
 				skirts[SKIRT_SLOTS[slot]] = _Mesh.new()
 			into = skirts[SKIRT_SLOTS[slot]]
+		elif into == body and slot == MIRROR_SLOT and group in [MIRROR_LEFT, MIRROR_RIGHT]:
+			if not housings.has(group):
+				housings[group] = [_Mesh.new(), _Mesh.new()]
+				pane_of[housings[group][0]] = housings[group][1]
+			into = housings[group][0]
 		elif group != 0 and into == body:
 			var parts: Dictionary = windows if slot == WINDOW_SLOT and group in [DOOR_LEFT, DOOR_RIGHT] \
 					else insides if lid_inside else lids
@@ -1307,6 +1318,19 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 			if k == 1:
 				part.glass = true
 			body_parts.append(part)
+	# The side mirrors, on their doors and to lose apart from them.
+	for side: int in housings:
+		for k in 2:
+			var hm: _Mesh = housings[side][k]
+			if hm.pos.is_empty():
+				continue
+			hm.panelise(box)
+			var part := {"name": "mirror%d%s" % [side, "_glass" if k == 1 else ""], "mesh": hm.commit(-mid),
+				"center": Vector3.ZERO, "damaged": hm.damaged(-mid), "loose": MIRROR_OFF[side]}
+			part.merge(lid_motion.get(side, {}))
+			if k == 1:
+				part.glass = true
+			body_parts.append(part)
 	for group: int in windows:
 		var wbox := AABB()
 		var first := true
@@ -1452,7 +1476,7 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 		if area <= 0.0:
 			continue
 		body_parts.append({"name": "mirror_glass_%s" % ("left" if side == MIRROR_LEFT else "right"),
-			"mesh": gm.commit(-mid), "center": Vector3.ZERO,
+			"mesh": gm.commit(-mid), "center": Vector3.ZERO, "loose": MIRROR_OFF[side],
 			"mirror_glass": {"point": point / area - mid, "normal": normal.normalized()}}.merged(lid_motion.get(side, {})))
 	for kind: int in needles:
 		var nm: _Mesh = needles[kind][0]
@@ -1705,19 +1729,37 @@ func _add_light(crp: Crp, e: Crp.Entry, name: String, offset: Vector3, as_brake 
 ## High Stakes' engine tables (AudioEng, "CRDl"), the engine's (.ect off the throttle, .elt
 ## on it: its recordings at different revs, the exhaust's from patch 64) and the intake's
 ## (.cct, .clt). The engine's go to CarAudio as High Stakes' careng.ctb and careng.ltb.
+## The cars you aren't driving play a single loop each of the engine and the exhaust,
+## Sounds/zzzwzzz.viv's <set>lden.bnk and <set>ldex.bnk (sd6b's for the sets without; nfs5.exe
+## "sd6b%.4s.bnk"): CarAudio's ocar.bnk and ocarex.bnk.
 func _read_sounds(pu_root: String, set_name: String) -> void:
 	if set_name == "":
 		return
+	var s := set_name.to_lower()
+	var others := _others_engines(pu_root)
+	for part in [["lden", "ocar.bnk"], ["ldex", "ocarex.bnk"]]:
+		var b := others.get_file(s + part[0] + ".bnk") if others else PackedByteArray()
+		if b.is_empty() and others:
+			b = others.get_file("sd6b" + part[0] + ".bnk")
+		if not b.is_empty():
+			sound_files[part[1]] = b
 	var viv := Viv.load_file(DataPath.find_ci(pu_root, "Sounds/" + set_name + ".viv"))
 	if viv == null:
 		return
-	var s := set_name.to_lower()
 	var bnk := viv.get_file(s + ".bnk")
 	if bnk.is_empty():
 		return
 	sound_files["careng.bnk"] = bnk
 	sound_files["careng.ctb"] = viv.get_file(s + ".ect")
 	sound_files["careng.ltb"] = viv.get_file(s + ".elt")
+
+
+## Sounds/zzzwzzz.viv, read once.
+static func _others_engines(pu_root: String) -> Viv:
+	if pu_root != _others_root:
+		_others_root = pu_root
+		_others_viv = Viv.load_file(DataPath.find_ci(pu_root, "Sounds/zzzwzzz.viv"))
+	return _others_viv
 
 
 ## The .clr's paints: each section's first colour. It's there twice, as hue, saturation

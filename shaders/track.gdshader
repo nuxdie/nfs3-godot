@@ -50,6 +50,15 @@ uniform float cover_y_min;
 uniform float cover_y_range;
 
 varying flat float layer;
+// Hot Pursuit 2's layered surfaces (Nfs6TrackBuilder): an overlay texture blended over the
+// base by a mask's alpha (rock into grass, the road's edge into the verge) and a shadow
+// layer multiplied in (trees' shadows on the road). CUSTOM2 = overlay uv, mask uv;
+// CUSTOM1.zw = shadow uv; CUSTOM3.xyz = overlay, mask, shadow layer + 1 (0: none).
+uniform bool layered = false;
+varying vec2 uv_over;
+varying vec2 uv_mask;
+varying vec2 uv_shadow;
+varying flat vec3 extra_layers;
 // 1 on a front/back quad pair sharing the same corners (road signs): cull the back face
 // so the pair doesn't z-fight.
 varying flat float one_sided;
@@ -81,6 +90,12 @@ void vertex() {
 	// is how far the UVs go a second.
 	UV += fract(CUSTOM1.xy * TIME);
 	layer = anim_layer(UV2.x, UV2.y);
+	if (layered) {
+		uv_over = CUSTOM2.xy;
+		uv_mask = CUSTOM2.zw;
+		uv_shadow = CUSTOM1.zw;
+		extra_layers = CUSTOM3.xyz;
+	}
 	one_sided = mod(UV2.y, 2.0);
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	world_normal = (MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz;
@@ -198,6 +213,17 @@ void fragment() {
 	vec2 px = fwidth(UV);
 	bool inside = all(greaterThanEqual(UV, -px)) && all(lessThanEqual(UV, 1.0 + px));
 	vec4 c = inside ? c_clamp : c_wrap;
+	if (layered) {
+		vec4 over = texture(textures, vec3(uv_over, max(extra_layers.x - 1.0, 0.0)));
+		float mask = texture(textures, vec3(uv_mask, max(extra_layers.y - 1.0, 0.0))).a;
+		vec4 shade = texture(textures, vec3(uv_shadow, max(extra_layers.z - 1.0, 0.0)));
+		if (extra_layers.x > 0.5) {
+			c.rgb = mix(over.rgb, c.rgb, mask);
+		}
+		if (extra_layers.z > 0.5) {
+			c.rgb *= mix(vec3(1.0), shade.rgb, shade.a);
+		}
+	}
 	vec3 light = COLOR.rgb * brightness * night_tint * car_shadows();
 	for (int i = 0; i < beam_count; i++) {
 		vec3 d = world_pos - beam_pos[i];

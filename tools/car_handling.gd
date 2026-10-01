@@ -7,11 +7,14 @@ extends Node
 ##   brake    100-0 km/h: metres, and the heading it wandered off (deg)
 ##   hand     full lock and the handbrake at 25 m/s for 1 s, then straight: most body slip,
 ##            and the yaw rate left 2 s after letting go
-## --classic runs them on the plain NFS3 handling (see Car.progressive_grip).
+## --classic runs them on the plain NFS3 handling (see Car.progressive_grip); --grip=0.68
+## on a wet (0.8) or snowy (0.68) road.
+##   launch   0-100 km/h from a standstill on full throttle: seconds
+## --abs=car|on|off, --tc, --stab=arcade|esc|off: the driver aids (Car.set_aids).
 ## A body slip past 60 degrees counts as a spin ("SPIN").
 ##   godot --headless --path . -- --handling [name filter ...]
 
-const TESTS := ["skid20", "skid40", "lane", "trail", "power", "brake", "hand"]
+const TESTS := ["skid20", "skid40", "lane", "trail", "power", "brake", "hand", "launch"]
 
 var _runs: Array[Dictionary] = []
 var _t := 0.0
@@ -29,6 +32,17 @@ func _start() -> void:
 	var args := Array(OS.get_cmdline_user_args())
 	Car.progressive_grip = not "--classic" in args
 	var filters := args.slice(args.find("--handling") + 1).filter(func(a: String) -> bool: return not a.begins_with("--"))
+	# --grip=0.68: the weather's grip on the road (Car.surface_grip), e.g. snow
+	var grip := 1.0
+	var abs_mode := Car.Abs.CAR
+	var stab := Car.Stability.ARCADE
+	for a: String in args:
+		if a.begins_with("--grip="):
+			grip = float(a.get_slice("=", 1))
+		elif a.begins_with("--abs="):
+			abs_mode = ["car", "on", "off"].find(a.get_slice("=", 1)) as Car.Abs
+		elif a.begins_with("--stab="):
+			stab = ["arcade", "esc", "off"].find(a.get_slice("=", 1)) as Car.Stability
 	var world := Node3D.new()
 	add_child(world)
 	var ground := StaticBody3D.new()
@@ -48,8 +62,10 @@ func _start() -> void:
 		for ti in TESTS.size():
 			var car := Car.new()
 			car.setup(data)
+			car.surface_grip = grip
+			car.set_aids(abs_mode, "--tc" in args, stab)
 			world.add_child(car)
-			car.reset_to(Transform3D(Basis.IDENTITY, Vector3(-9000 + col * 300, 0, -9000 + ti * 3000)))
+			car.reset_to(Transform3D(Basis.IDENTITY, Vector3(-9000 + col * 300, 0, -9000 + ti * 2400)))
 			_runs.append({"car": car, "name": name, "test": TESTS[ti], "phase": 0, "t0": 0.0,
 				"lat": 0.0, "n": 0, "beta": 0.0, "max_beta": 0.0, "v_end": 0.0, "yaw_end": 0.0,
 				"x0": Vector3.ZERO, "dist": 0.0, "head0": Vector3.ZERO, "wander": 0.0, "spun": false})
@@ -172,6 +188,20 @@ func _step(r: Dictionary, dt: float) -> void:
 					r.yaw_end = rad_to_deg(absf(car.angular_velocity.y))
 					car.handbrake = false
 					r.phase = 99
+		"launch":
+			car.steer = 0.0
+			car.brake = 0.0
+			if r.phase == 0:
+				car.throttle = 0.0
+				if _t > 1.0:
+					r.phase = 1
+					r.t0 = _t
+			else:
+				car.throttle = 1.0
+				r.max_beta = maxf(r.max_beta, absf(b))
+				if car.speed >= 27.78 or t > 20.0:
+					r.dist = t
+					r.phase = 99
 		"brake":
 			if r.phase == 0:
 				car.steer = 0.0
@@ -200,7 +230,7 @@ func _report() -> void:
 	for r in _runs:
 		if r.phase < 99:
 			print("unfinished %s %s phase %d speed %.1f gear %d rpm %d grounded %d pos %s" % [r.name, r.test, r.phase, r.car.speed, r.car.gear, r.car.rpm, r.car.grounded_wheels, r.car.global_position])
-	print("car                    skid20 g/slip/v/ai    skid40 g/slip/v/ai      lane slip/yaw  trail slip  power slip  brake m/deg  hand slip/yaw")
+	print("car                    skid20 g/slip/v/ai    skid40 g/slip/v/ai      lane slip/yaw  trail slip  power slip  brake m/deg  hand slip/yaw  0-100")
 	for n: String in by_car:
 		var d: Dictionary = by_car[n]
 		var line := "%-22s" % n.substr(0, 22)
@@ -217,6 +247,7 @@ func _report() -> void:
 		line += "     %5.1f%s" % [d.power.max_beta, "S" if d.power.spun else " "]
 		line += "     %5.1f/%4.1f" % [d.brake.dist, d.brake.wander]
 		line += "   %5.1f/%5.1f%s" % [d.hand.max_beta, d.hand.yaw_end, "S" if d.hand.spun else " "]
+		line += "  %5.2f" % d.launch.dist
 		print(line)
 		var c0: Car = d.skid20.car
 		print("  spec %s grip=%.4f wf=%.4f dk=%.7f fg=%.4f" % [n, c0.grip, c0.weight_front, c0.downforce_k, c0.front_grip])

@@ -9,7 +9,9 @@ var images: Array[Image] = []
 var tags: PackedStringArray = []
 var by_name := {}
 
-const BITMAP_CODES := [0x78, 0x7B, 0x7D, 0x7E, 0x7F, 0x6D]
+const BITMAP_CODES := [0x78, 0x7B, 0x7D, 0x7E, 0x7F, 0x6D, 0x60, 0x61, 0x62]
+## Hot Pursuit 2's block-compressed bitmaps: DXT1, DXT3, DXT5.
+const DXT_FORMATS := {0x60: Image.FORMAT_DXT1, 0x61: Image.FORMAT_DXT3, 0x62: Image.FORMAT_DXT5}
 const PALETTE_CODES := [0x22, 0x24, 0x29, 0x2A, 0x2D]
 
 
@@ -111,6 +113,14 @@ func _bitmap(d: PackedByteArray, off: int, code: int, global_pal: PackedColorArr
 	if w == 0 or h == 0 or w > 4096 or h > 4096:
 		return null
 	var p := off + 16
+	if DXT_FORMATS.has(code):
+		var size := maxi(w / 4, 1) * maxi(h / 4, 1) * (8 if code == 0x60 else 16)
+		if p + size > d.size():
+			return null
+		var dxt := Image.create_from_data(w, h, false, DXT_FORMATS[code], d.slice(p, p + size))
+		dxt.decompress()
+		dxt.convert(Image.FORMAT_RGBA8)
+		return dxt
 	var rgba := PackedByteArray()
 	rgba.resize(w * h * 4)
 	var px := w * h

@@ -175,7 +175,8 @@ func set_region(r: Rect2) -> void:
 
 
 ## Puts `data` on the stage in `tint` (the paint), dropped in from a little height (`drop`).
-func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HEIGHT) -> void:
+## `wear` (0..1): the damage it carries (a tournament car not repaired), dented as the race will.
+func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HEIGHT, wear := 0.0) -> void:
 	if car:
 		car.queue_free()
 		car = null
@@ -192,8 +193,16 @@ func show_car(data: Object, tint: Color, upgrade := 0, id := -1, drop := DROP_HE
 	c.handbrake = true
 	c.fold_speed = 1.6
 	c.set_meta("car", id)
+	c.set_meta("wear", wear)
 	_world.add_child(c)
 	c.reset_to(Transform3D(Basis(), Vector3(0, FLOOR_Y, 0)), drop)
+	if wear > 0.0:
+		# The race's own dents for it (CarDamage.wear, the same every time for a car); no
+		# crashes of its own on the stage (the drop, the rev).
+		var dmg := CarDamage.new()
+		c.add_child(dmg)
+		dmg.set_physics_process(false)
+		dmg.wear(wear)
 	car = c
 	_head = _find_head(c)
 	_half = data.half_size
@@ -236,6 +245,11 @@ func set_backdrop(tex: Texture2D) -> void:
 
 func shown_id() -> int:
 	return car.get_meta("car", -1) if car else -1
+
+
+## The damage the car on show was dented for (show_car's `wear`).
+func shown_wear() -> float:
+	return car.get_meta("wear", 0.0) if car else 0.0
 
 
 ## The menu's time of day and weather: the car lit and its wipers going to suit.
@@ -803,6 +817,9 @@ func _process(dt: float) -> void:
 			var src: MeshInstance3D = t[0]
 			if is_instance_valid(src):
 				t[1].visible = src.is_visible_in_tree()
+				# (Dents swap in a new mesh.)
+				if t[1].mesh != src.mesh:
+					t[1].mesh = src.mesh
 				t[1].global_transform = m * src.global_transform
 
 

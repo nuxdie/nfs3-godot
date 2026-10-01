@@ -31,6 +31,16 @@ const PASSABLE_CUTOUTS := [
 	"fht6", "fhtb", "fhte", "fhtl", "fhtm", "fhts", "ftl2", "ftl3", "ftl4", "ftl5", "ftl6",
 	"ftl7", "gpvf", "graz", "grvn", "lin1", "lin2", "litc", "mos1", "mos2", "moss", "nbsh",
 	"oake", "oakf", "oakg", "palm", "rots", "shrb", "stl5", "stmb", "trl3", "vine", "vinf",
+	"alfl", "bsha", "bshb", "clin", "deca", "decf", "evra", "mos3", "oaka", "sh80", "trl2",
+]
+## Images soft enough at the edges to pass for see-through (Nfs3TrackBuilder.TRANSLUCENT_MIN)
+## that are cut-outs all the same: plants (the last row of PASSABLE_CUTOUTS), washing on a
+## line, a balcony's railing. Blended in the glass pass they'd be drawn in no order (it
+## writes no depth), each chunk's over the next's as the camera moves: bushes half drawn,
+## popping in and out.
+const CUTOUT_SOFT := [
+	"alfl", "bsha", "bshb", "clin", "deca", "decf", "evra", "mos3", "oaka", "sh80", "trl2",
+	"fe01",
 ]
 
 ## The guardrails' and railings' images: their upright triangles are taken out of the chunk
@@ -104,6 +114,10 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[PASS_OPAQUE], Nfs3TrackBuilder.DRAW_DISTANCE)
 			rail_mesh = Nfs3TrackBuilder._rail_arrays()
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
+	_add_props(t, geo, see_through, mats)
+	var particles := PuParticles.build(t, Game.pu_root) if Game.quality != Game.Quality.LOW else null
+	if particles:
+		geo.add_child(particles)
 	_add_ground(terrain, t.backdrop[Nfs5Track.Kind.GROUND], SURFACE_GROUND)
 
 	var path := Nfs3TrackBuilder._make_path(t)
@@ -154,9 +168,10 @@ static func _see_through(t: Nfs5Track) -> PackedByteArray:
 				part += 1
 			elif d[k] < 26:
 				clear += 1
-		if part >= Nfs3TrackBuilder.TRANSLUCENT_MIN * (d.size() / 4):
+		var soft := i < t.image_names.size() and CUTOUT_SOFT.has(t.image_names[i])
+		if part >= Nfs3TrackBuilder.TRANSLUCENT_MIN * (d.size() / 4) and not soft:
 			out[i] = 2
-		elif clear > 0:
+		elif clear > 0 or soft:
 			out[i] = 1
 	return out
 
@@ -307,6 +322,24 @@ static func _take_rails(pieces: Array, rail_images: Dictionary, out: Array) -> A
 					out[1].append(clampf(((t[k] as Vector3).y - lo) / height, 0.0, 1.0) if height > 0.0 else 1.0)
 		kept.append(rest)
 	return [kept, faces]
+
+
+## The animated props (Nfs5Track.props), each a node KeyframeMover loops through its keys
+## (Nfs5Track.ANIM_KEYS_PER_SECOND) with its meshes under it. They're passable.
+static func _add_props(t: Nfs5Track, geo: Node3D, see_through: PackedByteArray,
+		mats: Array[ShaderMaterial]) -> void:
+	for pr: Dictionary in t.props:
+		var node := Node3D.new()
+		node.name = "Prop_" + String(pr.name).validate_node_name()
+		node.position = pr.keys[0].pos
+		node.quaternion = pr.keys[0].rot
+		node.scale = pr.keys[0].scale
+		node.set_script(preload("res://scripts/track/keyframe_mover.gd"))
+		node.set("keys", pr.keys)
+		node.set("delay", 1)
+		node.set("tick_rate", Nfs5Track.ANIM_KEYS_PER_SECOND)
+		_add_meshes(node, "Mesh", [pr.piece], see_through, mats, Nfs3TrackBuilder.DRAW_DISTANCE)
+		geo.add_child(node)
 
 
 ## The piece's triangles as a collision shape of `body`, each tagged with its surface and

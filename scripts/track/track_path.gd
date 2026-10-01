@@ -47,6 +47,7 @@ const SPAN := 20
 ## their slices by XZ cell (SIDE_CELL), [position, right, left wall, right wall] each.
 var side_roads := {}
 const SIDE_CELL := 16.0
+var _side_wall := 0.0   # the widest of their walls (m from a slice)
 
 
 func size() -> int:
@@ -63,20 +64,56 @@ func wall_width(i: int, side: float) -> float:
 func add_side_slice(pos: Vector3, right: Vector3, left_wall: float, right_wall: float) -> void:
 	side_roads.get_or_add(Vector2i(floori(pos.x / SIDE_CELL), floori(pos.z / SIDE_CELL)), []).append(
 		[pos, right, left_wall, right_wall])
+	_side_wall = maxf(_side_wall, maxf(left_wall, right_wall))
 
 
-## Whether `pos` is on one of the side roads, between its walls near one of its slices.
-func on_side_road(pos: Vector3) -> bool:
+## Whether `pos` is on one of the side roads, between its walls near one of its slices, or
+## off one by no more than `margin` m (past a wall or an end) and `height` m above or below it.
+func on_side_road(pos: Vector3, margin := 1.0, height := 6.0) -> bool:
+	if side_roads.is_empty():
+		return false
 	var c := Vector2i(floori(pos.x / SIDE_CELL), floori(pos.z / SIDE_CELL))
-	for dx in range(-1, 2):
-		for dz in range(-1, 2):
+	# A slice whose band `pos` is in reach of is at most its wall and the margin away.
+	var reach := ceili((_side_wall + margin) / SIDE_CELL)
+	for dx in range(-reach, reach + 1):
+		for dz in range(-reach, reach + 1):
 			for e: Array in side_roads.get(c + Vector2i(dx, dz), []):
 				var d: Vector3 = pos - e[0]
-				var lat: float = d.dot(e[1])
-				if absf(d.y) < 6.0 and lat > -e[2] - 1.0 and lat < e[3] + 1.0 \
-						and (d - e[1] * lat).length() < SIDE_CELL * 0.5:
+				if absf(d.y) >= height:
+					continue
+				var flat := Vector2(d.x, d.z)
+				var right := Vector2(e[1].x, e[1].z).normalized()
+				var lat := flat.dot(right)
+				var along := absf(flat.dot(right.orthogonal()))
+				var out := Vector2(maxf(maxf(lat - e[3], -e[2] - lat), 0.0), maxf(along - SIDE_CELL * 0.5, 0.0))
+				if out.length() <= margin:
 					return true
 	return false
+
+
+## Where to put a car down that's on or by a side road (within `margin` m of its band): on
+## the nearest of its slices, as far out as the car was but within a lane's reach of the
+## middle, facing the way `heading` goes along it. Transform3D() (a zero basis) if there's none.
+func side_road_spot(pos: Vector3, heading: Vector3, margin := 15.0) -> Transform3D:
+	var best: Array = []
+	var best_d := INF
+	var c := Vector2i(floori(pos.x / SIDE_CELL), floori(pos.z / SIDE_CELL))
+	var reach := ceili((_side_wall + margin) / SIDE_CELL)
+	for dx in range(-reach, reach + 1):
+		for dz in range(-reach, reach + 1):
+			for e: Array in side_roads.get(c + Vector2i(dx, dz), []):
+				var d: float = pos.distance_to(e[0])
+				if d < best_d and absf(pos.y - e[0].y) < 8.0:
+					best_d = d
+					best = e
+	if best.is_empty() or not on_side_road(pos, margin, 8.0):
+		return Transform3D(Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), Vector3.ZERO)
+	var right := Vector3(best[1].x, 0.0, best[1].z).normalized()
+	var fwd := Vector3.UP.cross(right)
+	if fwd.dot(heading) < 0.0:
+		fwd = -fwd
+	var lat := clampf((pos - best[0]).dot(right), -minf(best[2], 2.5), minf(best[3], 2.5))
+	return Transform3D(Basis.looking_at(-fwd, Vector3.UP), best[0] + right * lat)
 
 
 ## Runs the lap the other way round (the "reverse" option): node 0, the start line, stays

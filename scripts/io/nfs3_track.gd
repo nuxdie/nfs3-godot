@@ -165,6 +165,8 @@ func _has_anim_xobj(o: Dictionary) -> bool:
 
 ## Loads an NFS3 track folder, or a High Stakes one (see Nfs4Track) into the same data.
 static func load_dir(dir: String, night := false) -> Nfs3Track:
+	if Nfs6Track.is_track_dir(dir):
+		return Nfs6Track.load_dir(dir, night)
 	if Nfs5Track.is_track_file(dir):
 		return Nfs5Track.load_file(dir, night)
 	if Nfs4Track.is_track_dir(dir):
@@ -380,6 +382,8 @@ func _add_lane_images(sfx: Fsh) -> void:
 ## Just the block centres along the lap (Godot space), read from the FRD headers without
 ## building anything: enough for the menu's track map. Empty if the file is missing or bad.
 static func peek_outline(dir: String) -> PackedVector3Array:
+	if Nfs6Track.is_track_dir(dir):
+		return Nfs6Track.peek_course(dir)
 	if Nfs5Track.is_track_file(dir):
 		return Nfs5Track.peek_outline(dir)
 	if Nfs4Track.is_track_dir(dir):

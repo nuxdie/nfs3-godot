@@ -1,10 +1,17 @@
 class_name GaragePanel
 extends Control
-## The tournaments' garage, a screen of the front end: the cars you own, then the dealer's,
-## at High Stakes' prices (Game.career_price). Yours can be upgraded (a level at a time),
-## repaired and sold; the dealer's bought. Entering a circuit it lists only the cars the
-## circuit takes, and Enter on one of yours races it there. The menu's showroom beside it
-## shows the car in focus.
+## The tournaments' garage, a screen of the front end, in one of two roles:
+##   your stable   (visiting, from its tab) the cars you own, each with its upgrade level and
+##                 damage, then the dealer's at their prices. What decides a buy is where a
+##                 car gets you, so each says how many events still to win it can enter, and
+##                 the dealer's flag those none of yours can. The focused car's state sits at
+##                 the foot with each action beside what it changes: upgrade by the level,
+##                 repair by the damage, respray by the paint, sell by the value. A dealer's car
+##                 is painted as you choose it before buying; yours keeps that paint, and the
+##                 paint row beside then only tries colours on until one is paid for.
+##   the entry     (choosing a car for an event) the event at the top, the cars it takes, yours
+##                 first; Enter races one of yours there, or buys the dealer's.
+## The menu's showroom and car sheet beside it show the car in focus.
 
 signal focus_changed(car: int)
 signal changed                    # money or the cars changed, or the focus moved
@@ -12,10 +19,10 @@ signal chosen(car: int)           # entering a circuit: race it with this car
 signal transacted                 # bought, sold, upgraded or repaired (MenuSounds)
 signal back
 
-const ROW_H := 42.0
+const ROW_H := 50.0
 const HEAD_H := 30.0
-const LIST_TOP := 72.0
-const DETAIL_H := 132.0
+const LIST_TOP := 84.0
+const DETAIL_H := 176.0
 const CLASS_NAMES := ["AAA", "AA", "A", "B"]
 
 ## The circuit being entered ({} just visiting): only the cars it takes are listed.
@@ -30,6 +37,10 @@ var _hover_btn := -1
 var _message := ""
 var _message_t := 0.0
 var _message_col := UiKit.COP_RED
+## Car index -> its paints' names (the menu's), for the respray line.
+var paint_names: Callable
+var _paint_try := -1                   # a paint of yours being tried on (-1 none)
+var _events := {}                      # car -> [events still to win it can enter, of those none of yours can]
 
 
 func _init() -> void:
@@ -96,6 +107,30 @@ func primary() -> void:
 		_say("Race it in a circuit: choose one in the tournaments", UiKit.INK_DIM)
 
 
+## The menu's paint row moved on one of your cars: paint `p` tried on (its own: none).
+func try_paint(p: int) -> void:
+	_paint_try = p if owned() and p != Game.garage_paint(car()) else -1
+	queue_redraw()
+	changed.emit()
+
+
+## The paint being tried on car `i` (-1 none).
+func paint_tried(i: int) -> int:
+	return _paint_try if i == car() and _paint_try >= 0 else -1
+
+
+func respray() -> void:
+	var i := car()
+	if i >= 0 and owned() and _paint_try >= 0:
+		var name := _paint_name(i, _paint_try)
+		_do(Game.respray_car(i, _paint_try), "%s resprayed %s" % [Game.cars[i].name, name.to_lower()], i)
+
+
+func _paint_name(i: int, p: int) -> String:
+	var names: PackedStringArray = paint_names.call(i) if paint_names.is_valid() else PackedStringArray()
+	return names[p] if p >= 0 and p < names.size() else "Colour %d" % (p + 1)
+
+
 func upgrade() -> void:
 	var i := car()
 	if i >= 0 and owned():
@@ -139,6 +174,8 @@ func _say(text: String, col := UiKit.COP_RED) -> void:
 
 func _rebuild(keep: int) -> void:
 	_entries.clear()
+	_paint_try = -1
+	_count_events()
 	var mine := Game.garage_cars().filter(_listed)
 	var sale := Game.dealer_cars().filter(func(i: int) -> bool: return not Game.owns(i) and _listed(i))
 	if not mine.is_empty():
@@ -146,7 +183,7 @@ func _rebuild(keep: int) -> void:
 		for i in mine:
 			_entries.append({"car": i, "owned": true})
 	if not sale.is_empty():
-		_entries.append({"head": "Dealer"})
+		_entries.append({"head": "Dealer" if circuit.is_empty() or not mine.is_empty() else "None of yours fits: the dealer's"})
 		for i in sale:
 			_entries.append({"car": i, "owned": false})
 	_focus = -1
@@ -160,6 +197,29 @@ func _rebuild(keep: int) -> void:
 	queue_redraw()
 	focus_changed.emit(car())
 	changed.emit()
+
+
+## For every car listed: the open events not yet won that it may enter, and how many of those
+## none of your cars may.
+func _count_events() -> void:
+	_events.clear()
+	var career := Game.career_data()
+	if career == null:
+		return
+	var todo := []
+	for t in career.tournaments:
+		if not Game.tournament_open(t):
+			continue
+		for cid in t.circuits:
+			var c: Dictionary = career.circuits.get(cid, {})
+			if not c.is_empty() and Game.circuit_open(c) and int(Game.career_won.get(cid, 99)) != 1 \
+					and c.restriction != HsCareer.LOANER:
+				todo.append(c)
+	var mine := Game.garage_cars()
+	var uncovered := todo.filter(func(c: Dictionary) -> bool: return not mine.any(func(i: int) -> bool: return Game.circuit_allows(c, i)))
+	for i in mine + Game.dealer_cars():
+		_events[i] = [todo.filter(func(c: Dictionary) -> bool: return Game.circuit_allows(c, i)).size(),
+			uncovered.filter(func(c: Dictionary) -> bool: return Game.circuit_allows(c, i)).size()]
 
 
 func _listed(i: int) -> bool:
@@ -210,6 +270,7 @@ func _set_focus(k: int) -> void:
 	if k == _focus or k < 0:
 		return
 	_focus = k
+	_paint_try = -1
 	_ensure_visible()
 	queue_redraw()
 	focus_changed.emit(car())
@@ -293,6 +354,8 @@ func _unhandled_input(e: InputEvent) -> void:
 		upgrade()
 	elif (pressed and key.physical_keycode == KEY_R) or (e is InputEventJoypadButton and e.pressed and e.button_index == JOY_BUTTON_LEFT_SHOULDER):
 		repair()
+	elif pressed and key.physical_keycode == KEY_P:
+		respray()
 	elif (pressed and key.physical_keycode == KEY_S) or (e is InputEventJoypadButton and e.pressed and e.button_index == JOY_BUTTON_RIGHT_SHOULDER):
 		sell()
 	elif e.is_action_pressed("ui_cancel"):
@@ -312,26 +375,24 @@ func _process(dt: float) -> void:
 
 # ------------------------------------------------------------------ drawing
 
+func _moneyed() -> bool:
+	# (NFS3's tournaments have no money: its cars are all yours, the bonus ones once won.)
+	return Game.career_series != "nfs3"
+
+
 func _draw() -> void:
 	var w := size.x
 	var bf := UiKit.font("body")
-	# Heading: what it's for, and the money.
-	var title := "GARAGE" if circuit.is_empty() else "YOUR CAR FOR IT"
-	draw_string(UiKit.font("display"), Vector2(-2, 34), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, UiKit.INK)
-	draw_string(UiKit.font("display", 0, true), Vector2(0, 34), UiKit.money(Game.career_money), HORIZONTAL_ALIGNMENT_RIGHT,
-		w, 28, UiKit.ACCENT)
-	draw_string(UiKit.font("cond", 1), Vector2(0, 50), "TO SPEND", HORIZONTAL_ALIGNMENT_RIGHT, w, 11, UiKit.INK_DIM)
-	var sub := "%d owned  ·  buy, upgrade, repair or sell" % Game.career_garage.size()
-	if not circuit.is_empty():
-		var only := Game.career_data().restriction_text(circuit)
-		sub = "%s  ·  entry %s" % [only if only != "" else "Any car", UiKit.money(circuit.fee) if circuit.fee > 0.0 else "free"]
-	draw_string(bf, Vector2(0, 58), sub, HORIZONTAL_ALIGNMENT_LEFT, w - 90, 15, UiKit.INK_DIM)
+	if circuit.is_empty():
+		_draw_stable_head(w)
+	else:
+		_draw_entry_head(w)
 	draw_line(Vector2(0, LIST_TOP - 1), Vector2(w, LIST_TOP - 1), UiKit.LINE, 1.0)
 	# The list.
 	var lr := _list_rect()
 	if _entries.is_empty():
-		draw_string(bf, lr.position + Vector2(24, 30), "No car can enter this circuit.", HORIZONTAL_ALIGNMENT_LEFT,
-			w - 48, 16, UiKit.INK_DIM)
+		draw_string(bf, lr.position + Vector2(0, 30), "No car can enter this event." if not circuit.is_empty() else "No cars.",
+			HORIZONTAL_ALIGNMENT_LEFT, w, 16, UiKit.INK_DIM)
 	for k in _entries.size():
 		var e: Dictionary = _entries[k]
 		var r: Rect2 = e.rect
@@ -353,6 +414,38 @@ func _draw() -> void:
 	_draw_detail(Rect2(0, size.y - DETAIL_H, w, DETAIL_H))
 
 
+## Visiting: the money to spend (the tab above already says where you are) and the stable.
+func _draw_stable_head(w: float) -> void:
+	var n := Game.career_garage.size()
+	if _moneyed():
+		UiKit.kicker(self, Vector2(0, 14), "To spend", w, UiKit.INK_DIM)
+		draw_string(UiKit.font("display", 0, true), Vector2(-1, 50), UiKit.money(Game.career_money), HORIZONTAL_ALIGNMENT_LEFT,
+			w, 34, UiKit.ACCENT)
+	else:
+		draw_string(UiKit.font("display"), Vector2(-2, 50), "YOUR CARS", HORIZONTAL_ALIGNMENT_LEFT, w, 32, UiKit.INK)
+	draw_string(UiKit.font("display", 0, true), Vector2(0, 50), str(n), HORIZONTAL_ALIGNMENT_RIGHT, w, 34, UiKit.INK)
+	draw_string(UiKit.font("cond", 1), Vector2(0, 66), "CAR OWNED" if n == 1 else "CARS OWNED", HORIZONTAL_ALIGNMENT_RIGHT, w, 11,
+		UiKit.INK_DIM)
+
+
+## Entering an event: the event, what it takes and what it costs, over the cars it takes.
+func _draw_entry_head(w: float) -> void:
+	UiKit.kicker(self, Vector2(0, 14), "Entering", w)
+	var name := str(circuit.get("name", "Circuit")).to_upper()
+	draw_string(UiKit.font("display"), Vector2(-2, 48), name, HORIZONTAL_ALIGNMENT_LEFT, w - 150,
+		UiKit.fit("display", name, w - 150, 32, 18), UiKit.INK)
+	var only := Game.career_data().restriction_text(circuit)
+	var bits := PackedStringArray([only if only != "" else "Any car"])
+	if _moneyed():
+		bits.append("entry " + UiKit.money(circuit.fee) if circuit.fee > 0.0 else "free entry")
+	bits.append("%d races" % circuit.races.size())
+	draw_string(UiKit.font("body"), Vector2(0, 70), "  ·  ".join(bits), HORIZONTAL_ALIGNMENT_LEFT, w, 14, UiKit.INK_DIM)
+	if _moneyed():
+		draw_string(UiKit.font("display", 0, true), Vector2(0, 46), UiKit.money(Game.career_money), HORIZONTAL_ALIGNMENT_RIGHT,
+			w, 24, UiKit.ACCENT)
+		draw_string(UiKit.font("cond", 1), Vector2(0, 60), "TO SPEND", HORIZONTAL_ALIGNMENT_RIGHT, w, 11, UiKit.INK_DIM)
+
+
 func _draw_row(e: Dictionary, r: Rect2, focused: bool, hovered: bool) -> void:
 	var i: int = e.car
 	if focused:
@@ -366,98 +459,122 @@ func _draw_row(e: Dictionary, r: Rect2, focused: bool, hovered: bool) -> void:
 	UiKit.box(self, badge, Color(UiKit.ACCENT, 0.95 if focused else 0.6), 3)
 	draw_string(UiKit.font("display"), Vector2(badge.position.x, cy + 7), CLASS_NAMES[cls] if cls >= 0 else "—",
 		HORIZONTAL_ALIGNMENT_CENTER, badge.size.x, 16, UiKit.BG)
-	# At the right: yours, its upgrade level and damage; the dealer's, its price.
 	var right := r.end.x - 12
-	var tf := UiKit.font("cond", 1, true)
-	var name_end := right - 150
+	var x := badge.end.x + 14
+	var name_w := right - x - 120
+	var name := str(Game.cars[i].name).to_upper()
+	draw_string(UiKit.font("display"), Vector2(x, cy + 1), name, HORIZONTAL_ALIGNMENT_LEFT, name_w,
+		UiKit.fit("display", name, name_w, 20, 13), UiKit.INK if focused or hovered else Color(UiKit.INK, 0.85))
+	# Under the name: where it gets you.
+	var ev: Array = _events.get(i, [0, 0])
+	var sub := ""
+	var sub_col := UiKit.INK_DIM
+	if not e.owned and ev[1] > 0:
+		sub = "Gets you into %d new event%s" % [ev[1], "" if ev[1] == 1 else "s"]
+		sub_col = UiKit.GOOD
+	else:
+		sub = "Fits %d event%s still to win" % [ev[0], "" if ev[0] == 1 else "s"] if ev[0] > 0 else "Fits no event still to win"
+		sub_col = UiKit.INK_DIM if ev[0] > 0 else UiKit.INK_FAINT
+	if sub != "":
+		draw_string(UiKit.font("body"), Vector2(x, cy + 18), sub, HORIZONTAL_ALIGNMENT_LEFT, name_w, 12, sub_col)
+	# At the right: yours, its upgrade level and damage; the dealer's, its price.
 	if e.owned:
+		if Game.upgrade_cost(i, 1) > 0:
+			_pips(Vector2(right - 46, cy - 5), Game.garage_upgrade(i), focused)
 		var dmg := Game.garage_damage(i)
 		if dmg > 0.005:
-			var bw := 46.0
-			UiKit.box(self, Rect2(right - bw, cy - 2.5, bw, 5), Color(1, 1, 1, 0.1), 2)
-			UiKit.box(self, Rect2(right - bw, cy - 2.5, bw * dmg, 5), UiKit.COP_RED, 2)
-			draw_string(UiKit.font("cond", 1), Vector2(right - bw - 80, cy + 5), "%d%% damage" % roundi(dmg * 100.0),
-				HORIZONTAL_ALIGNMENT_RIGHT, 72, 13, UiKit.COP_RED)
-			right -= bw + 90
-		var lvl := Game.garage_upgrade(i)
-		draw_string(tf, Vector2(right - 90, cy + 5), "LEVEL %d" % lvl if lvl > 0 else "STOCK", HORIZONTAL_ALIGNMENT_RIGHT, 90, 14,
-			UiKit.INK if focused else UiKit.INK_DIM)
-		name_end = right - 100
-	else:
+			draw_string(UiKit.font("cond", 1), Vector2(right - 110, cy + 17), "%d%% DAMAGE" % roundi(dmg * 100.0),
+				HORIZONTAL_ALIGNMENT_RIGHT, 110, 12, UiKit.COP_RED)
+		else:
+			var lvl := Game.garage_upgrade(i)
+			draw_string(UiKit.font("cond", 1), Vector2(right - 110, cy + 17), "LEVEL %d" % lvl if lvl > 0 else "STOCK",
+				HORIZONTAL_ALIGNMENT_RIGHT, 110, 12, UiKit.INK_DIM)
+	elif _moneyed():
 		var price := Game.career_price(i)
 		var ok := price <= Game.career_money
-		draw_string(UiKit.font("display", 0, true), Vector2(right - 130, cy + 7), UiKit.money(price),
-			HORIZONTAL_ALIGNMENT_RIGHT, 130, 19, UiKit.INK if ok else UiKit.COP_RED)
-	var name := str(Game.cars[i].name).to_upper()
-	var x := badge.end.x + 14
-	draw_string(UiKit.font("display"), Vector2(x, cy + 7), name, HORIZONTAL_ALIGNMENT_LEFT, name_end - x,
-		UiKit.fit("display", name, name_end - x, 20, 14), UiKit.INK if focused or hovered else Color(UiKit.INK, 0.85))
+		draw_string(UiKit.font("display", 0, true), Vector2(right - 120, cy + 1), UiKit.money(price),
+			HORIZONTAL_ALIGNMENT_RIGHT, 120, 19, UiKit.INK if ok else UiKit.COP_RED)
+		if not ok:
+			draw_string(UiKit.font("cond", 1), Vector2(right - 120, cy + 17), "%s SHORT" % UiKit.money(price - Game.career_money),
+				HORIZONTAL_ALIGNMENT_RIGHT, 120, 12, Color(UiKit.COP_RED, 0.8))
 
 
-## The focused car's figures, and buttons for what can be done with it.
+## The upgrade levels as three pips from `at` (top left), the fitted ones lit.
+func _pips(at: Vector2, level: int, bright: bool) -> void:
+	for k in Car.UPGRADES.size():
+		var r := Rect2(at + Vector2(k * 16, 0), Vector2(12, 6))
+		UiKit.box(self, r, UiKit.ACCENT if k < level else Color(1, 1, 1, 0.16 if bright else 0.1), 2)
+
+
+## The focused car's state, a line per thing about it with the action that changes it.
 func _draw_detail(r: Rect2) -> void:
 	_buttons.clear()
 	draw_line(Vector2(0, r.position.y), Vector2(r.end.x, r.position.y), UiKit.LINE, 1.0)
 	var i := car()
 	if i < 0:
 		return
-	var bf := UiKit.font("body")
-	var vf := UiKit.font("display", 0, true)
-	var x := 0.0
-	var y := r.position.y + 26
-	var facts := []
+	var lines := []   # [label, value, colour, extra (Callable: draws after the label) or null, button or []]
 	if owned():
 		var lvl := Game.garage_upgrade(i)
 		var next := Game.upgrade_cost(i, lvl + 1)
-		facts.append(["Upgrades", Car.UPGRADE_NAMES[lvl] + ("" if next > 0 else (" · all fitted" if lvl > 0 else " · none to fit"))])
+		var up_val: String = Car.UPGRADE_NAMES[lvl] + ("" if next > 0 else (" · all fitted" if lvl > 0 else ", takes none"))
+		lines.append(["Upgrades", up_val, UiKit.INK, lvl if Game.upgrade_cost(i, 1) > 0 else null, ["U", "UPGRADE " + UiKit.money(next), upgrade, next <= Game.career_money]
+			if next > 0 and _moneyed() else []])
 		var dmg := Game.garage_damage(i)
-		facts.append(["Damage", "%d%%" % roundi(dmg * 100.0) if dmg > 0.005 else "None"])
-		facts.append(["Resale", UiKit.money(Game.resale_value(i))])
+		var fix := Game.repair_cost(i)
+		lines.append(["Damage", "%d%%" % roundi(dmg * 100.0) if dmg > 0.005 else "None", UiKit.COP_RED if dmg > 0.005 else UiKit.INK,
+			null, ["R", "REPAIR " + UiKit.money(fix), repair, fix <= Game.career_money] if fix > 0 else []])
+		var paint := _paint_name(i, Game.garage_paint(i))
+		if _paint_try >= 0:
+			var cost := Game.respray_cost(i)
+			lines.append(["Paint", "%s → %s" % [paint, _paint_name(i, _paint_try)], UiKit.ACCENT, null,
+				["P", "RESPRAY " + (UiKit.money(cost) if cost > 0 else ""), respray, cost <= Game.career_money]])
+		else:
+			lines.append(["Paint", paint, UiKit.INK, null, []])
+		if _moneyed():
+			lines.append(["Worth", UiKit.money(Game.resale_value(i)), UiKit.INK, null, ["S", "SELL", sell, true]])
 	else:
-		facts.append(["Price", UiKit.money(Game.career_price(i))])
+		var price := Game.career_price(i)
+		var short := price - Game.career_money
+		lines.append(["Price", UiKit.money(price), UiKit.INK, null, []])
+		lines.append(["After", ("%s left" % UiKit.money(-short)) if short <= 0 else ("%s more needed" % UiKit.money(short)),
+			UiKit.INK_DIM if short <= 0 else UiKit.COP_RED, null, []])
 		var ups := PackedStringArray()
 		for level in range(1, Car.UPGRADES.size() + 1):
 			var c := Game.upgrade_cost(i, level)
 			if c > 0:
 				ups.append(UiKit.money(c))
-		facts.append(["Upgrades, level by level", " / ".join(ups) if not ups.is_empty() else "None"])
-		var short := Game.career_price(i) - Game.career_money
-		if short > 0:
-			facts.append(["You need", "%s more" % UiKit.money(short)])
-	# The middle column is the widest: the upgrades' prices go there.
-	var widths := [0.26, 0.44, 0.30]
-	for k in facts.size():
-		var cw: float = r.size.x * widths[k]
-		draw_string(bf, Vector2(x, y), facts[k][0], HORIZONTAL_ALIGNMENT_LEFT, cw - 10, 13, UiKit.INK_DIM)
-		var v: String = facts[k][1].to_upper()
-		draw_string(vf, Vector2(x, y + 24), v, HORIZONTAL_ALIGNMENT_LEFT, cw - 10,
-			UiKit.fit("display", v, cw - 10, 19, 12), UiKit.COP_RED if facts[k][0] == "You need" else UiKit.INK)
-		x += cw
-	# Buttons, for yours (the dealer's are bought with the main button).
-	var btns := []
-	if owned():
-		var next := Game.upgrade_cost(i, Game.garage_upgrade(i) + 1)
-		if next > 0:
-			btns.append(["U", "UPGRADE  " + UiKit.money(next), upgrade, next <= Game.career_money])
-		var fix := Game.repair_cost(i)
-		if fix > 0:
-			btns.append(["R", "REPAIR  " + UiKit.money(fix), repair, fix <= Game.career_money])
-		btns.append(["S", "SELL  " + UiKit.money(Game.resale_value(i)), sell, true])
-	var bx := -12.0
-	var by := r.position.y + 58
-	for b in btns:
-		var label: String = b[1]
-		var bw := UiKit.key_width(b[0], 12) + UiKit.text_width("cond", label, 14, 1) + 34
-		var br := Rect2(bx, by, bw, 34)
-		var hot: bool = _buttons.size() == _hover_btn and b[3]
-		# Text buttons: the key and the action, lit and underlined under the pointer.
-		var ink := UiKit.ACCENT if hot else (UiKit.INK if b[3] else UiKit.INK_FAINT)
-		if hot:
-			draw_rect(Rect2(bx + 20 + UiKit.key_width(b[0], 12), br.end.y - 6, br.size.x - 34 - UiKit.key_width(b[0], 12), 2), UiKit.ACCENT)
-		var kw := UiKit.draw_key(self, Vector2(bx + 12, br.get_center().y), b[0], 12, ink)
-		draw_string(UiKit.font("cond", 1), Vector2(bx + 20 + kw, br.get_center().y + 5), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, ink)
-		_buttons.append([br, b[2]])
-		bx += bw + 8
+		lines.append(["Upgrades", " / ".join(ups) if not ups.is_empty() else "None to fit", UiKit.INK, null, []])
+	var y := r.position.y + 30
+	var vx := 96.0
+	for l in lines:
+		draw_string(UiKit.font("body"), Vector2(0, y), l[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, UiKit.INK_DIM)
+		var vx2 := vx
+		if l[3] is int:
+			_pips(Vector2(vx, y - 9), l[3], true)
+			vx2 += 56
+		draw_string(UiKit.font("display", 0, true), Vector2(vx2, y + 1), l[1].to_upper(), HORIZONTAL_ALIGNMENT_LEFT,
+			r.size.x * 0.58 - vx2, UiKit.fit("display", l[1].to_upper(), r.size.x * 0.58 - vx2, 18, 12), l[2])
+		if not l[4].is_empty():
+			_draw_button(l[4], r.end.x, y)
+		y += 31
 	if _message != "":
-		draw_string(UiKit.font("body_bold"), Vector2(0, r.end.y - 14), _message, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 48, 14,
+		draw_string(UiKit.font("body_bold"), Vector2(0, r.end.y - 6), _message, HORIZONTAL_ALIGNMENT_LEFT, r.size.x, 14,
 			Color(_message_col, clampf(_message_t * 2.0, 0.0, 1.0)))
+
+
+## A text button, right-aligned to `right` on baseline `y`: its key and its action, lit and
+## underlined under the pointer, faint when it can't be done.
+func _draw_button(b: Array, right: float, y: float) -> void:
+	var label: String = b[1]
+	var kw0 := UiKit.key_width(b[0], 12)
+	var bw := kw0 + UiKit.text_width("cond", label, 14, 1) + 28
+	var br := Rect2(right - bw, y - 22, bw, 32)
+	var hot: bool = _buttons.size() == _hover_btn and b[3]
+	var ink := UiKit.ACCENT if hot else (UiKit.INK if b[3] else UiKit.INK_FAINT)
+	var kx := br.position.x + 8
+	var kw := UiKit.draw_key(self, Vector2(kx, br.get_center().y), b[0], 12, ink)
+	draw_string(UiKit.font("cond", 1), Vector2(kx + kw + 8, br.get_center().y + 5), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, ink)
+	if hot:
+		draw_rect(Rect2(kx + kw + 8, br.end.y - 5, br.end.x - kx - kw - 8, 2), UiKit.ACCENT)
+	_buttons.append([br, b[2]])

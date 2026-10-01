@@ -8,6 +8,7 @@ var keys: Array = []
 var delay := 1                  # game ticks per key; the game takes 6 outside 1-400
 var tick_rate := 60.0           # the game's ticks per second (High Stakes: 64)
 var _t := 0.0
+const TELEPORT := 100.0         # m
 
 
 func _process(dt: float) -> void:
@@ -18,7 +19,9 @@ func _process(dt: float) -> void:
 	var i := int(_t)
 	var a: Vector3 = keys[i].pos
 	var b: Vector3 = keys[i + 1].pos
-	position = a.lerp(b, _t - i)
+	# A step longer than TELEPORT is a jump (a Porsche Unleashed train back to the start of
+	# its run): no sweep across the world in between.
+	position = a.lerp(b, _t - i) if a.distance_squared_to(b) < TELEPORT * TELEPORT else a
 	var qa: Quaternion = keys[i].rot
 	var qb: Quaternion = keys[i + 1].rot
 	quaternion = qa.slerp(qb, _t - i)

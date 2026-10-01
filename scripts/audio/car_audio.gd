@@ -19,6 +19,14 @@ extends AudioStreamPlayer3D
 ## Patch 3 of the same bank is the car's horn. Traffic, whose car files have no banks, uses
 ## the shared genocar.bnk or otruck.bnk (engine 0, horn 1). An upshift drops the engine to
 ## its off-throttle sound until the new gear takes up (AudioCmn_CheckState's gear-shift dip).
+## - Porsche Unleashed: the car being driven has High Stakes' tabled engine (Nfs5Car); the
+##   others, traffic included, loop their set's engine (ocar.bnk) and exhaust (ocarex.bnk)
+##   together. Its cars slide, knock, scrape and hoot with its own snd_coll.bnk (GameSounds.pu).
+## - Hot Pursuit 2: the car being driven has the tabled engine too, its twelve recordings
+##   (load and coast, engine and exhaust, three rpm each) put together by Nfs6Car; the cars
+##   around you crossfade their oppbnk.viv bank's patch 1 (on the throttle) with 0 (off);
+##   traffic loops genopp.bnk. Each has its own horn (horn.bnk), and they use HP2's gen.bnk
+##   and siren (GameSounds.hp2).
 
 const RATE := 22050
 ## Firing frequency the engine loop is baked at; pitch_scale moves it to the car's rpm.
@@ -49,6 +57,9 @@ var _built_player := false
 var _voices: Array[Dictionary] = []
 var _crossfade := false      # the engine has off-throttle loops to fade the load ones against
 var _sounds: GameSounds
+var _gen: EaBnk              # the shared bank this car's tyres, knocks, road and horn come from
+var _pu_gen := false         # _gen is Porsche Unleashed's (GameSounds.PU_PATCHES)
+var _hp2_gen := false        # _gen is Hot Pursuit 2's (GameSounds.HP2_IMPACTS)
 var _skid_patch := -1
 var _effects: CarEffects
 var _crash_cool := 0.0
@@ -75,12 +86,6 @@ func _ready() -> void:
 	_scrape = _child_player(null)
 	_road = _child_player(null)
 	_horn = _child_player(null)
-	if _sounds:
-		if _sounds.siren and _sounds.siren.stream(GameSounds.SIREN):
-			_siren.stream = _sounds.siren.stream(GameSounds.SIREN)
-		if _sounds.gen:
-			_scrape.stream = _sounds.gen.stream(GameSounds.SCRAPE)
-			_road.stream = _sounds.gen.stream(GameSounds.ROAD)
 
 
 func _child_player(s: AudioStream) -> AudioStreamPlayer3D:
@@ -142,6 +147,18 @@ func _build() -> void:
 		_horn.stop()
 	_horn.stream = null
 	var data := car.car_data
+	# Porsche Unleashed's and Hot Pursuit 2's cars with their game's sounds; the rest with
+	# NFS3's or High Stakes' if there.
+	_hp2_gen = _sounds != null and _sounds.hp2 != null and (data is Nfs6Car or (_sounds.gen == null and _sounds.pu == null))
+	_pu_gen = not _hp2_gen and _sounds != null and _sounds.pu != null and (data is Nfs5Car or _sounds.gen == null)
+	_gen = _sounds.hp2 if _hp2_gen else _sounds.pu if _pu_gen else _sounds.gen if _sounds else null
+	_siren.stop()
+	_siren.stream = _siren_stream(data)
+	_skid_patch = -1
+	_skid.stop()
+	_skid.stream = _skid_loop
+	_scrape.stream = _gen_stream(GameSounds.SCRAPE)
+	_road.stream = _gen_stream(GameSounds.ROAD)
 	var bank: EaBnk = null
 	if data != null and data.has_method("sound_bank"):
 		if car.is_player:
@@ -157,8 +174,13 @@ func _build() -> void:
 			if not _voices.is_empty():
 				break
 			bank = data.sound_bank(f)
-			if bank:
+			if bank and data is Nfs6Car and f == "ocar.bnk" and not data.traffic:
+				_hp2_opponent_voices(bank)
+			elif bank:
 				_single_voices(bank, false)
+				# Porsche Unleashed's: the exhaust's loop beside the engine's.
+				if f == "ocar.bnk" and data.sound_bank("ocarex.bnk"):
+					_single_voices(data.sound_bank("ocarex.bnk"), false)
 	if _voices.is_empty() and _sounds and data != null:
 		# Traffic: the shared engines, a truck's for the heavy ones.
 		bank = _sounds.traffic_truck if car.mass > TRUCK_MASS and _sounds.traffic_truck else _sounds.traffic_car
@@ -167,8 +189,15 @@ func _build() -> void:
 			if bank.stream(1):
 				_horn.stream = bank.stream(1)
 			bank = null
-	if bank and bank.stream(HORN_PATCH):
+	# (Porsche Unleashed's engine banks have no horn: its horns are in snd_coll.bnk. Hot
+	# Pursuit 2's cars bring theirs apart.)
+	var own_horn: EaBnk = data.sound_bank("horn.bnk") if data is Nfs6Car else null
+	if own_horn and own_horn.stream(0):
+		_horn.stream = own_horn.stream(0)
+	elif bank and bank.stream(HORN_PATCH) and not (data is Nfs5Car or data is Nfs6Car):
 		_horn.stream = bank.stream(HORN_PATCH)
+	elif _horn.stream == null and _pu_gen and car.mass > TRUCK_MASS:
+		_horn.stream = _gen.stream(GameSounds.PU_TRUCK_HORN)
 	elif _horn.stream == null:
 		_horn.stream = _gen_stream(GameSounds.HORN)
 	_crossfade = _voices.any(func(v: Dictionary) -> bool: return v.load == 0)
@@ -190,13 +219,15 @@ func _hs_voices(bank: EaBnk, data: Object) -> bool:
 			var patch: int = ch.patch
 			if not bank.has(patch) or bank.stream(patch) == null:
 				continue
-			_add_voice(bank.stream(patch), ch.table, set[1], patch >= 64, bank.volume(patch), bank.tune(patch))
+			# The exhaust: patches 64 and up, or Hot Pursuit 2's channels 4.. (its patches run on).
+			var exhaust: bool = patch >= 64 or (data is Nfs6Car and ch.channel >= 4)
+			_add_voice(bank.stream(patch), ch.table, set[1], exhaust, bank.volume(patch), bank.tune(patch))
 	return not _voices.is_empty()
 
 
 ## An engine definition (.ctb / .ltb, AudioEng_tDef): 8 patch numbers at 32 and, at 296
 ## and 328, 8 offsets (each from its own field) to 512-byte volume and pitch-bend tables.
-## Returns [{patch, table}] for the channels in use, or [] if it doesn't parse.
+## Returns [{patch, channel, table}] for the channels in use, or [] if it doesn't parse.
 static func _engine_table(d: PackedByteArray) -> Array:
 	var out := []
 	if d.size() < 360 or d.slice(0, 4).get_string_from_ascii() != "CRDl":
@@ -209,7 +240,7 @@ static func _engine_table(d: PackedByteArray) -> Array:
 		var t := at + d.decode_s32(at)
 		if t < 0 or t + 512 > d.size():
 			continue
-		out.append({"patch": patch, "table": d.slice(t, t + 512)})
+		out.append({"patch": patch, "channel": i, "table": d.slice(t, t + 512)})
 	return out
 
 
@@ -226,6 +257,30 @@ func _single_voices(bank: EaBnk, full: bool) -> void:
 		# No off-throttle recording: the one loop plays throughout.
 		for v in _voices:
 			v.load = -1
+
+
+## Hot Pursuit 2's cars you aren't driving: patch 1 on the throttle, crossfaded with 0 off it.
+func _hp2_opponent_voices(bank: EaBnk) -> void:
+	for pl in [[1, 1], [0, 0]]:
+		if bank.stream(pl[0]):
+			_add_voice(bank.stream(pl[0]), PackedByteArray(), pl[1], false, bank.volume(pl[0]), bank.tune(pl[0]))
+	if _voices.size() < 2:
+		for v in _voices:
+			v.load = -1
+
+
+func _siren_stream(data: Object) -> AudioStream:
+	if _sounds == null:
+		return _siren_loop
+	if data is Nfs6Car and _sounds.hp2_siren and _sounds.hp2_siren.stream(GameSounds.SIREN):
+		return _sounds.hp2_siren.stream(GameSounds.SIREN)
+	if _sounds.siren and _sounds.siren.stream(GameSounds.SIREN):
+		return _sounds.siren.stream(GameSounds.SIREN)
+	if _sounds.pu and _sounds.pu.stream(GameSounds.PU_SIREN):
+		return _sounds.pu.stream(GameSounds.PU_SIREN)
+	if _sounds.hp2_siren and _sounds.hp2_siren.stream(GameSounds.SIREN):
+		return _sounds.hp2_siren.stream(GameSounds.SIREN)
+	return _siren_loop
 
 
 func _add_voice(s: AudioStreamWAV, table: PackedByteArray, load: int, exhaust: bool, gain: float, tune: float) -> void:
@@ -275,18 +330,18 @@ func _synth_engine(dt: float) -> void:
 
 func _tyres() -> void:
 	var skid := clampf(car.slip * 1.6 - 0.25, 0.0, 1.0) if car.grounded_wheels > 0 and absf(car.speed) > 4.0 else 0.0
-	if _sounds and _sounds.gen:
-		var patch := GameSounds.TYRES_TARMAC
+	if _gen:
+		var patch := _patch(GameSounds.TYRES_TARMAC)
 		if car.off_road > 0.5:
-			patch = GameSounds.TYRES_GRAVEL
+			patch = _patch(GameSounds.TYRES_GRAVEL)
 		elif car.surface_grip < 0.95:
-			patch = GameSounds.TYRES_WET
-		if patch != _skid_patch and _sounds.gen.stream(patch):
+			patch = _patch(GameSounds.TYRES_WET)
+		if patch != _skid_patch and _gen.stream(patch):
 			_skid_patch = patch
 			_skid.stop()
-			_skid.stream = _sounds.gen.stream(patch)
+			_skid.stream = _gen.stream(patch)
 		# The slide bends it up to its bend range (tag 0x0A, semitones) either way.
-		var bend := float(_sounds.gen.tag(_skid_patch, 0x0A, 4))
+		var bend := float(_gen.tag(_skid_patch, 0x0A, 4))
 		_skid.pitch_scale = pow(2.0, lerpf(-0.5, 0.6, skid) * bend / 12.0)
 		skid *= 0.8
 	_set_level(_skid, skid)
@@ -322,24 +377,39 @@ func _horn_update() -> void:
 
 ## A crash: one of the impact sounds, heavier the harder it hit.
 func _on_crashed(impulse: float) -> void:
-	if _crash_cool > 0.0 or _sounds == null or _sounds.gen == null:
+	if _crash_cool > 0.0 or _gen == null:
 		return
 	_crash_cool = 0.12
 	var force := clampf(impulse * 4.0, 0.0, 127.0)   # ChooseImpactSample's 0..127 scale
 	var patch := GameSounds.IMPACT_LIGHT
-	if force > 110.0:
+	var layer := 0
+	if _pu_gen:
+		# One of the three, and its layer for how hard (tags 0x01..0x02).
+		patch = GameSounds.PU_IMPACTS.pick_random()
+		for l in _gen.layer_count(patch):
+			if force >= _gen.tag(patch, 0x01, 0, l) and force <= _gen.tag(patch, 0x02, 127, l):
+				layer = l
+				break
+	elif force > 110.0:
 		patch = GameSounds.IMPACT_HEAVY
 	elif force > 60.0:
 		patch = GameSounds.IMPACT_MEDIUM if randf() < 0.5 else GameSounds.IMPACT_WALL
 	elif force > 30.0:
 		patch = GameSounds.IMPACT_HARD
-	var s := _sounds.gen.stream(patch)
-	if s == null:
-		return
-	# Tag 0x11: a random pitch spread, cents.
-	var spread := _sounds.gen.tag(patch, 0x11, 0) * 0.5
-	var pitch := pow(2.0, randf_range(-spread, spread) / 1200.0)
-	GameSounds.play_once(car, s, _base_db + linear_to_db(clampf(force / 90.0, 0.35, 1.0)), pitch, bus)
+	# Hot Pursuit 2's: its own crashes, every layer at once.
+	var layers := [layer]
+	if _hp2_gen:
+		patch = GameSounds.HP2_IMPACTS.get(patch, patch)
+		layers = range(_gen.layer_count(patch))
+	for l: int in layers:
+		var s := _gen.stream(patch, l)
+		if s == null:
+			continue
+		# Tag 0x11: a random pitch spread, cents.
+		var spread := _gen.tag(patch, 0x11, 0, l) * 0.5
+		var pitch := pow(2.0, randf_range(-spread, spread) / 1200.0)
+		var gain := clampf(force / 90.0, 0.35, 1.0) * (_gen.volume(patch, l) if _hp2_gen else 1.0)
+		GameSounds.play_once(car, s, _base_db + linear_to_db(gain), pitch, bus)
 
 
 func _enter_tree() -> void:
@@ -354,8 +424,14 @@ func _exit_tree() -> void:
 		c.crashed.disconnect(_on_crashed)
 
 
-func _gen_stream(patch: int) -> AudioStreamWAV:
-	return _sounds.gen.stream(patch) if _sounds and _sounds.gen else null
+## One of the shared sounds (GameSounds' numbers), from this car's bank.
+func _gen_stream(id: int) -> AudioStreamWAV:
+	return _gen.stream(_patch(id)) if _gen else null
+
+
+## GameSounds' number `id` in this car's bank.
+func _patch(id: int) -> int:
+	return GameSounds.PU_PATCHES.get(id, id) if _pu_gen else id
 
 
 func _set_level(p: AudioStreamPlayer3D, level: float) -> void:

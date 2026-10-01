@@ -143,7 +143,7 @@ func _build_entries() -> Array[Dictionary]:
 			continue
 		var g: int = _groups[i]
 		var hay := "%s %s %s %s %s" % [Game.cars[i].name, _make[i], "police pursuit" if g == 4 else CLASS_NAMES[g],
-			["nfs3 hot pursuit", "high stakes hs nfs4", "porsche unleashed pu nfs5"][Game.car_game(i)], _drive[i]]
+			["nfs3 hot pursuit", "high stakes hs nfs4", "porsche unleashed pu nfs5", "hot pursuit 2 hp2 nfs6"][Game.car_game(i)], _drive[i]]
 		if query != "" and not _matches(hay.to_lower()):
 			continue
 		ids.append(i)

@@ -66,6 +66,8 @@ var _track_mat: ShaderMaterial   # NFS3 track only: takes the night tint and hea
 var _reflections: Reflections
 
 var _rival_pool := []      # the rivals' cars, picked before loading (Game.rival_pool)
+var _quip_t := 8.0         # s until a rival may next have a word passing you
+var _ahead_of_you := {}    # rivals' cars ahead of you at the last check
 
 @onready var hud: Hud = $HUD
 ## The voices: lap calls, the finish, the cops' loudhailer and radio (NFS3's speech banks).
@@ -75,6 +77,7 @@ var speech := Speech.new()
 
 func _ready() -> void:
 	hud.race = self
+	speech.hp2 = Game.is_hp2_track(Game.track_id)   # its own voices on Hot Pursuit 2's tracks
 	add_child(speech)
 	hud.show_loading()
 	# Let the loading screen render before the heavy lifting; stop if this scene has been
@@ -234,6 +237,10 @@ func _build_world(world: TrackWorld) -> void:
 	_reflections = Reflections.new()
 	add_child(_reflections)
 	_reflections.setup(world.root, path, world.env, _track_mat, w)
+	if Game.is_hp2_track(Game.track_id):
+		var amb := Hp2Ambience.make(Game.track_dir(Game.track_id), world.mirrored)
+		if amb:
+			add_child(amb)
 
 
 const LOW_CAR_RANGE := 250.0   # m: how far off cars are drawn on Low quality
@@ -432,30 +439,32 @@ func _spawn_cars() -> void:
 	if not rivals.is_empty():
 		n_opp = rivals.size()
 	player.set_meta("circuit_key", "you")
+	player.set_meta("racer", true)
+	# Each rival a driver of its own (Rivals), in the driver's colours; a circuit's keep theirs.
+	var drivers := Rivals.pick(n_opp)
 	for k in n_opp:
 		var data: Object
-		var tint := Color(0, 0, 0, 0)
+		var driver: Dictionary = Rivals.get_driver(rivals[k].driver if not rivals.is_empty() else drivers[k])
 		if not rivals.is_empty():
 			var ci: int = rivals[k].car
 			data = Game.load_car(Game.cars[ci].path, ci)
-			if data.colours.size() > 1:
-				tint = data.colours[(rivals[k].key * 3 + 1) % data.colours.size()]
 		elif pool.is_empty():
 			data = Game.player_car_data()
-			tint = Color.from_hsv(randf(), 0.6, 1.0)
 		else:
 			var ci: int = pool[k % pool.size()]
 			data = Game.load_car(Game.cars[ci].path, ci)
-			if data.colours.size() > 1:
-				tint = data.colours[randi() % data.colours.size()]
-		var ai_car := _make_car(data, tint, rivals[k].upgrade if not rivals.is_empty() else Game.rival_upgrade())
+		var ai_car := _make_car(data, driver.color, rivals[k].upgrade if not rivals.is_empty() else Game.rival_upgrade())
+		ai_car.display_name = driver.name
+		ai_car.set_meta("racer", true)
+		ai_car.set_meta("driver", driver)
 		var ai := AIController.new()
 		ai.role = AIController.Role.RACER
 		ai.path = path
-		ai.skill = randf_range(0.9, 1.05)
+		ai.skill = randf_range(0.95, 1.02)
 		if not rivals.is_empty():
 			ai_car.set_meta("circuit_key", rivals[k].key)
-			ai.skill = Game.circuit_skill() * randf_range(0.97, 1.03)
+			ai.skill = Game.circuit_skill() * randf_range(0.99, 1.01)
+		ai.set_driver(driver)
 		ai_car.add_child(ai)
 		ai_car.add_child(CarAudio.new())
 		grid.append(ai_car)
@@ -475,7 +484,9 @@ func _spawn_cars() -> void:
 		var grid_ai := _controller(grid[i])
 		if grid_ai:
 			grid_ai.lane = side * col
-		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1, "max_lap": -1, "node": n,
+		var drv: Dictionary = grid[i].get_meta("driver", {})
+		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1,
+			"color": drv.get("color", UiKit.ACCENT), "short": drv.get("short", grid[i].display_name), "max_lap": -1, "node": n,
 			"progress": path.progress_at(grid[i].global_position, n), "total": 0.0, "finished": false, "time": 0.0, "best": INF, "lap_start": 0.0,
 			"bust_t": 0.0, "cool": 0.0})
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
@@ -560,8 +571,9 @@ func _spawn_traffic() -> void:
 			data = Game.load_car(models[randi() % models.size()], 4)
 		else:
 			data = ProceduralCar.make(4, Color.from_hsv(randf(), 0.4, 0.8))
-		# Porsche Unleashed's traffic comes in any of its stock paints (Nfs5Car.STOCK_PAINTS).
-		var tc := _make_car(data, data.colours.pick_random() if data is Nfs5Car and not data.colours.is_empty() else Color(0, 0, 0, 0))
+		# Porsche Unleashed's traffic comes in any of its stock paints (Nfs5Car.STOCK_PAINTS), Hot
+		# Pursuit 2's in its skins' colours.
+		var tc := _make_car(data, data.colours.pick_random() if (data is Nfs5Car or data is Nfs6Car) and not data.colours.is_empty() else Color(0, 0, 0, 0))
 		var ai := AIController.new()
 		ai.role = AIController.Role.TRAFFIC
 		ai.path = path
@@ -943,9 +955,33 @@ func _update_progress() -> void:
 		if a.finished:
 			return a.time < b.time
 		return a.total > b.total)
+	_update_rivals(L)
 	if _results_dirty:
 		_results_dirty = false
 		hud.update_results(_result_rows())
+
+
+## The rivals' share of the race run (their form, AIController.race_frac), and a word from
+## one now and then as it gets past you.
+func _update_rivals(L: float) -> void:
+	var span := L * Game.race_laps() if path.closed else path.cumulative[path.finish_node] - path.cumulative[path.start_node]
+	var from := 0.0 if path.closed else path.cumulative[path.start_node]
+	var you := player_racer()
+	_quip_t -= get_physics_process_delta_time()
+	for r in racers:
+		var ai := _controller(r.car)
+		if ai and ai.role == AIController.Role.RACER:
+			ai.race_frac = (r.total - from) / maxf(span, 1.0)
+		if r.car == player or you.is_empty() or spectating() or r.finished or you.finished:
+			continue
+		var ahead: bool = r.total > you.total
+		var was: bool = _ahead_of_you.get(r.car, ahead)
+		_ahead_of_you[r.car] = ahead
+		if ahead and not was and _quip_t <= 0.0 and race_time > 6.0 and r.car.has_meta("driver") \
+				and r.car.global_position.distance_to(player.global_position) < 40.0 and randf() < 0.6:
+			var d: Dictionary = r.car.get_meta("driver")
+			hud.chatter(d.name, d.color, d.quips.pick_random())
+			_quip_t = randf_range(14.0, 24.0)
 
 
 func _lap_done(r: Dictionary) -> void:
@@ -1142,15 +1178,20 @@ func _end_circuit_race(title: String, rows: Array) -> void:
 	# The car keeps its damage until it's paid for.
 	if Game.damage:
 		Game.set_garage_damage(Game.car_index, player.damage)
-	var outcome := Game.circuit_race_done(order)
+	var times := {}
+	for r in racers:
+		times[r.car.get_meta("circuit_key", "you")] = _finish_time(r)
+	var outcome := Game.circuit_race_done(order, times)
 	Game.save_career()
 	var standings := []
 	for s: Dictionary in outcome.standings:
 		standings.append({"name": Game.circuit_name(s.key), "you": s.key is String, "race": s.race, "gained": s.gained,
-			"points": s.points, "out": s.out})
+			"color": UiKit.ACCENT if s.key is String else Rivals.get_driver(Game.circuit_driver(s.key)).color,
+			"points": s.points, "out": s.out, "total": Hud.fmt_time(s.total) if s.total >= 0.0 else ""})
 	var circuit := {"standings": standings,
-		"caption": "%s  ·  %s %d  ·  RACE %d OF %d" % [Game.track_name(Game.track_id).to_upper(), str(tour.get("name", "")).to_upper(),
-			tour.get("circuits", []).find(run.circuit) + 1, race_no, c.races.size()],
+		"caption": "%s  ·  %s  ·  RACE %d OF %d" % [Game.track_name(Game.track_id).to_upper(), str(tour.get("name", "")).to_upper()
+			+ (" · " + str(c.name).to_upper() if c.has("name") else " %d" % (tour.get("circuits", []).find(run.circuit) + 1)),
+			race_no, c.races.size()],
 		"standings_caption": "FINAL STANDINGS" if outcome.done else "STANDINGS AFTER RACE %d OF %d" % [race_no, c.races.size()]}
 	if outcome.done:
 		if run.you_out:
@@ -1160,6 +1201,8 @@ func _end_circuit_race(title: String, rows: Array) -> void:
 		else:
 			title = "%s OVERALL" % Hud.ordinal(outcome.place).to_upper()
 		var lines := []
+		if outcome.race_prize > 0:
+			lines.append("$%s for the race" % TournamentPanel.money(outcome.race_prize))
 		if outcome.award >= 0:
 			lines.append("%s is yours" % Game.cars[outcome.award].name)
 		if outcome.prize > 0:
@@ -1170,7 +1213,7 @@ func _end_circuit_race(title: String, rows: Array) -> void:
 			lines.append("Opens " + " & ".join(outcome.opened))
 		lines.append("Money $%s" % TournamentPanel.money(Game.career_money))
 		circuit.trophy = outcome.trophy
-		circuit.tour = run.tournament
+		circuit.tour = Game.trophy_design(run.tournament)
 		circuit.lines = lines
 		var extra: String = outcome.message if outcome.award < 0 else ""
 		hud.show_results(title, rows, extra, [
@@ -1182,7 +1225,23 @@ func _end_circuit_race(title: String, rows: Array) -> void:
 				Game.circuit_run = {}
 				hud.quit()]], circuit)
 		return
-	hud.show_results(title, rows, _circuit_extra(outcome.message), _circuit_actions(c), circuit)
+	var msg: String = outcome.message
+	if outcome.race_prize > 0:
+		msg = ("%s   ·   " % msg if msg != "" else "") + "$%s won" % TournamentPanel.money(outcome.race_prize)
+	hud.show_results(title, rows, _circuit_extra(msg), _circuit_actions(c), circuit)
+
+
+## A racer's time for the race: its own if it's finished, else what it would take at the
+## pace it's gone so far (a rally adds the times up).
+func _finish_time(r: Dictionary) -> float:
+	if r.finished:
+		return r.time
+	var covered: float = r.total
+	var whole: float = path.length * Game.race_laps()
+	if not path.closed:
+		covered -= path.cumulative[path.start_node]
+		whole = path.cumulative[path.finish_node] - path.cumulative[path.start_node]
+	return race_time * whole / maxf(covered, whole * 0.05)
 
 
 ## Between a circuit's races: what's happened, the car's damage and what mending it costs.
@@ -1221,7 +1280,7 @@ func _circuit_actions(c: Dictionary) -> Array:
 func _result_rows() -> Array:
 	var rows := []
 	for r in racers:
-		rows.append({"name": r.name, "you": r.car == player and not spectating(),
+		rows.append({"name": r.name, "you": r.car == player and not spectating(), "color": r.get("color", UiKit.ACCENT),
 			"time": Hud.fmt_time(r.time) if r.finished else "--:--.--",
 			"best": Hud.fmt_time(r.best) if r.best < INF else "--",
 			"t": r.time if r.finished else INF})
@@ -1789,15 +1848,18 @@ func _check_resets(dt: float) -> void:
 		var hint: int = player_racer().node if c == player else (ai.node if ai else -1)
 		var n: int = path.closest(c.global_position, hint)
 		var off: float = absf(path.lateral(c.global_position, n))
-		var fell: bool = c.global_position.y < path.points[n].y - 25.0
+		# (A side road can run in a valley well below the lap: not while on or near one.)
+		var fell: bool = c.global_position.y < path.points[n].y - 25.0 \
+			and not path.on_side_road(c.global_position, path.lost_margin, 25.0)
 		# Beyond the invisible wall (knocked over or through it): nothing to drive on out there.
 		# A shortcut can run further out than the virtual road's walls, so only off the
 		# drivable surface. In free roam the player may wander off: the reset key brings them back.
 		# Heading down a bank to the water isn't lost: the water deals with it.
-		# Nor is a car on a side road the walls leave open (a shortcut).
+		# Nor is a car on a side road the walls leave open (a shortcut), or off one by no more
+		# than it may stray off the lap.
 		var lost: bool = off > maxf(path.wall_width(n, -1.0), path.wall_width(n, 1.0)) + path.lost_margin and not _on_road(c) \
 			and not (c == player and Game.mode == Game.Mode.FREE_ROAM) and not _near_water(c) \
-			and not path.on_side_road(c.global_position)
+			and not path.on_side_road(c.global_position, path.lost_margin, 25.0)
 		# In a stream or a lake: it wades (Car.water_depth), then gets fished out.
 		c.water_depth = _water_depth(c)
 		var drowned := false
@@ -1853,6 +1915,13 @@ func _respawn(c: Car, past_blockage := false) -> void:
 		if r.car == c:
 			hint = r.node
 	var n := path.closest(c.global_position, hint)
+	# Off the lap on a side road (a shortcut): back on that road, not the lap's nearest stretch.
+	if ai == null and not path.side_roads.is_empty() \
+			and absf(path.lateral(c.global_position, n)) > maxf(path.wall_width(n, -1.0), path.wall_width(n, 1.0)):
+		var side := path.side_road_spot(c.global_position, c.forward_dir())
+		if side.basis != Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO) and not _car_near(c, side.origin, 5.0) and not _blocked(c, side):
+			c.reset_to(side, 0.3)
+			return
 	var dir := -1 if ai and ai.reverse_dir else 1
 	# Wedged against something: put it down beyond it, or it drives straight back into it.
 	if past_blockage:

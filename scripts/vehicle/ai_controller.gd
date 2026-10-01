@@ -14,6 +14,18 @@ var path: TrackPath
 var car: Car
 var enabled := false
 var skill := 1.0             # 0.8 .. 1.1, scales cornering speed
+## RACER: its driver's ways (Rivals, set_driver): the share of its braking it counts on into a
+## bend, the room it leaves passing (x), how far it moves over to cover a car behind (0..1),
+## s slow away off the line, slips a minute, m off the racing line, and the pace gained by the
+## end of the race (lost, under 0), the race's share run so far (`race_frac`) set by the race.
+var brake_share := 0.6
+var room := 1.0
+var defend := 0.0
+var launch_delay := 0.0
+var errors := 0.0
+var line_bias := 0.0
+var form := 0.0
+var race_frac := 0.0
 ## Desired lateral offset (m, + right). A RACER on a track with High Stakes' racing line
 ## drives the line instead a few seconds after its lane was last set (the grid, a
 ## roadblock's gap, pulling out to pass, round an obstacle).
@@ -49,6 +61,13 @@ var _pass_urgent := false    # RACER: the line round a car ahead is well off whe
 var _traffic_cap := INF      # RACER: the speed that keeps it off the car it can't get round
 var _node_of := {}           # RACER: Car -> its node last time (a hint for TrackPath.closest)
 var _lane_hold := 0.0        # s the set lane still overrides the racing line
+var _launched := false       # RACER: has had its launch delay since it was first let go
+var _slip_t := 0.0           # RACER: s left of the slip it's making (errors)
+var _slip_kind := 0          # 0 overcooks the bends, 1 lifts, 2 wanders across the road
+var _slip_side := 1.0
+var _defend_off := 0.0       # RACER: m it's moved over covering a car behind
+var _defend_ticks := 0
+var _defend_want := 0.0
 const LANE_HOLD := 5.0
 const TABLE_SHARE := 0.8    # of the original AI's target speeds that traffic and patrols keep to
 var _progress_node := -1
@@ -127,6 +146,16 @@ func _physics_process(dt: float) -> void:
 		return
 	if role == Role.TRAFFIC and _ghost_step(dt):
 		return
+	if role == Role.RACER and not _launched:
+		launch_delay -= dt
+		if launch_delay > 0.0:
+			car.throttle = 0.0
+			car.steer = 0.0
+			car.hold = true
+			return
+		_launched = true
+	if role == Role.RACER:
+		_update_slip(dt)
 	node = path.closest(car.global_position, node)
 	var chase := role == Role.COP and chasing and is_instance_valid(target)
 	var home_d := 0.0
@@ -150,6 +179,7 @@ func _physics_process(dt: float) -> void:
 	_lane_hold -= dt
 	var off := clampf(_lane_at(aim_node, dir) + _dodge, lo, hi)
 	if role == Role.RACER:
+		off = clampf(off + _cover(off, dir) + _wander(), lo, hi)
 		off = _plan_pass(off, lo, hi, dir)
 		if _pass_urgent:
 			# Getting round a car: aim nearer, where the straight line there doesn't cut
@@ -536,7 +566,7 @@ func _lane_at(n: int, dir: int) -> float:
 	var line: PackedFloat32Array = path.racing_line[0 if dir > 0 else 1]
 	if role != Role.RACER or _lane_hold > 0.0 or line.size() != path.size():
 		return lane
-	return line[n]
+	return line[n] + line_bias * dir
 
 
 ## Max speed now: every bend in the next few hundred metres must still be reachable at
@@ -546,9 +576,9 @@ func _lane_at(n: int, dir: int) -> float:
 func _speed_limit(dir: int) -> float:
 	var worst := car.top_speed
 	var ground := _ground_grip()
-	var a2 := 2.0 * car.brake_decel * 0.6 * ground
+	var a2 := 2.0 * car.brake_decel * (brake_share if role == Role.RACER else 0.6) * ground
 	# _corner_speed's per-car factors, hoisted out of the loop: it runs over 32 nodes.
-	var k0 := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * ground
+	var k0 := 1.25 * 9.81 * 0.95 * pace() * car.corner_grip() * ground
 	var c := car.downforce_k * 0.5
 	var pts := path.points
 	var radii := path.radius
@@ -585,7 +615,7 @@ func _speed_limit(dir: int) -> float:
 ## surface_grip on the weaker axle, see Car), with the extra grip that downforce gives at speed, plus a little for the line
 ## cutting across the inside of the bend. (_speed_limit inlines this.)
 func _corner_speed(r: float) -> float:
-	var k := 1.25 * 9.81 * 0.95 * skill * car.corner_grip() * _ground_grip() * r
+	var k := 1.25 * 9.81 * 0.95 * pace() * car.corner_grip() * _ground_grip() * r
 	# Car's downforce adds 0.5 * min(downforce_k v^2, 0.9) g-units of load: v^2 = k (1 + c v^2).
 	var c := car.downforce_k * 0.5
 	var v2 := k * 1.45
@@ -914,7 +944,7 @@ func _plan_pass(want: float, lo: float, hi: float, dir: int) -> float:
 					break
 		var closing := v - ov
 		# Some room between them, more the faster they close.
-		var margin := my_ext.x + ext.x + 0.5
+		var margin := my_ext.x + ext.x + 0.5 * room
 		var t0 := 0.0
 		var t1 := horizon
 		if gap > 0.0:
@@ -923,7 +953,7 @@ func _plan_pass(want: float, lo: float, hi: float, dir: int) -> float:
 			t0 = gap / closing
 			if t0 > horizon:
 				continue
-			margin += clampf(closing * 0.02, 0.0, 0.8)
+			margin += clampf(closing * 0.02, 0.0, 0.8) * room
 			if ov < -2.0:
 				margin += 0.8   # coming the other way: no second chances
 		if closing > 0.5:
@@ -974,7 +1004,7 @@ func _plan_pass(want: float, lo: float, hi: float, dir: int) -> float:
 				block_t = t0
 				block = k
 			# A little more room than the least is worth a little.
-			cost += maxf(m + 0.8 - absf(c - l), 0.0) * 1.5 * (1.0 - t0 / horizon)
+			cost += maxf(m + 0.8 * room - absf(c - l), 0.0) * 1.5 * (1.0 - t0 / horizon)
 		if block >= 0:
 			cost += 60.0 / (0.3 + block_t)
 		if cost < best_cost:
@@ -1005,6 +1035,78 @@ func _plan_pass(want: float, lo: float, hi: float, dir: int) -> float:
 		var a := car.brake_decel * 0.6 * _ground_grip()
 		_traffic_cap = maxf(ov, 0.0) + sqrt(2.0 * a * room) if ov > -2.0 else sqrt(2.0 * a * room) * 0.5
 	return best if not is_nan(_pass_off) else want
+
+
+## Takes on a driver's ways (a Rivals.ROSTER entry), its pace on top of `skill`.
+func set_driver(d: Dictionary) -> void:
+	skill *= float(d.get("pace", 1.0))
+	brake_share = float(d.get("brakes", 0.6))
+	room = float(d.get("room", 1.0))
+	defend = float(d.get("defend", 0.0))
+	launch_delay = maxf(float(d.get("launch", 0.0)) + randf_range(-0.08, 0.12), 0.0)
+	errors = float(d.get("errors", 0.0))
+	line_bias = float(d.get("line", 0.0))
+	form = float(d.get("form", 0.0))
+
+
+## The share of the tyres' grip it corners on now: its skill, its form over the race so far
+## (half of `form` under at the start, half over at the end), and a slip it's making.
+func pace() -> float:
+	var p := skill
+	if role == Role.RACER:
+		p *= 1.0 + form * (clampf(race_frac, 0.0, 1.0) - 0.5)
+		if _slip_t > 0.0:
+			p *= [1.1, 0.88, 1.0][_slip_kind]
+	return p
+
+
+## RACER: now and then (`errors` a minute) a slip of a few seconds: into the bends too hot
+## (it runs wide or spins), a lift, or wandering off its line.
+func _update_slip(dt: float) -> void:
+	if _slip_t > 0.0:
+		_slip_t -= dt
+		return
+	if errors > 0.0 and car.speed > 15.0 and randf() < errors * dt / 60.0:
+		_slip_kind = randi() % 3
+		_slip_t = randf_range(1.5, 3.5)
+		_slip_side = 1.0 if randf() < 0.5 else -1.0
+		_limit_ticks = 0
+
+
+## RACER: m to drift off the line while wandering (a slip).
+func _wander() -> float:
+	if _slip_t <= 0.0 or _slip_kind != 2:
+		return 0.0
+	return _slip_side * sin(_slip_t * 2.2) * 2.0
+
+
+## RACER: m to move over (from `off`) covering a racer close behind on a straight, towards
+## the side it's lining up on: `defend` of the way, eased across rather than jinked.
+func _cover(off: float, dir: int) -> float:
+	_defend_ticks -= 1
+	if _defend_ticks <= 0:
+		_defend_ticks = 6
+		_defend_want = 0.0
+		if defend > 0.0 and _slip_t <= 0.0 and path.radius[node] > 120.0:
+			var fwd := path.forward(node) * dir
+			var best := 22.0
+			for o in others:
+				var oc := o as Car
+				if oc == car or not is_instance_valid(oc) or not oc.has_meta("racer"):
+					continue
+				var rel: Vector3 = oc.global_position - car.global_position
+				var behind := -rel.dot(fwd)
+				if behind < 4.0 or behind > best or absf(rel.y) > 4.0:
+					continue
+				# Only one coming at it: one dropping back is no threat.
+				if (oc.linear_velocity - car.linear_velocity).dot(fwd) < -0.5:
+					continue
+				best = behind
+				var their := path.lateral(oc.global_position, node)
+				_defend_want = clampf((their - off) * defend * 0.7, -2.5, 2.5)
+	var step := 1.2 * get_physics_process_delta_time()
+	_defend_off = move_toward(_defend_off, _defend_want, step)
+	return _defend_off
 
 
 ## RACER: running wide at the limit towards a wall, lift and brake a little: it tightens the

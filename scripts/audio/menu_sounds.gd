@@ -1,7 +1,8 @@
 class_name MenuSounds
 extends Node
-## NFS3's front-end clicks (gamedata/audio/sfx/fesfx.bnk, or High Stakes' Audio/Sfx), put on
-## the menu widgets as they enter the tree, so no menu has to know about them:
+## NFS3's front-end clicks (gamedata/audio/sfx/fesfx.bnk, or High Stakes' Audio/Sfx, or
+## Porsche Unleashed's Sounds/fesfx.bnk), put on the menu widgets as they enter the tree, so
+## no menu has to know about them:
 ##   0 a click: an option, tab or picker stepped
 ##   1 a select: a list entry or browser item picked
 ##   2 a tick: the highlight moving through a browser
@@ -12,6 +13,7 @@ const SELECT := 1
 const TICK := 2
 
 var _bank: EaBnk
+var _pu := false     # _bank is Porsche Unleashed's (GameSounds.PU_MENU)
 var _player: AudioStreamPlayer
 var _last_ms := 0
 
@@ -58,9 +60,13 @@ func play(patch: int) -> void:
 	if _bank == null:
 		var s := GameSounds.shared()
 		_bank = s.fe if s else null
+		if _bank == null and s and s.pu_fe:
+			# Only Porsche Unleashed's: its own numbers.
+			_bank = s.pu_fe
+			_pu = true
 		if _bank == null:
 			return
-	var st := _bank.stream(patch)
+	var st := _bank.stream(GameSounds.PU_MENU[patch] if _pu else patch)
 	if st:
 		_player.stream = st
 		_player.play()

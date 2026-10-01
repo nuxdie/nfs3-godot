@@ -149,6 +149,29 @@ until repaired (15% of its price for a wreck); a car sells for 60% of what went 
 The circuits' race flags are read as reverse, mirror, night, weather, which order isn't
 certain.
 
+**Tournaments of the other games.** The tournaments screen switches (Tab, or the tabs over
+the list) between each installed game's tournaments, a career each, with its own money,
+garage and trophies (`user://career.cfg`: `[career]` High Stakes', `[career_nfs3]`,
+`[career_pu]`):
+
+- *NFS III*: its Tournament (points over eight races) and Knockout (eight cars, seven races,
+  the last one out each race), Beginner and Expert. NFS3 keeps them in its program, so
+  they're built from what its menus say: Beginner Tournament wins the XJR-15, Expert the
+  CLK-GTR and the XJR-15, Expert Knockout El Niño. The races go round Hometown to The
+  Summit in order, 2 laps at Beginner and 3 at Expert (a guess), rivals of your car's class.
+  No money: all of NFS3's cars are yours, the bonus ones once won; damage isn't kept.
+- *Porsche Unleashed*: Evolution's three eras (Classic, Golden, Modern), each its
+  tournaments and events from `nfs5.trn` (35 records of 3392 bytes: `PuCareer`): the cars
+  each takes (by `nfs5.car` serial), entry fee, the prize for each final place and for each
+  place in each race (paid after it), the tracks (`nfs5.trk`'s numbers), laps, reversed,
+  the rivals' pace and the car each rival drives. Rallies go by the lowest total time (a
+  car still on the road when you finish is timed at its pace so far) and pay at the end;
+  the open-road events have traffic (no police yet). The era's bonus race (550 A Spyder,
+  935, GT1: win it, keep it) opens when the rest of the era is won; winning the era opens
+  the next. The dealer sells the cars the events race at `nfs5.car`'s prices; you start
+  with $12,000 (a guess). Not followed up: each race's ninth prize figure, the rivals'
+  parts and paints, and a few header fields.
+
 Not used: the pursuit cars' alternative interiors (`:OND`, `:OLD`); `dash.fsh` (the dash skin
 again, 8-bit); `GameArt/cop1-4` (skins without a mesh); `heights.sim` (one constant per track);
 the second paint and driver hair colour tables (the skins carry no mask for them); the other
@@ -181,7 +204,12 @@ The first `GameData` folder that contains `Track` and `Carmodel` wins:
 | `FeData/Data/nfs5.car` | The car list: each car's name, model, style, driving model, showroom text and price |
 | `FeData/Locale/<car>.loc` | The showroom's figures (engine, power, 0-60, weight, layout, tyres...): the weight split from where the engine sits, each axle's tyres |
 | `FeData/Trackart/<name>sp.fsh` | The track's photo in the menus |
+| `FeData/Data/nfs5.trn`, `FeData/Locale/festrings.loc` | Evolution's events, as tournaments (see below): their names, descriptions, cars, fees, prizes, races, opponents |
 | `Sounds/<set>.viv` → `<set>.bnk`, `.ect`, `.elt` | Engine sound: the car table names each car's set; its tables are High Stakes' (AudioEng, "CRDl"), off and on the throttle, so they play as its `careng.ctb`/`.ltb` |
+| `Sounds/zzzwzzz.viv` → `<set>lden.bnk`, `<set>ldex.bnk` | The cars you aren't driving, traffic included: one engine and one exhaust loop per set (`sd6b`'s for sets without) |
+| `Sounds/snd_coll.bnk` | Its cars' tyres (by surface), knocks (layered by how hard), scraping, road noise and horns; the siren, and all of these when neither NFS3 nor High Stakes is installed. Its banks are EA-XA with no codec tag (tag 0x80 marks them), stereo ones with each channel apart (0x88, 0x89) |
+| `Sounds/fesfx.bnk` | The menus' clicks, when neither NFS3 nor High Stakes is installed |
+| `Music/zzzymus.viv` → `game01..14-*`, `menu01..05-*` | Music: its race songs join the races' shuffle, its menu songs the menus'. `.asf` streams in EA ADPCM with each channel's data apart (a version 1 header with no codec tag); the entry names give title and artist. The results-screen stings (`win`, `lose`, `vic`) aren't played |
 | `Track/Sky/<name>.fsh` | The horizon panorama (`horz`: two halves one above the other) and the sky's colours from its tiles (`st1a`, `sc1a`): sunset over Côte d'Azur and Auvergne, haze over Zone Industrielle, dusk in Monte Carlo |
 | `Track/<name>_cameras.scn` | Trackside cameras for the TV view (C) |
 | `Track/<name>.crp` → `CmAn` | Its camera animations (`camera00`..`04`: 52-byte keys, the camera's position about the car), the fly-by round the grid before the countdown |
@@ -259,6 +287,100 @@ Factory Driver's missions, `_st*.scn`), the second and third paint colours (stri
 `stripepackage`, `packages.ini`'s bands), the `[colorsN]` sections of some `.tpg`s, and the
 928, which has no `.clr` (stock paints).
 
+### Need for Speed: Hot Pursuit 2 tracks
+
+With a Hot Pursuit 2 install present (found as below, for its music) its twelve courses join
+the track list, in `Tracks/tracks.ini`'s order: Coastal Parklands, National Forest, Scenic
+Drive; Island Outskirts, Palm City Island, Tropical Sunset; Fall Winds, Alpine Trail,
+Autumn Crossing; Wine Country, Calypso Coast, Mediterranean Paradise. The third of each area
+is a point-to-point run (`loop=0`). Each area (`Tracks/Parkland`, `Tropics`, `Alpine`,
+`Medit`) holds three courses, `Level00`-`02` (`Level03`-`05` are the same run backwards,
+which the reverse layout covers).
+
+| File | Used for |
+|---|---|
+| `Tracks/<area>/compNN.o` | The area's compartments, the ones the course goes through (`Level0N/drvpath.ini`'s `compartmentId`s; some are variants of one place, the roads open another way). EAGL geometry: 32-bit MIPS ELF relocatable objects (`Eagl`), render methods of a vertex buffer and a triangle strip each under an EAGL "microcode" that names the layout: a texture (24-byte vertices), colour only (16), a texture with a shadow layer (32: the trees' shadows on the road, multiplied in), two tiling textures blended by a mask's alpha (40: the road's edge into the verge, rock into grass), the same with a shadow layer (48). Colours BGRA, the lighting baked in; past them the uv sets, in the reverse order of the method's textures |
+| `Tracks/<area>/compNN.viv` → `mesh.sim` | The compartment's collision surface (64 bytes a face: four corners, a packed normal, a surface code): which of the drawn triangles are the road |
+| `Tracks/<area>/persist.viv` → `track.fsh`, `trackg.o` | The area's textures (DXT1/DXT3, named `0000`...) and scenery common to its courses |
+| `Tracks/<area>/persist.viv` → `skyg.o`, `sky.fsh` | The sky: a dome kilometres across (clouds, the sun's glow, the far mountains or the sea), drawn round the camera behind everything |
+| `Tracks/<area>/tr.ini` | Fog, ambient light and the sun's angle, in High Stakes' keys |
+| `Tracks/<area>/Level0N/aipaths.dat` | The virtual road: the AI's paths (named `AI_centerNN`; type 1 the course, the others shortcuts and alternatives) of points every ~16 m: position, the road's extent left and right, the racing line, a target speed. Resampled every 5 m; the speeds and the racing line go to the AI |
+| `Tracks/<area>/Level0N/levelg.o`, `level.fsh`, `level.dat` | The course's own scenery, and its props: road signs, barrels, placed by `level.dat` (a rotation, a position and a prop model each), knocked over as NFS3's signs are |
+| `Frontend/Gui/guiart.viv` → `a_tracks_02.lyr.pcd.fsh` | Its pictures of the courses, in the menus |
+
+The render meshes are in Godot's space as they are (Y up, the signs read the right way
+round); the physics' data (`mesh.sim`, `level.dat`'s rotations) has Z the other way round.
+As on Porsche Unleashed's tracks the player has no walls (the AI keeps between its own),
+the ground off the road is terrain and the solid scenery stops the car.
+
+The game streams compartments as the car goes, which a track loaded whole has to make up for:
+- Some compartments are variants of one place (another barricade, the road open the other
+  way), and a course that passes a place twice lists both. One is kept (the one under more of
+  the course), both where each carries a stretch of it the other doesn't; scenery hanging
+  over the course's road within its lanes (a variant's barricade across it) is left out.
+- A compartment carries its view of the land round it (a kilometre-wide sheet of rough
+  terrain), drawn while its neighbours aren't: what of it lies within 80 m of another loaded
+  compartment's road, and not of its own, is left out.
+- A point-to-point course's AI paths run on past its barricades into the other way's run-off,
+  where there's no collision surface: the grid lines up past the longest such gap near the
+  start, the finish line short of the longest near the end.
+
+The road is whatever drawn triangle lies flat on the collision surface, see-through ones too
+(the steel grating bridges of the Tropics). Gaps left in the course are Palm City Island's
+and Tropical Sunset's jumps.
+
+Not done: the tunnel lights of `lightglow.dat` (six compartments have any), the particle
+emitters, `Mirror` surfaces (drawn as plain textures), where a lap's start line really is (it
+starts at its first AI path), the speed traps of `info.ini`.
+
+### Need for Speed: Hot Pursuit 2 music
+
+With an install present its 23 songs join the jukebox.
+The first folder that has `Audio/Music/music.ini` wins:
+
+1. `NFS6_DATA` environment variable
+2. `../OpenNFS/resources/NFS_6`
+3. `../need-for-speed-hot-pursuit-2/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Hot Pursuit 2`
+4. The same under `~/Games`
+
+| File | Used for |
+|---|---|
+| `Audio/Music/track0..14.asf` | Race music, in the races' shuffle: the licensed songs (Bush, Rush, Uncle Kracker...) and the game's own (Matt Ragan, Humble Brothers, ROM). The same `.asf` as Porsche Unleashed's (EA ADPCM, channels apart), at 32 kHz |
+| `Audio/Music/track15..22.asf` | The first eight's instrumental versions, in the menus' shuffle |
+| `Audio/Music/music.ini` | Each song's title and artist (copied into `music_player.gd`) |
+
+### Need for Speed: Hot Pursuit 2 sounds
+
+Its cars drive with their own engines and horns and slide, crash and wail with its own banks.
+Its banks are EA's as before, with a second codec tag (`0xA0`): most of its sounds are
+plain 16-bit PCM.
+
+| File | Used for |
+|---|---|
+| `Cars/<car>/car.ini` `[audio]` | `enginetype` (a `[carN]` of `Audio/Sfx/car.ini`, which names the engine's and the exhaust's recordings) and `horntype` (a `[hornN]` of `hornz.ini`) |
+| `Audio/Sfx/careng.viv` | The engine of the car you drive: twelve loops, on and off the throttle, engine and exhaust, at low, middle and high rpm (`<code><c\|l><e\|x><lo\|id\|md\|hi>.bnk`), faded into one another with the revs as High Stakes' are |
+| `Audio/Sfx/cartable.viv` → `engine.ltb`, `engine.ctb` | Those loops' volumes over engine speed, in High Stakes' `.ltb`/`.ctb` format |
+| `Audio/Sfx/oppbnk.viv` | The other cars' engines, two loops each (on and off the throttle) |
+| `Audio/Sfx/genopp.bnk` | Traffic's engine |
+| `Audio/Sfx/hornz.viv` | Horns |
+| `Audio/Sfx/gen.bnk` | Road noise, tyres (tarmac, wet, gravel), scraping: High Stakes' numbers; crashes, its own (32-36, two layers each) |
+| `Audio/Sfx/siren.bnk` | Its police siren |
+| `Tracks/<area>/track.bnk`, `audiopts.ini`, `audio.ini` | On its tracks, the sounds by the road: wind in the trees, waves, rivers and waterfalls, birds, frogs and crickets, the town, a sawmill, church bells, each at its place and heard within its distance; looping, or now and then |
+| `Tracks/<area>/Level0N/level.dat` (past the props), `Audio/Sfx/boomobj.ini` | A prop knocked over crashes as what it is: each prop type's physics record names it ("gaspump", "table", "chair", "tbarrel", "meter") and gives its material; `boomobj.ini` gives the named ones their `gen.bnk` crash (80-117), the rest sound by material (metal, plastic, wood) |
+| `Audio/Speech/English/radio.viv` | On its tracks, the police radio in its own voices: officers 19, 27 and 31 calling in ("27 County"), the dispatcher answering ("copy 27"), speed reports ("he's going 140 plus"), losing him, backup, roadblocks and spike strips asked for and set, arrests; the helicopter ("Rotor One County"); the loudhailer |
+| `Audio/Speech/English/frontend.viv` | On its tracks, the announcer: best and final lap, the place you finished |
+| `Audio/Speech/English/speechdr.viv` | Each speech file's index (`.hdr`): its lines' offsets and what tells them apart (who's speaking, the unit, the speed) |
+
+Its speech files (`.dat`) are runs of short EA streams, one line each, MicroTalk-coded (as
+NFS3's speech banks, but streamed: the coder carries on from block to block, each block
+starting its bits afresh). What each says was found by transcribing them. Lines it hasn't
+(the lap number, your place during the race) are NFS3's or High Stakes' voices; police radio
+it hasn't goes unsaid.
+
+Not done yet: the places along its tracks the radio names (`19loc.viv`..., "by the
+lighthouse": where each place is isn't in its track files' text), its countdown ("3, 2, 1,
+go!" in one line). Loose props bumping into things afterwards are silent.
+
 ## Modes
 
 - **Single Race** – up to 7 AI opponents, 1–8 laps.
@@ -311,7 +433,7 @@ Factory Driver's missions, `_st*.scn`), the second and third paint colours (stri
 
 ### Menu
 
-A bar along the top holds the menu's three places, each a click (or Q / E, LB / RB) away:
+A bar along the top holds the menu's places, each a click (or Q / E, LB / RB) away:
 
 - **Race**: the race as it's set up, ready to go with Enter. The mode at the top; the
   **track** with its layout, time and weather; the **race** rules (laps, rivals, how the
@@ -342,6 +464,13 @@ A bar along the top holds the menu's three places, each a click (or Q / E, LB / 
   each circuit's laps, rivals, entry fee, prize and your best, and its races as postcards)
   and the **garage**. Choosing a circuit goes on to the car for it: yours that it takes, or
   the dealer's to buy.
+- **Music**: every song of the games found (NFS3's, High Stakes', Porsche Unleashed's and
+  Hot Pursuit 2's),
+  grouped by game and whether it plays in races or the menus, searchable and filtered by
+  game. Enter or a click plays one, and the list (as filtered) carries on from it in order;
+  Shuffle plays it at random instead. ←→ (or the media keys) skip back and on, Space (pad X)
+  pauses. Beside the list: the song, its artist and game, how far in it is, and the music's
+  spectrum. A race plays its own music as ever, and back in the menus theirs shuffles again.
 - **Settings**: Gameplay, Graphics, Audio, HUD, Controls (every key) and Game data, as
   pages (Tab / Shift+Tab).
 
@@ -432,7 +561,7 @@ scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_str
                    reflection probe on the player's car on High)
 scripts/ui/        main_menu.gd (the front end: top bar, race setup, pickers, career, showroom),
                    pick_card.gd, car_sheet.gd, showroom.gd (the car's stage and camera), option_row.gd, tab_strip.gd, hint_bar.gd, big_button.gd, tournament_panel.gd, garage_panel.gd, loading_screen.gd,
-                   track_browser.gd / car_browser.gd (on browser_base.gd:
+                   track_browser.gd / car_browser.gd / music_browser.gd (on browser_base.gd:
                    search, filters, scrolling grid or list), settings_panel.gd, track_postcards.gd (renders each track by day and
                    night in the background for the menu backdrop, cached in user://postcards), hud.gd (tach, map, mirror, pause, results),
                    ui_kit.gd (palette, fonts, slanted shapes, key hints), tab_strip.gd, option_row.gd,
@@ -488,12 +617,6 @@ tools/car_shots.gd contact sheet of every traffic car, cruiser or player car, fr
                    (pu: Porsche Unleashed's cars, by car id: pu_993coupe36)
                    (--big / --low / --yaw=DEG / --wire for close inspection; --dent crashes each car
                    first, --officer stands a High Stakes cruiser's officer beside it)
-tools/enhance_skins.gd sharper car skins (SkinHD): each skin upscaled by Real-ESRGAN's anime model
-                   (Porsche Unleashed 2x, the others 4x), cached in user://skins_hd/ and swapped in
-                   when the car loads (not on Low quality):
-                   godot --path . -- --enhanceskins [cars|pu|hs|traffic|all] [id ...] [--esrgan=DIR] [--force]
-                   (DIR: realesrgan-ncnn-vulkan and its models/, default tools/realesrgan/, from
-                   github.com/xinntao/Real-ESRGAN/releases; car_shots --nohd compares without)
 tools/car_calib.gd flat-out drag test of every car against the original game's acceleration table:
                    godot --headless --path . -s tools/car_calib.gd [-- name-filter]
 tools/car_handling.gd  skidpad (lateral g, and against what the AI expects), lane change, trail

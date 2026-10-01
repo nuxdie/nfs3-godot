@@ -64,6 +64,8 @@ var sun: Image                   # the sun by day, the moon (or an aurora) at ni
 ## it's missing or too short to be a horizon file. `track_images` are the track's decoded
 ## texture archive.
 static func load_dir(dir: String, night: bool, weather := false, track_images: Array[Image] = []) -> Nfs3Horizon:
+	if Nfs6Track.is_track_dir(dir):
+		return _load_hp2(dir)
 	if Nfs5Track.is_track_file(dir):
 		return _load_pu(dir, night)
 	if Nfs4Track.is_track_dir(dir):
@@ -155,6 +157,16 @@ static func from_text(text: String) -> Nfs3Horizon:
 	p += 8
 	if v.size() >= p + 3:
 		h.ambient = Color(v[p] / 100.0, v[p + 1] / 100.0, v[p + 2] / 100.0)
+	return h
+
+
+## A Hot Pursuit 2 level's horizon: its area's tr.ini, in High Stakes' keys. Its sky is a
+## dome (Nfs6Track.sky, drawn by Nfs6TrackBuilder), so there's no panorama.
+static func _load_hp2(level_dir: String) -> Nfs3Horizon:
+	var path := DataPath.find_ci(level_dir.get_base_dir(), "tr.ini")
+	var h := from_ini(FileAccess.get_file_as_string(path)) if path != "" else null
+	if h:
+		h.has_pixmap = false
 	return h
 
 

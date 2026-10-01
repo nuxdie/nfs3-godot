@@ -5,7 +5,7 @@ class_name EaMicroTalk
 ## itself from Andrew D'Addesio's public-domain utkencode (github.com/daddesio/utkencode;
 ## wiki.niotso.org/UTK).
 ##
-## The stream opens with a header (1 bit reduced bandwidth, 4 bits multipulse threshold, 4 bits
+## (Hot Pursuit 2's streams: decode_blocks.) The stream opens with a header (1 bit reduced bandwidth, 4 bits multipulse threshold, 4 bits
 ## base gain, 6 bits gain step). Each frame: 12 reflection coefficients (6 bits for the first
 ## four, 5 for the rest, indices into RC), eased in over its four subframes; per subframe of
 ## 108 samples a pitch lag (8 bits) and gain (4), a fixed gain index (6) and the excitation,
@@ -84,6 +84,39 @@ static func decode(d: PackedByteArray, off: int, n: int) -> PackedByteArray:
 		for i in mini(FRAME, n - o):
 			out.encode_s16((o + i) * 2, clampi(roundi(m._buf[324 + i]), -32768, 32767))
 		o += FRAME
+	return out
+
+
+## Hot Pursuit 2's streamed speech (Hp2Speech): `blocks` of [offset, samples], one stream that
+## carries on from block to block (the filter, the pitch history), each block opening with a
+## byte, 1 when the stream header follows it, and its bits starting afresh after that.
+static func decode_blocks(d: PackedByteArray, blocks: Array) -> PackedByteArray:
+	var m := EaMicroTalk.new()
+	m._d = d
+	m._rc.resize(12)
+	m._history.resize(12)
+	m._buf.resize(324 + FRAME)
+	m._gains.resize(64)
+	var total := 0
+	for b: Array in blocks:
+		total += b[1]
+	var out := PackedByteArray()
+	out.resize(total * 2)
+	var o := 0
+	for b: Array in blocks:
+		m._p = b[0]
+		if m._byte() == 1:
+			m._header()
+		else:
+			m._bits = m._byte()
+			m._count = 8
+		var left: int = b[1]
+		while left > 0:
+			m._frame()
+			for i in mini(FRAME, left):
+				out.encode_s16(o * 2, clampi(roundi(m._buf[324 + i]), -32768, 32767))
+				o += 1
+			left -= FRAME
 	return out
 
 

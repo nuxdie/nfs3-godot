@@ -132,7 +132,7 @@ func _short(k: String) -> String:
 
 
 func _read(spec: Object) -> void:
-	var game: String = ["Need for Speed III", "High Stakes", "Porsche Unleashed"][Game.car_game(car)]
+	var game: String = ["Need for Speed III", "High Stakes", "Porsche Unleashed", "Hot Pursuit 2"][Game.car_game(car)]
 	var make := _v("make")
 	var model := _v("model")
 	var name: String = Game.cars[car].name

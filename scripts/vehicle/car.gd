@@ -35,6 +35,34 @@ const SLIDE_DROP := 0.2
 const LOAD_SENS := 0.2
 # How far past the front tyres' peak slip angle full lock may go at speed.
 const STEER_MARGIN := 1.3
+# On a slippery surface (wet, snow, loose ground) a tyre's grip peaks at a wider slip angle
+# and falls away more gently past it: the car lets go sooner but progressively, rather than
+# snapping at the dry road's angle. At half the dry grip or less, the peak angle is this
+# much wider...
+const LOW_GRIP_PEAK := 0.5
+# ...and the grip a sliding tyre gives up this much less.
+const LOW_GRIP_DROP := 0.5
+# Driver aids (set_aids): ABS holds a wheel about to lock just short of it, cycling the
+# pressure this many times a second; it gets this share of the grip on the road (less on
+# loose ground, where a locked tyre would dig in) and lets the wheels lock below this
+# speed (m/s), as a real one switches off near a standstill.
+const ABS_HZ := 12.0
+const ABS_EFF := 0.97
+const ABS_RIPPLE := 0.03
+const ABS_EFF_LOOSE := 0.8
+const ABS_CUTOUT := 2.0
+# Traction control lets the driven tyres run just past their peak, then cuts the engine's
+# torque: fast (share of it a second), giving it back slower, a few ticks behind the wheels.
+const TC_SLIP := 1.05
+const TC_CUT_RATE := 10.0
+const TC_RESTORE_RATE := 2.5
+# Stability control: yaw past what the steering asks (and the grip allows), less this
+# dead band (rad/s, plus a share of the asked rate), it brakes one wheel to turn the car
+# back, over this time (s), and above this error (rad/s) also cuts the engine.
+const ESC_BAND := 0.06
+const ESC_BAND_SHARE := 0.12
+const ESC_TAU := 0.25
+const ESC_CUT_ERR := 0.25
 
 ## The GTA IV-style additions, for A/B testing against the plain NFS3 handling (F6 toggles).
 static var body_sway := true
@@ -73,12 +101,14 @@ const WINDOW_TIME := 2.0
 const LATCH_BREAK := 0.55
 const LATCH_REACH := 1.2
 const LATCH_AJAR := 0.12
-## What tears off (Porsche Unleashed's doors, lids, skirts, spoiler: _loose): a full hit square
-## on a part takes this much of the way to losing it (a door or lid only goes once its latch
-## has sprung), the sills less; and a sprung lid slamming against its stop faster than
-## TEAR_SLAM (rad/s) wrenches its hinges by TEAR_SLAM_HURT per rad/s over.
+## What tears off (Porsche Unleashed's doors, lids, skirts, spoiler, side mirrors: _loose): a
+## full hit square on a part takes this much of the way to losing it (a door or lid only goes
+## once its latch has sprung), the sills less, a mirror on its stalk more; and a sprung lid
+## slamming against its stop faster than TEAR_SLAM (rad/s) wrenches its hinges by
+## TEAR_SLAM_HURT per rad/s over.
 const TEAR_HIT := 0.7
 const TEAR_SILL := 0.45
+const TEAR_MIRROR := 1.6
 const TEAR_REACH := 0.3
 const TEAR_SLAM := 5.0
 const TEAR_SLAM_HURT := 0.04
@@ -118,6 +148,15 @@ var grounded_wheels := 0
 var steer_angle := 0.0
 var display_name := ""
 var is_player := false
+## Driver aids (set_aids): the player's from the settings; the AI drives on the car's own.
+enum Abs { CAR, ON, OFF }
+enum Stability { ARCADE, ESC, OFF }   # ARCADE: the original's slide assist [39]-[41]
+var abs_mode := Abs.CAR
+var traction_control := false
+var stability := Stability.ARCADE
+var abs_active := false   # this tick: a wheel held off locking (for a dash lamp)
+var tc_active := false    # the engine cut to stop wheelspin
+var esc_active := false   # a wheel braked to keep the car on line
 var is_cop := false
 var far := false          # out past DETAIL_RANGE from the camera (updated each frame)
 var resting := false      # held still and asleep in the physics engine (see REST_AFTER)
@@ -204,6 +243,8 @@ var _brake_ticks := 0.0     # ticks the brake has been going down, for its curve
 var _blip := 0.0            # rpm held over the new gear while a shift goes through [5], [6]
 var _wear := 0.0            # grip worn off the tyres [37]
 var _prev_vel := Vector3.ZERO
+var _tc_cut := 1.0          # share of the engine's torque traction / stability control leave
+var _abs_phase := 0.0       # the ABS's pressure cycle (rad)
 var _acc := Vector2.ZERO    # smoothed acceleration in the car's frame: x to the left, y forward
 var _heave_acc := 0.0       # ... and up it, smoothed (a sprung lid bounces with it)
 var _body_tilt: Node3D
@@ -397,7 +438,6 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		var sm := ShaderMaterial.new()
 		sm.shader = Game.shader("res://shaders/car.gdshader")
 		sm.set_shader_parameter("albedo_tex", data.texture)
-		sm.set_shader_parameter("skin_lod", data.texture.get_meta("skin_lod", 0))   # SkinHD's upscale
 		if data.damage_texture:
 			sm.set_shader_parameter("damage_tex", data.damage_texture)
 		var paint := tint
@@ -411,6 +451,9 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 		# The wheels share the skin but take a rubber finish on the tyres.
 		wheel_mat = sm.duplicate()
 		wheel_mat.set_shader_parameter("wheel", true)
+		# (Hot Pursuit 2's wheels have a texture of their own.)
+		if data.get("wheel_texture"):
+			wheel_mat.set_shader_parameter("albedo_tex", data.wheel_texture)
 	var glass_mat: Material = null
 	# The people inside: cloth and skin, not paint (car_driver.gdshader).
 	var driver_mat: ShaderMaterial = null
@@ -866,6 +909,19 @@ func _use_gearbox(i: int) -> void:
 
 ## A driver who shifts by hand (the player, with the manual gearbox chosen): the car then
 ## changes gear only on shift_request, on the file's manual gearing.
+## The driver aids. Stability control (ESC) works through the ABS and traction control,
+## as on a real car, so it brings both.
+func set_aids(abs_setting: Abs, tc: bool, stab: Stability) -> void:
+	abs_mode = abs_setting
+	traction_control = tc
+	stability = stab
+	_tc_cut = 1.0
+
+
+func _abs_on() -> bool:
+	return stability == Stability.ESC or abs_mode == Abs.ON or (abs_mode == Abs.CAR and has_abs)
+
+
 func set_manual(on: bool) -> void:
 	manual = on
 	shift_request = 0
@@ -926,6 +982,12 @@ func _calibrate_drag(aero: float) -> void:
 ## wheels' drag take the rest (measured with tools/car_handling.gd).
 func corner_grip() -> float:
 	return grip * minf(front_grip, 1.0) * 0.87
+
+
+## How slippery a surface of grip `mu` (1 the dry road) is for the tyre's shape: 0 dry - 1
+## at half the grip or less (see LOW_GRIP_PEAK).
+static func low_grip(mu: float) -> float:
+	return clampf((1.0 - mu) * 2.0, 0.0, 1.0)
 
 
 ## Traffic's files were never meant to climb: the original game's traffic hardly drove.
@@ -1186,7 +1248,7 @@ func _add_opening(p: Dictionary, mi: MeshInstance3D) -> void:
 				"centre": Vector3.ZERO, "broken": false, "angle": 0.0, "spin": 0.0, "n": 0}
 		if not p.has("window"):
 			_lids[g].parts.append([mi, p.center])
-			if not p.has("spoiler") and not p.has("mirror_glass"):
+			if not p.has("loose"):   # (its spoiler, its mirror)
 				var c: Vector3 = p.center + p.mesh.get_aabb().get_center()
 				_lids[g].centre = (_lids[g].centre * _lids[g].n + c) / (_lids[g].n + 1)
 				_lids[g].n += 1
@@ -1283,13 +1345,16 @@ func loose_hit(p: Vector3, radius: float, s: float) -> void:
 		if d >= reach:
 			continue
 		var f := 1.0 - d / reach
-		l.hurt += s * s * f * (TEAR_SILL if g in [Nfs5Car.SILL_LEFT, Nfs5Car.SILL_RIGHT] else TEAR_HIT)
+		var give := TEAR_SILL if g in [Nfs5Car.SILL_LEFT, Nfs5Car.SILL_RIGHT] \
+				else TEAR_MIRROR if g in Nfs5Car.MIRROR_OFF.values() else TEAR_HIT
+		l.hurt += s * s * f * give
 		if l.hurt >= 1.0 and not far and (not _lids.has(g) or _lids[g].broken):
 			tear_off(g)
 
 
 ## Group `g`'s parts come off the car and go their own way (CarDebris): a door takes its
-## window and mirror, the boot its spoiler; the bay under a lost lid is left open.
+## window and mirror, the boot its spoiler; the bay under a lost lid is left open. A mirror
+## (Nfs5Car.MIRROR_OFF) can go alone.
 func tear_off(g: int) -> void:
 	if not _loose.has(g):
 		return
@@ -1307,11 +1372,17 @@ func tear_off(g: int) -> void:
 		mi.visible = true   # (the bay on the car, the lid's underside on the piece)
 	_bays.erase(g)
 	var keep := func(n: Node) -> bool: return not n in nodes
+	# (A mirror or spoiler off a door or lid that stays: it no longer swings with it.)
+	for o: Dictionary in _lids.values() + _windows.values():
+		o.parts = o.parts.filter(func(pc: Array) -> bool: return not pc[0] in nodes)
 	_body_meshes.assign(_body_meshes.filter(keep))
 	_spoiler_up.assign(_spoiler_up.filter(keep))
 	_spoiler_down.assign(_spoiler_down.filter(keep))
 	_spoiler_moving.assign(_spoiler_moving.filter(keep))
+	var glass_left := _cabin_mirror_glass.size()
 	_cabin_mirror_glass.assign(_cabin_mirror_glass.filter(func(m: Dictionary) -> bool: return not m.node in nodes))
+	if _cabin_mirror_glass.size() != glass_left and _cabin_mirrors:
+		_build_side_mirrors()   # (the in-car view's copy of the lost glass, and its view, go too)
 	# (Without its spoiler the back loses the downforce it gave.)
 	if nodes.any(func(n: Node) -> bool: return n.has_meta("spoiler")):
 		spoiler_type = 0
@@ -1915,6 +1986,11 @@ func _physics_process(dt: float) -> void:
 			drive = 0.0
 		if gear < 0:
 			drive = -drive * 0.6
+	# Traction / stability control: the engine's torque cut last tick (it lags the wheels).
+	var tc_on := traction_control or stability == Stability.ESC
+	var drive_asked := drive
+	if tc_on:
+		drive *= _tc_cut
 	var braking := 0.0
 	if gear > 0 or hold:
 		braking = _brake_pedal
@@ -1936,13 +2012,41 @@ func _physics_process(dt: float) -> void:
 				* (1.0 + clampf(abs_speed * abs_speed * downforce_k, 0.0, 0.9) * 0.5)
 		var line := atan(wheelbase * a_max / maxf(abs_speed * abs_speed, 1.0))
 		var beta := atan2(absf(vel.dot(global_basis.x)), abs_speed) if abs_speed > 3.0 else 0.0
-		lock = minf((line + slip_peak[0] * STEER_MARGIN) * high_turn + beta, max_steer * low_turn)
+		var peak_f: float = slip_peak[0] * (1.0 + LOW_GRIP_PEAK * low_grip(surface_grip))
+		lock = minf((line + peak_f * STEER_MARGIN) * high_turn + beta, max_steer * low_turn)
 	var steer_to := (steer_pull - steer) * lock
 	var turning_in := absf(steer_to) > absf(steer_angle) and steer_to * steer_angle >= 0.0
 	var steer_steps := lerpf(steer_in, steer_rate_fast, speed_f) if turning_in else steer_out
 	if not power_steering:
 		steer_steps *= lerpf(0.6, 1.0, speed_f)
 	steer_angle = move_toward(steer_angle, steer_to, steer_steps * steps * lock * _steer_speed)
+
+	# --- stability control: yaw off what the steering asks (no more than the grip allows)
+	# brakes one wheel: the outer front against a slide (oversteer), the inner rear when the
+	# nose runs wide (understeer). Braking a right wheel turns the car right, a left one left.
+	var esc_side := 0       # 1 brake a left wheel, -1 a right one
+	var esc_front := false
+	var esc_force := 0.0    # N on that wheel
+	var esc_cut := 1.0
+	esc_active = false
+	if stability == Stability.ESC and abs_speed > 5.0 and speed > 0.0 and grounded_wheels > 2 and not handbrake:
+		var yaw_now := angular_velocity.dot(up)
+		var yaw_max := 9.81 * corner_grip() * surface_grip / abs_speed
+		var yaw_want := clampf(speed * tan(steer_angle) / wheelbase, -yaw_max, yaw_max)
+		var err := yaw_now - yaw_want
+		var band := ESC_BAND + ESC_BAND_SHARE * absf(yaw_want)
+		if absf(err) > band:
+			err -= signf(err) * band
+			esc_active = true
+			esc_side = -1 if err > 0.0 else 1
+			# Too much rotation the way it's turning (or any against it) is oversteer.
+			esc_front = yaw_now * yaw_want <= 0.0 or absf(yaw_now) > absf(yaw_want)
+			esc_force = absf(err) * inertia.y / ESC_TAU / maxf(absf(_wheels[0].center.x), 0.5)
+			esc_cut = 1.0 - clampf((absf(err) - ESC_CUT_ERR) * 2.0, 0.0, 0.7)
+	var tc_need := 1.0      # the most of the asked torque the driven tyres could take
+	abs_active = false
+	var abs_on := _abs_on()
+	_abs_phase = fmod(_abs_phase + dt * TAU * ABS_HZ, TAU)
 
 	var space := get_world_3d().direct_space_state
 	if _ray_q == null:
@@ -2023,6 +2127,9 @@ func _physics_process(dt: float) -> void:
 		# Grip: the car's own [30], less tyre wear [37], by the load on the tyre.
 		var mu := 1.25 * grip * (front_grip if w.front else 1.0) * (1.0 - _wear) * surface_grip * ground_grip \
 				* (0.5 if flat else 1.0)
+		var low := low_grip(surface_grip * ground_grip)
+		var widen := 1.0 + LOW_GRIP_PEAK * low
+		var drop := SLIDE_DROP * slide_mult * (1.0 - LOW_GRIP_DROP * low)
 		var lat_grip := 1.0
 		if handbrake and not w.front:
 			mu *= 0.55
@@ -2040,13 +2147,17 @@ func _physics_process(dt: float) -> void:
 			# under power, the front under braking, the outside wheels in a bend).
 			var transfer := g_transfer / 9.81 * (_acc.y * (-0.5 if w.front else 0.5) + _acc.x * (-0.5 if w.left else 0.5))
 			max_f *= clampf(1.0 + transfer, 0.3, 1.7)
-		# Brakes, split front to rear by the brake bias [19]. Without ABS [17] a wheel asked
-		# for more than its grip locks, and a locked tyre barely steers.
+		# Brakes, split front to rear by the brake bias [19], and the stability control's on
+		# one wheel. Without ABS [17] (or below its cut-out) a wheel asked for more than its
+		# grip locks, and a locked tyre barely steers.
 		var b := 0.0
 		if braking > 0.0:
 			b = brake_decel * mass * braking * 1.25 * (brake_front if w.front else 1.0 - brake_front) * 0.5
-			if not has_abs and b > max_f and absf(v_long) > 1.0:
-				lat_grip = minf(lat_grip, 0.3)
+		if esc_side != 0 and w.front == esc_front and w.left == (esc_side > 0):
+			b += esc_force
+		var abs_now := abs_on and absf(v_long) > ABS_CUTOUT
+		if not abs_now and b > max_f and absf(v_long) > 1.0:
+			lat_grip = minf(lat_grip, 0.3)
 		# Lateral: cancel sideways sliding (capped by grip). Nearly stopped it cancels all of it,
 		# as static friction does, or the car creeps down any camber it is parked on.
 		var f_lat := -v_lat * mass * 0.25 / dt * lerpf(1.0, 0.18, clampf(abs_speed / 2.0, 0.0, 1.0)) * lat_grip
@@ -2056,11 +2167,11 @@ func _physics_process(dt: float) -> void:
 			# Slip-angle tyre: the grip builds with the angle between where the tyre points and
 			# where it's going, peaks at its peak slip angle (by its size [35], [36]) and past it
 			# falls away gradually, by the slide multiplier [38]: a slide builds and can be caught.
-			var peak: float = slip_peak[0 if w.front else 1]
+			var peak: float = slip_peak[0 if w.front else 1] * widen
 			var x := atan2(absf(v_lat), maxf(absf(v_long), 0.5)) / peak
-			slide = smoothstep(1.0, SLIP_FULL / peak, x)
+			slide = smoothstep(1.0, SLIP_FULL * widen / peak, x)
 			over_peak = x - 1.0
-			var shape := x * (2.0 - x) if x < 1.0 else 1.0 - SLIDE_DROP * slide_mult * slide
+			var shape := x * (2.0 - x) if x < 1.0 else 1.0 - drop * slide
 			# Crawling it just holds, as before; and it never pushes back more than stops the
 			# slide in one tick, or it would flick from side to side.
 			var cancel := -v_lat * mass * share * 0.5 / dt
@@ -2070,13 +2181,26 @@ func _physics_process(dt: float) -> void:
 			f_lat *= lat_grip
 		# Longitudinal: the drive split between the axles by the front drive ratio [16].
 		var driven := front_drive if w.front else 1.0 - front_drive
+		if tc_on and driven > 0.0 and drive_asked != 0.0:
+			# Traction control: how much of the asked torque this tyre could put down, past
+			# what its cornering already takes (the friction circle).
+			var lat_tc := minf(absf(f_lat), max_f * 0.95)
+			var room := sqrt(max_f * max_f - lat_tc * lat_tc) * TC_SLIP
+			tc_need = minf(tc_need, room / (absf(drive_asked) * 0.5 * driven))
 		var f_long := drive * 0.5 * driven
 		if b > 0.0:
-			if has_abs:
+			if abs_now:
 				# ABS: braking only gets the grip that cornering leaves over, so the car still
-				# turns while braking instead of ploughing on into the outside wall.
+				# turns while braking instead of ploughing on into the outside wall. Asked for
+				# more, it lets the pressure off and on again around the limit, a little short
+				# of it (shorter still on loose ground), each wheel on its own beat.
 				var lat_used := minf(absf(f_lat), max_f * 0.9)
-				b = minf(b, sqrt(max_f * max_f - lat_used * lat_used))
+				var avail := sqrt(max_f * max_f - lat_used * lat_used)
+				if b > avail:
+					var eff := ABS_EFF_LOOSE if surface in TrackSurface.LOOSE else ABS_EFF
+					var beat := _abs_phase + (1.7 if w.front else 0.0) + (0.9 if w.left else 0.0)
+					b = avail * (eff + ABS_RIPPLE * sin(beat))
+					abs_active = true
 			f_long -= clampf(v_long * mass * 0.25 / dt, -b, b)
 		if handbrake and not w.front:
 			f_long -= clampf(v_long * mass * 0.25 / dt, -max_f * 0.8, max_f * 0.8)
@@ -2104,7 +2228,7 @@ func _physics_process(dt: float) -> void:
 			if demand > 1.0:
 				var excess := minf(demand - 1.0, 1.0)
 				ws_slip = maxf(ws_slip, excess)
-				f = f / demand * (1.0 - SLIDE_DROP * slide_mult * excess)
+				f = f / demand * (1.0 - drop * excess)
 		elif f.length() > max_f:
 			ws_slip = clampf((f.length() - max_f) / max_f, 0.0, 1.0)
 			# A sliding tyre grips less than one on the limit, by the slide multiplier [38].
@@ -2120,6 +2244,13 @@ func _physics_process(dt: float) -> void:
 		apply_force(ws * f.x + wf * f.y, offset)
 		w.spin += v_long / w.radius * dt
 	slip = total_slip / 4.0
+	if tc_on:
+		var cut := minf(clampf(tc_need, 0.1, 1.0), esc_cut) if grounded_wheels > 0 else _tc_cut
+		_tc_cut = move_toward(_tc_cut, cut, dt * (TC_CUT_RATE if cut < _tc_cut else TC_RESTORE_RATE))
+		tc_active = _tc_cut < 0.97 and drive_asked != 0.0
+	else:
+		_tc_cut = 1.0
+		tc_active = false
 	off_road = float(loose_wheels) / grounded_wheels if grounded_wheels > 0 else 0.0
 	_wear = minf(_wear + tyre_wear_rate * slip * dt * 0.01, 0.3)
 
@@ -2132,12 +2263,13 @@ func _physics_process(dt: float) -> void:
 		# The spoiler presses on the rear axle: more grip at the back, steadier at speed.
 		if spoiler_type != 0 and abs_speed > spoiler_speed:
 			apply_force(-up * df * 0.2, global_basis * Vector3(0, 0, _wheels[2].center.z))
-	# Keep yaw from running away when grip is lost (arcade assist). Only rotation beyond what
+	# Keep yaw from running away when grip is lost (arcade assist, the Arcade stability
+	# setting; ESC brakes the wheels instead, above). Only rotation beyond what
 	# the steering asks for is damped, less the car's spin velocity cap [39] share of it;
 	# damping all of it makes the car plough wide in bends. Its strength is the slide
 	# assistance factor [41].
 	var yaw := angular_velocity.dot(up)
-	if not handbrake:
+	if not handbrake and stability == Stability.ARCADE:
 		var yaw_ref := speed * tan(steer_angle) / wheelbase
 		var excess := yaw
 		if yaw * yaw_ref > 0.0:
@@ -2223,13 +2355,7 @@ func set_cockpit(on: bool) -> bool:
 			_cabin_mirrors = Node3D.new()
 			_cabin_mirrors.name = "Mirrors"
 			_body_tilt.add_child(_cabin_mirrors)
-			if not _cabin_mirror_glass.is_empty():
-				var glass: Array[Dictionary] = []
-				for g in _cabin_mirror_glass:
-					glass.append(_bezel_glass(g, _cabin_mirrors))
-				var mirrors := CarMirrors.new()
-				_cabin_mirrors.add_child(mirrors)
-				mirrors.setup(self, glass, _dash_data.eye, _half_size)
+			_build_side_mirrors()
 			_build_rear_mirror(_cabin_mirrors, _body_tilt, _dash_data.eye)
 		if _cabin_mirrors:
 			_cabin_mirrors.visible = on
@@ -2249,6 +2375,25 @@ func set_cockpit(on: bool) -> bool:
 		g.layers = OWN_VIEW_LAYER if on else VISUAL_LAYER
 		g.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF if on else g.get_meta("shadow")
 	return true
+
+
+## The cabin's side mirrors as the in-car view shows them (Porsche Unleashed's: see
+## set_cockpit), those still on the car, made again when one comes off.
+func _build_side_mirrors() -> void:
+	var old := _cabin_mirrors.get_node_or_null("Side")
+	if old:
+		old.free()
+	var side := Node3D.new()
+	side.name = "Side"
+	_cabin_mirrors.add_child(side)
+	if _cabin_mirror_glass.is_empty():
+		return
+	var glass: Array[Dictionary] = []
+	for g in _cabin_mirror_glass:
+		glass.append(_bezel_glass(g, side))
+	var mirrors := CarMirrors.new()
+	side.add_child(mirrors)
+	mirrors.setup(self, glass, _dash_data.eye, _half_size)
 
 
 func _build_dash() -> void:
