@@ -39,8 +39,10 @@ func _on_node_added(n: Node) -> void:
 	elif n is TournamentPanel:
 		n.focus_changed.connect(func() -> void: play(TICK))
 		n.chosen.connect(func(_t: Dictionary, _c: int) -> void: play(SELECT))
-	elif n is GaragePanel:
+	elif n is Dealership:
 		n.focus_changed.connect(func(_i: int) -> void: play(TICK))
+		n.previewed.connect(func(_i: int) -> void: play(TICK))
+		n.confirmed.connect(func(_i: int) -> void: play(SELECT))
 		n.transacted.connect(func() -> void: play(SELECT))
 		n.chosen.connect(func(_i: int) -> void: play(SELECT))
 	elif n is ActionList:

@@ -118,6 +118,13 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 	var particles := PuParticles.build(t, Game.pu_root) if Game.quality != Game.Quality.LOW else null
 	if particles:
 		geo.add_child(particles)
+	# The lamps' flares, at night (TrackWorld shows the "night_only" nodes then).
+	var glows := PuGlows.build(t, Game.pu_root)
+	if glows:
+		geo.add_child(glows)
+		var night_only: Array = root.get_meta("night_only", [])
+		night_only.append(glows)
+		root.set_meta("night_only", night_only)
 	_add_ground(terrain, t.backdrop[Nfs5Track.Kind.GROUND], SURFACE_GROUND)
 
 	var path := Nfs3TrackBuilder._make_path(t)

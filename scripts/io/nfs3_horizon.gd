@@ -65,7 +65,7 @@ var sun: Image                   # the sun by day, the moon (or an aurora) at ni
 ## texture archive.
 static func load_dir(dir: String, night: bool, weather := false, track_images: Array[Image] = []) -> Nfs3Horizon:
 	if Nfs6Track.is_track_dir(dir):
-		return _load_hp2(dir)
+		return _load_hp2(dir, night)
 	if Nfs5Track.is_track_file(dir):
 		return _load_pu(dir, night)
 	if Nfs4Track.is_track_dir(dir):
@@ -89,6 +89,9 @@ static func load_dir(dir: String, night: bool, weather := false, track_images: A
 
 ## Just the kind of weather the track folder `dir` has, without loading its sky images.
 static func peek_precip(dir: String) -> Precip:
+	if Nfs6Track.is_track_dir(dir):
+		var h := _load_hp2(dir)
+		return h.precip if h else Precip.NONE
 	if Nfs4Track.is_track_dir(dir):
 		var ini := DataPath.find_ci(dir, "trw.ini")
 		var hs := from_ini(FileAccess.get_file_as_string(ini)) if ini != "" else null
@@ -161,12 +164,23 @@ static func from_text(text: String) -> Nfs3Horizon:
 
 
 ## A Hot Pursuit 2 level's horizon: its area's tr.ini, in High Stakes' keys. Its sky is a
-## dome (Nfs6Track.sky, drawn by Nfs6TrackBuilder), so there's no panorama.
-static func _load_hp2(level_dir: String) -> Nfs3Horizon:
+## dome (Nfs6Track.sky, drawn by Nfs6TrackBuilder, dimmed at night), so there's no panorama.
+## The game has no night: at night the day's lighting goes dark, as Porsche Unleashed's.
+static func _load_hp2(level_dir: String, night := false) -> Nfs3Horizon:
 	var path := DataPath.find_ci(level_dir.get_base_dir(), "tr.ini")
 	var h := from_ini(FileAccess.get_file_as_string(path)) if path != "" else null
-	if h:
-		h.has_pixmap = false
+	if h == null:
+		return null
+	h.has_pixmap = false
+	if night:
+		h.sky_top = Color(0.02, 0.03, 0.07)
+		h.sky_sun = Color(0.07, 0.08, 0.14)
+		h.sky_away = Color(0.05, 0.06, 0.1)
+		h.fog_color = Color(0.05, 0.06, 0.09)
+		h.earth_top = Color(0.03, 0.03, 0.04)
+		h.earth_base = Color(0.02, 0.02, 0.03)
+		h.ambient = Color(0.22, 0.24, 0.32)
+		h.cloud_type = 0
 	return h
 
 

@@ -325,6 +325,10 @@ var _dash_lit: Array[Node3D] = []
 var _dash_mats: Array[Material] = []   # the needles' materials: [by day, lit]
 var _dash_lit_on := false
 var _mirrors: CarMirrors           # the in-car view's side mirrors, or null
+## High Stakes' dash.fce side mirrors {holder, glass (or null), x (its side's sign)}, and the
+## sides whose mirror outside a crash has torn off (theirs go from the in-car view too).
+var _dash_mirror_parts: Array[Dictionary] = []
+var _lost_mirror_sides: Array[float] = []
 var _rear_mirror: Node3D           # the in-car view's rear-view mirror, made on first use, or null
 ## Whether the in-car view shows its rear-view mirror (the HUD's M; while it does, the HUD's
 ## own mirror stands down), and the car whose in-car view is showing, or null.
@@ -475,6 +479,10 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 				gm.set_shader_parameter("albedo_tex", data.texture)
 				glass_mat = gm
 			mi.material_override = glass_mat
+			if p.has("clarity"):   # (clearer glass: Hot Pursuit 2's lamp covers)
+				var cm := glass_mat.duplicate() as ShaderMaterial
+				cm.set_shader_parameter("clarity", p.clarity)
+				mi.material_override = cm
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		elif p.get("driver", false) and driver_mat:
 			mi.material_override = driver_mat
@@ -588,6 +596,14 @@ func setup(data: Object, tint := Color(0, 0, 0, 0), upgrade := 0) -> void:
 			pivot.add_child(spin)
 			if wheel_mat:
 				wmi.material_override = wheel_mat
+			# (Hot Pursuit 2's brake discs and calipers: they steer and ride with the wheel but
+			# don't turn with it.)
+			if wp.has("brake"):
+				var bmi := MeshInstance3D.new()
+				bmi.mesh = wp.brake
+				bmi.position = -aabb.get_center()
+				bmi.material_override = wheel_mat
+				pivot.add_child(bmi)
 			_body_visual.add_child(pivot)
 			w.visual = pivot
 			w.spin_node = spin
@@ -1383,6 +1399,11 @@ func tear_off(g: int) -> void:
 	_cabin_mirror_glass.assign(_cabin_mirror_glass.filter(func(m: Dictionary) -> bool: return not m.node in nodes))
 	if _cabin_mirror_glass.size() != glass_left and _cabin_mirrors:
 		_build_side_mirrors()   # (the in-car view's copy of the lost glass, and its view, go too)
+	if g in Nfs5Car.MIRROR_OFF.values() and not _dash_data.get("own_cabin", false) and not nodes.is_empty():
+		var mi := nodes[0] as MeshInstance3D
+		if mi and mi.mesh:
+			_lost_mirror_sides.append(signf(mi.position.x + mi.mesh.get_aabb().get_center().x))
+			_drop_dash_mirrors()
 	# (Without its spoiler the back loses the downforce it gave.)
 	if nodes.any(func(n: Node) -> bool: return n.has_meta("spoiler")):
 		spoiler_type = 0
@@ -2437,6 +2458,10 @@ func _build_dash() -> void:
 			holder.add_child(g)
 			glass.append({"node": g, "point": p.center + p.glass.point, "normal": p.glass.normal})
 		var pname: String = p.name
+		if pname.to_lower().contains("mirror"):
+			var at: Vector3 = p.center + (p.glass.point if p.has("glass") else (p.mesh as Mesh).get_aabb().get_center())
+			_dash_mirror_parts.append({"holder": holder, "glass": glass.back().node if p.has("glass") else null,
+				"x": signf(at.x)})
 		# Parts are named by the views they show in (:F front, :L, :R, :B) and what they are:
 		# ":F_MPH (0.0 to 0.63)" is the speedo needle, sweeping 0.63 of a turn.
 		if pname.contains("_mph") or pname.contains("_rpm"):
@@ -2464,6 +2489,19 @@ func _build_dash() -> void:
 		_mirrors.name = "Mirrors"
 		_dash.add_child(_mirrors)
 		_mirrors.setup(self, glass, cockpit_eye(), _half_size)
+	_drop_dash_mirrors()
+
+
+## The dash's side mirrors on the sides whose mirror is gone (_lost_mirror_sides): hidden,
+## their views stopped.
+func _drop_dash_mirrors() -> void:
+	for m: Dictionary in _dash_mirror_parts.duplicate():
+		if not m.x in _lost_mirror_sides:
+			continue
+		(m.holder as Node3D).visible = false
+		if _mirrors and m.glass:
+			_mirrors.drop(m.glass)
+		_dash_mirror_parts.erase(m)
 
 
 ## The rear-view mirror, under `parent` (at the origin of `space`, the car or its body; the

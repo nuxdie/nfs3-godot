@@ -19,6 +19,7 @@ var query := ""
 var filters: TabStrip         # stepped with Tab / Shift+Tab and the pad's shoulder buttons
 var grid := false             # ←→ move through the items rather than calling _side_step()
 var head_h := 156.0
+var head_w := 0.0             # the header's width (title, search); 0 for the whole width
 ## {item: int (-1 for a section header), text: String, rect: Rect2 in list space}
 var entries: Array[Dictionary] = []
 var focus := -1               # index into entries
@@ -65,6 +66,11 @@ func _layout_entries(_w: float) -> float:
 
 func _draw_entry(_ci: CanvasItem, _e: Dictionary, _r: Rect2, _focused: bool, _hovered: bool) -> void:
 	pass
+
+
+## ←→ in a grid: the next item that way (in list order here; a map goes by where they are).
+func _move_horizontal(dir: int) -> void:
+	_set_focus(_next_item(focus, dir))
 
 
 ## ←→ in a list (with Shift, Ctrl): subclasses use it for other controls (the car's paint).
@@ -248,7 +254,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			KEY_LEFT, KEY_RIGHT:
 				var d := -1 if e.physical_keycode == KEY_LEFT else 1
 				if grid:
-					_set_focus(_next_item(focus, d))
+					_move_horizontal(d)
 				else:
 					_side_step(d, e.shift_pressed, e.ctrl_pressed)
 			KEY_PAGEUP, KEY_PAGEDOWN:
@@ -292,7 +298,7 @@ func _unhandled_input(e: InputEvent) -> void:
 	elif e.is_action_pressed("ui_left", true) or e.is_action_pressed("ui_right", true):
 		var d := -1 if e.is_action_pressed("ui_left", true) else 1
 		if grid:
-			_set_focus(_next_item(focus, d))
+			_move_horizontal(d)
 		else:
 			_side_step(d)
 	elif e.is_action_pressed("ui_accept"):
@@ -415,7 +421,7 @@ func _process(dt: float) -> void:
 # ------------------------------------------------------------------ drawing
 
 func _draw() -> void:
-	var w := size.x
+	var w := head_w if head_w > 0.0 else size.x
 	var tf := UiKit.font("display")
 	draw_string(tf, Vector2(-2, 34), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 32, UiKit.INK)
 	var tw := tf.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 32).x

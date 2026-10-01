@@ -1240,8 +1240,8 @@ func _read_model(crp: Crp, tpg: Dictionary, pages: Array[Rect2]) -> void:
 	body.panelise(box)
 	glass.panelise(box)
 	half_size = box.size * 0.5
+	var column := body.steering_column()   # (before commit: it may stop part of it turning)
 	var hb := {"name": ":hb", "mesh": body.commit(-mid), "center": Vector3.ZERO, "damaged": body.damaged(-mid)}
-	var column := body.steering_column()
 	for limb: PackedInt32Array in driver_limbs.values():
 		people.seat_limb(limb, driver_body)
 	var steer_angles := people.sweep(column)
@@ -1882,24 +1882,20 @@ class _Mesh:
 				frames[f][i] += shift
 
 	## The steering wheel's column, for car.gdshader: {pivot (the wheel's middle), axis
-	## (through its face, pointing forward)}, or {} without one. The axis is the wheel's
-	## triangles' normals summed by area, each turned forward (it's a ring seen from both
-	## sides); the hands don't count.
+	## (through its face, pointing forward)}, or {} without one (SteeringColumn: the 356s'
+	## column, marked with the wheel, stops turning). The hands don't count.
 	func steering_column() -> Dictionary:
-		var n := Vector3.ZERO
-		var b := AABB()
-		var first := true
+		var turns := PackedInt32Array()
 		for i in range(0, pos.size() - 2, 3):
-			if steer[i] < 1.0:
-				continue
-			var fn := (pos[i + 2] - pos[i]).cross(pos[i + 1] - pos[i])
-			n += fn if fn.z >= 0.0 else -fn
-			for k in 3:
-				b = AABB(pos[i + k], Vector3.ZERO) if first else b.expand(pos[i + k])
-				first = false
-		if first or n.length_squared() < 1e-12:
+			if steer[i] >= 1.0:
+				turns.append(i)
+		var col := SteeringColumn.fit(pos, turns)
+		if col.is_empty():
 			return {}
-		return {"pivot": b.get_center(), "axis": n.normalized()}
+		for i: int in col.dropped:
+			for k in 3:
+				steer[i + k] = 0.0
+		return {"pivot": col.pivot, "axis": col.axis}
 
 	## Each blend shape's normals turned to the side its triangle faces in that shape, as
 	## _normals() does the rest pose's.

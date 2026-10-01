@@ -678,17 +678,20 @@ func _draw_sprint_progress(r: Dictionary, map_y: float) -> void:
 
 
 ## Timing tower: every racer in order, the leader with the race clock, the rest with their
-## gap to the leader. Returns the y below it.
+## gap to the leader, each with the car they drive under their name and, with the police
+## out, their tickets; one pulled over shows BUSTED in place of the gap. Returns the y below it.
 func _draw_tower(at: Vector2) -> float:
-	var w := 300.0
-	var h := 27.0
+	var w := 320.0
+	var h := 40.0
+	var cops: bool = Game.mode == Game.Mode.HOT_PURSUIT or not race.cops.is_empty()
 	var L: float = race.path.length
 	var lead: Dictionary = race.racers[0]
 	var y := at.y
 	for i in race.racers.size():
 		var rr: Dictionary = race.racers[i]
 		var you: bool = rr.car == player
-		var base := y + h - 8
+		var base := y + 21
+		var sub := y + h - 7
 		if you:
 			# As a menu's focus: a wash of the accent fading out, a bar down its edge.
 			var r := Rect2(at.x - 12, y, w + 24, h - 1)
@@ -696,24 +699,42 @@ func _draw_tower(at: Vector2) -> float:
 			var b := Color(UiKit.ACCENT, 0.0)
 			_tri_quad(r, a, b)
 			_rect(Rect2(r.position.x, r.position.y, 3, r.size.y), UiKit.ACCENT)
-		_str(str(i + 1), Vector2(at.x, base), "display", 21, UiKit.ACCENT if you else UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, 22,
+		_str(str(i + 1), Vector2(at.x, base + 6), "display", 21, UiKit.ACCENT if you else UiKit.INK, HORIZONTAL_ALIGNMENT_RIGHT, 22,
 			0, true)
 		var gap := _gap(rr, lead, L)
 		if rr.finished:
 			# The race runs on past the winner until you're home: show each finisher's time and flag them.
 			gap = fmt_time(rr.time)
-		var gw := UiKit.text_width("cond", gap, 16, 0, true)
+		var busted: bool = rr.get("held_t", 0.0) > 0.0 and not rr.finished
+		if busted:
+			gap = "BUSTED"
+		var gw := UiKit.text_width("cond", gap, 16, 2 if busted else 0, not busted)
 		var fin_w := 34.0 if rr.finished else 0.0
 		var nw := w - 41 - gw - fin_w - 12
 		var nm: String = str(rr.get("short", rr.name)).to_upper()
 		if not you:
-			_chip(Rect2(at.x + 28, y + 7, 7, h - 13), rr.get("color", UiKit.INK))
+			_chip(Rect2(at.x + 28, y + 8, 7, h - 15), rr.get("color", UiKit.INK))
 		_str(nm, Vector2(at.x + 41, base), "cond", UiKit.fit("cond", nm, nw, 16, 12, 1), UiKit.INK if i == 0 or you else \
 			Color(UiKit.INK, 0.86), HORIZONTAL_ALIGNMENT_LEFT, nw, 1)
+		# The car under the name; the tickets, a pip each, under the gap.
+		var n_tix: int = rr.get("tickets", 0)
+		var pips := maxi(race.MAX_TICKETS, n_tix) if cops else 0
+		var pw := pips * 12.0
+		var model: String = str(rr.get("model", "")).to_upper()
+		var mw := w - 41 - pw - 14
+		_str(model, Vector2(at.x + 41, sub), "cond", UiKit.fit("cond", model, mw, 12, 10, 1), UiKit.INK_DIM,
+			HORIZONTAL_ALIGNMENT_LEFT, mw, 1)
+		for k in pips:
+			_slant(Rect2(at.x + w - pw + k * 12.0 + 2, sub - 7, 9, 5), RED if k < n_tix else Color(1, 1, 1, 0.22))
 		if rr.finished:
 			_str("FIN", Vector2(at.x, base), "cond", 12, UiKit.ACCENT, HORIZONTAL_ALIGNMENT_RIGHT, w - gw - 8, 2)
-		_str(gap, Vector2(at.x, base), "cond", 16, UiKit.INK if i == 0 or you else UiKit.INK_DIM,
-			HORIZONTAL_ALIGNMENT_RIGHT, w, 0, true)
+		if busted:
+			var on := fmod(_time * 4.0, 2.0) < 1.0
+			_str(gap, Vector2(at.x, base), "cond", 16, RED if on else UiKit.COP_BLUE.lerp(UiKit.INK, 0.3),
+				HORIZONTAL_ALIGNMENT_RIGHT, w, 2)
+		else:
+			_str(gap, Vector2(at.x, base), "cond", 16, UiKit.INK if i == 0 or you else UiKit.INK_DIM,
+				HORIZONTAL_ALIGNMENT_RIGHT, w, 0, true)
 		y += h
 	return y
 
@@ -744,19 +765,14 @@ func _gap(rr: Dictionary, lead: Dictionary, L: float) -> String:
 	return "+%.1f" % g if g < 60.0 else "+" + fmt_time(g)
 
 
-## Everything about the police in one block under the tower: chase status and heat while
-## they're after you, tickets always, flat tyres once spiked.
+## The police under the tower: your tickets, when the tower that lists them is hidden, and
+## flat tyres once spiked. Whether they're after you, and how hard, is left to the mirrors.
 func _draw_cop_block(y: float) -> void:
-	if pursuit:
-		var on := fmod(_time * 4.0, 2.0) < 1.0
-		_circle(Vector2(M + 4, y - 5), 4, RED if on else UiKit.COP_BLUE)
-		_kicker("IN PURSUIT", Vector2(M + 14, y), UiKit.INK)
+	if not Game.hud_shows("standings"):
+		_pips("TICKETS", y, race.MAX_TICKETS, race.tickets)
 		y += 22
-		_pips("HEAT", y, 3, race.heat)
-		y += 22
-	_pips("TICKETS", y, race.MAX_TICKETS, race.tickets)
 	if player and player.tyres_flat():
-		_kicker("FLAT TYRES", Vector2(M, y + 22), RED)
+		_kicker("FLAT TYRES", Vector2(M, y), RED)
 
 
 ## A label and a row of `n` slanted pips, the first `lit` of them red.

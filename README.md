@@ -319,14 +319,21 @@ The game streams compartments as the car goes, which a track loaded whole has to
   the course), both where each carries a stretch of it the other doesn't; scenery hanging
   over the course's road within its lanes (a variant's barricade across it) is left out.
 - A compartment carries its view of the land round it (a kilometre-wide sheet of rough
-  terrain), drawn while its neighbours aren't: what of it lies within 80 m of another loaded
-  compartment's road, and not of its own, is left out.
+  terrain), drawn while its neighbours aren't: its coarse render methods (triangles 20 m and
+  more) lying mostly within 80 m of another loaded compartment's road, not its own, are left out.
+- The game draws the compartments round the car's node of `drvpath.ini`, so one far along the
+  course can stand where the course is now (a hill over the road, terrain through a tunnel's
+  wall). Each slice of the course gets its node; what of a compartment hangs over the road
+  where the course is three or more nodes from all of its own is left out (its coarse
+  triangles anywhere but at its own nodes).
 - A point-to-point course's AI paths run on past its barricades into the other way's run-off,
   where there's no collision surface: the grid lines up past the longest such gap near the
   start, the finish line short of the longest near the end.
 
 The road is whatever drawn triangle lies flat on the collision surface, see-through ones too
-(the steel grating bridges of the Tropics). Gaps left in the course are Palm City Island's
+(the steel grating bridges of the Tropics). The one sphere map of the sky (the Tropics'
+puddles) isn't marked in the files: it's told by its look and mapped by the view's reflection
+in the track shader, as the game does. Gaps left in the course are Palm City Island's
 and Tropical Sunset's jumps.
 
 Not done: the tunnel lights of `lightglow.dat` (six compartments have any), the particle
@@ -439,8 +446,12 @@ A bar along the top holds the menu's places, each a click (or Q / E, LB / RB) aw
   **track** with its layout, time and weather; the **race** rules (laps, rivals, how the
   rivals' cars are tuned and which class they come from, traffic: only those the mode has);
   and, under the car on its turntable, the **car** with its ratings, paint and upgrades.
-  The track and car cards open a picker (click, Enter, or T / C): every track as a
-  postcard, every car with its ratings, searchable and filtered by game or class. Enter or
+  The track and car cards open a picker (click, Enter, or T / C). The tracks are pins on
+  one world map, every game's together, each where it's set (Monte Carlo's five, or a High
+  Stakes remake beside its NFS III original, share a pin with a chip each); the map flies
+  to the region of the one in focus (Tab: world, North America, Europe), arrows move to the
+  nearest pin that way, typing frames what matches, and a card shows its postcard, outline
+  and facts. The cars come with their ratings, searchable and filtered by class. Enter or
   a click picks and comes back; Esc comes back with the old pick. A line under the setup
   says what the setting in focus does.
 - **The showroom**: the car stands on a dark gloss floor that fades into the track's picture,
@@ -561,8 +572,9 @@ scripts/race/      race.gd (spawning, laps, positions, pursuit rules), spike_str
                    reflection probe on the player's car on High)
 scripts/ui/        main_menu.gd (the front end: top bar, race setup, pickers, career, showroom),
                    pick_card.gd, car_sheet.gd, showroom.gd (the car's stage and camera), option_row.gd, tab_strip.gd, hint_bar.gd, big_button.gd, tournament_panel.gd, garage_panel.gd, loading_screen.gd,
-                   track_browser.gd / car_browser.gd / music_browser.gd (on browser_base.gd:
-                   search, filters, scrolling grid or list), settings_panel.gd, track_postcards.gd (renders each track by day and
+                   track_browser.gd (the world map of tracks; world_map.gd + shaders/world_map.gdshader
+                   draw data/world_map.png, baked by tools/bake_world_map.py from Natural Earth) /
+                   car_browser.gd / music_browser.gd (on browser_base.gd: search, filters, scrolling grid or list), settings_panel.gd, track_postcards.gd (renders each track by day and
                    night in the background for the menu backdrop, cached in user://postcards), hud.gd (tach, map, mirror, pause, results),
                    ui_kit.gd (palette, fonts, slanted shapes, key hints), tab_strip.gd, option_row.gd,
                    action_list.gd (pause/results menus), track_map.gd, car_stats.gd

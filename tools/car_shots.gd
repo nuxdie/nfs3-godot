@@ -62,6 +62,7 @@ func _run() -> void:
 		"hp2": paths = Game.cars.filter(func(c): return Game.is_hp2_path(c.path)).map(func(c): return c.path)
 		"hp2cops": paths = Game.hp2_cop_cars
 		"hp2traffic": paths = Game.hp2_traffic_cars
+		"proc": paths = ProceduralCar.PRESETS.map(func(_p): return "")
 		_: paths = Game.traffic_cars
 	var ids := pos.slice(1)
 	if not ids.is_empty():
@@ -197,6 +198,13 @@ func _run() -> void:
 		car.set_headlight_beam(night)
 		car.reset_to(park, 0.05)
 		car.set_headlights(lights or night)
+		for a: String in args:
+			if a.begins_with("--shader="):   # draws the car with another copy of car.gdshader (experiments)
+				var sh: Shader = load(a.get_slice("=", 1))
+				for mi in car.find_children("*", "MeshInstance3D", true, false):
+					var m := (mi as MeshInstance3D).material_override as ShaderMaterial
+					if m and m.shader and m.shader.resource_path.ends_with("car.gdshader"):
+						m.shader = sh
 		for a: String in args:
 			if a.begins_with("--paint=") and int(a.get_slice("=", 1)) < data.colours.size():   # a colour by index
 				car.set_paint(data.colours[int(a.get_slice("=", 1))])

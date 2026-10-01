@@ -139,6 +139,16 @@ func setup(car: Car, glass: Array[Dictionary], eye: Vector3, half_size: Vector3)
 			"off": mat_off})
 
 
+## Stops the mirror whose glass is `node` (its car's lost it): its view goes, the glass
+## keeps its own look.
+func drop(node: Node) -> void:
+	for m in _mirrors.duplicate():
+		if m.glass == node:
+			(m.glass as MeshInstance3D).material_override = m.off
+			(m.vp as Node).queue_free()
+			_mirrors.erase(m)
+
+
 func _process(_dt: float) -> void:
 	if _mirrors.is_empty():
 		return

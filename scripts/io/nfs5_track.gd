@@ -95,6 +95,9 @@ var props: Array = []
 ## The particle emitters (waterfall spray, river rapids, fountains, chimney smoke, steam):
 ## {tag (Render/particle.ini's system), pos, x, y (its axes; it emits along y)}.
 var emitters: Array = []
+## The lights (street lamps, tunnel lights, windows, beacons): {type (Render/flare.dat's,
+## "stry", "tuny": PuGlows), pos}.
+var lights: Array = []
 ## Whether the virtual road closes into a lap; if not, the start and finish nodes of each
 ## way round: [forward start, forward finish, backward start, backward finish].
 var closed := true
@@ -481,7 +484,8 @@ func _add_parts(crp: Crp, art: Dictionary, verts: PackedVector3Array, uvs: Packe
 			dest.scroll.append(scroll_of.get(p.material, Vector2.ZERO))
 
 
-## The article's particle emitters ("ef" of type 3, 56 bytes: 3, 0, where it is, 1, its X
+## The article's lights ("ef" of type 2) into `lights`, and its particle emitters ("ef" of
+## type 3, 56 bytes: 3, 0, where it is, 1, its X
 ## and Y axes, the particle system's tag ("RPD1", "WF07": Render/particle.ini, see
 ## PuParticles), 0) into `emitters`. Their X is the other way round from the meshes'.
 func _read_emitters(crp: Crp, art: Dictionary) -> void:
@@ -490,11 +494,18 @@ func _read_emitters(crp: Crp, art: Dictionary) -> void:
 		var e := crp.sub(art, "ef", k)
 		if e == null:
 			break
-		if e.length < 56 or d.decode_s32(e.offset) != 3:
-			continue
 		var o := e.offset
 		var v := func(at: int) -> Vector3:
 			return Vector3(-d.decode_float(o + at), d.decode_float(o + at + 4), d.decode_float(o + at + 8))
+		if e.length >= 44 and d.decode_s32(o) == 2:
+			# A light: 2, 0, where it is, 0, 0, 1, 0, its type (4 characters, backwards:
+			# "yrts" for "stry", PuGlows) and a word per light.
+			var name := d.slice(o + 36, o + 40)
+			name.reverse()
+			lights.append({"type": name.get_string_from_ascii(), "pos": v.call(8)})
+			continue
+		if e.length < 56 or d.decode_s32(o) != 3:
+			continue
 		emitters.append({"tag": d.slice(o + 48, o + 52).get_string_from_ascii(), "pos": v.call(8),
 			"x": v.call(24), "y": v.call(36)})
 
@@ -796,6 +807,8 @@ func mirror_world() -> void:
 				pc.colour[i + 2] = col
 	for c in chunks:
 		c.center = Vector3(-c.center.x, c.center.y, c.center.z)
+	for li: Dictionary in lights:
+		li.pos = Vector3(-li.pos.x, li.pos.y, li.pos.z)
 	for em: Dictionary in emitters:
 		for key in ["pos", "x", "y"]:
 			em[key] = Vector3(-em[key].x, em[key].y, em[key].z)

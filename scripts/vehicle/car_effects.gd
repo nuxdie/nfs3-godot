@@ -3,12 +3,14 @@ extends Node3D
 ## Visual feedback from a car's tyres and body: skid marks where the tyres slide on paved
 ## ground, smoke off the rear wheels when they slide hard there, dust in the ground's colour
 ## when they run on loose ground (TrackSurface), sparks where the body scrapes a wall
-## or another car, and a splash when it goes into a stream or a lake. Add as a child of the Car.
+## or another car, sparks off the rims once a spike strip has shredded the tyres, and a splash
+## when it goes into a stream or a lake. Add as a child of the Car.
 
 const SEG_LEN := 0.5        # metres of tread per skid mark segment
 const MARK_SLIP := 0.45     # wheel slip that starts laying rubber
 const SMOKE_SLIP := 0.65    # ... and that starts smoking
 const SPARK_SPEED := 4.0    # m/s of sliding contact that throws sparks
+const RIM_SPEED := 3.0      # m/s on shredded tyres that grinds sparks off the rims
 const DUST_SPEED := 6.0     # m/s on loose ground that kicks up dust even without sliding
 const HEAVY_SLIP := 0.75    # above this a mark uses NFS3's dense tread texture, below it the streaky one
 const SMOKE_CARRY := 0.3    # share of the car's velocity tyre smoke leaves with
@@ -23,6 +25,7 @@ var _last: Array = []       # per wheel: where its current mark strip ended, or 
 var _smoke: Array[CPUParticles3D] = []   # per rear wheel
 var _dust: Array[CPUParticles3D] = []    # per rear wheel
 var _sparks: CPUParticles3D
+var _rim_sparks: Array[CPUParticles3D] = []   # per wheel, made the first time the tyres go flat
 var _splash: CPUParticles3D
 var _wet := false           # in a stream or a lake last step
 var _idle := false          # skipping the effects (parked or far off), emitters off
@@ -66,6 +69,8 @@ func _physics_process(dt: float) -> void:
 			for p in _smoke + _dust:
 				p.emitting = false
 			_sparks.emitting = false
+			for p in _rim_sparks:
+				p.emitting = false
 		scrape_speed = 0.0
 		_wet = _car.water_depth > 0.0
 		return
@@ -114,6 +119,8 @@ func _physics_process(dt: float) -> void:
 				c.a = 1.0
 				d.color = c
 
+	_grind_rims(wheels)
+
 	_spark_t = maxf(_spark_t - dt, 0.0)
 	_crash_t = maxf(_crash_t - dt, 0.0)
 	# A crash sparks at any contact; otherwise only a fast enough slide along one does.
@@ -141,6 +148,33 @@ func _physics_process(dt: float) -> void:
 		_splash.restart()
 	_wet = wet
 	_prev_v = _car.linear_velocity.length()
+
+
+## Spiked: each wheel down on the road runs on what's left of its tyre and throws a fan of
+## sparks back from where it meets the tarmac, flung harder the faster it's going.
+func _grind_rims(wheels: Array[Dictionary]) -> void:
+	var on := _car.tyres_flat() and absf(_car.speed) > RIM_SPEED
+	if on and _rim_sparks.is_empty():
+		for w in wheels:
+			var p := _spark_emitter()
+			p.name = "RimSparks"
+			p.amount = 64
+			p.lifetime = 0.35
+			p.spread = 18.0
+			add_child(p)
+			_rim_sparks.append(p)
+	var back := -_car.linear_velocity.normalized()
+	var v := clampf(absf(_car.speed) * 0.3, 4.0, 14.0)
+	for i in _rim_sparks.size():
+		var w: Dictionary = wheels[i]
+		var p := _rim_sparks[i]
+		p.emitting = on and w.contact
+		if p.emitting:
+			p.global_position = w.ground + w.normal * 0.04
+			# Back along the road and a little up off it, as off a grinding wheel.
+			p.direction = (back + w.normal * 0.3).normalized()
+			p.initial_velocity_min = v * 0.5
+			p.initial_velocity_max = v
 
 
 ## Puffs leave with a share of the car's speed, dragged along in its wake, and the damping

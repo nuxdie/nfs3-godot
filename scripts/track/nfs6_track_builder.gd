@@ -12,7 +12,12 @@ const SKY_TEX_SIZE := 1024
 
 
 static func build(t: Nfs6Track, root: Node3D) -> TrackPath:
+	# Its soft-edged images are the trees, bushes and fences (water and windows are opaque):
+	# cut-outs, not the see-through pass, which is drawn in no order and lights up at night
+	# (High Stakes' windows).
 	var see_through := Nfs5TrackBuilder._see_through(t)
+	for i in see_through.size():
+		see_through[i] = mini(see_through[i], 1)
 	var textures := Nfs5TrackBuilder._texture_array(t, see_through)
 	var mats: Array[ShaderMaterial] = []
 	for sh in [Nfs3TrackBuilder._shader, Nfs3TrackBuilder._additive_shader, Nfs3TrackBuilder._glass_shader]:
@@ -26,9 +31,6 @@ static func build(t: Nfs6Track, root: Node3D) -> TrackPath:
 	mats[Nfs5TrackBuilder.PASS_OPAQUE].set_shader_parameter("layered", true)
 	root.set_meta("track_material", mats[0])
 	root.set_meta("flybys", t.flybys)
-	var night_mats: Array = root.get_meta("night_materials", [])
-	night_mats.append(mats[2])
-	root.set_meta("night_materials", night_mats)
 
 	var geo := Node3D.new()
 	geo.name = "Geometry"
@@ -128,7 +130,7 @@ static func _mesh(pieces: Array, see_through: PackedByteArray, pass_i: int) -> A
 				var b := pc.uv_b[i + k]
 				var m := pc.uv_m[i + k]
 				c2.append_array([b.x, b.y, m.x, m.y])
-				c3.append_array([ly.x, ly.y, ly.z, 0.0])
+				c3.append_array([ly.x, ly.y, ly.z, float(pc.sphere[tri])])
 	if pos.is_empty():
 		return null
 	var arrays := []
@@ -220,6 +222,9 @@ static func _add_sky(root: Node3D, t: Nfs6Track) -> void:
 	m.shader = preload("res://shaders/sky_dome.gdshader")
 	m.set_shader_parameter("textures", arr)
 	m.render_priority = Material.RENDER_PRIORITY_MIN
+	var night_mats: Array = root.get_meta("night_materials", [])
+	night_mats.append(m)
+	root.set_meta("night_materials", night_mats)
 	var mi := MeshInstance3D.new()
 	mi.name = "SkyDome"
 	mi.mesh = mesh

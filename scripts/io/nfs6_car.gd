@@ -14,6 +14,10 @@ const ADDON_MARK := "ADDON"
 ## (summed over R, G and B, 0..765).
 const PAINT_DIFF := 60
 const PAINT_ALPHA := 117
+## _paint_mask's witnesses: paints this saturated (chroma over mean), and how far (sum of rgb shares) a paint
+## texel's colour may stray from theirs.
+const WITNESS_SAT := 0.5
+const WITNESS_HUE := 0.25
 
 var folder := ""          # Cars/<folder>
 var traffic := false
@@ -285,7 +289,11 @@ func _read_textures(skins: Viv, car_fsh: Fsh) -> void:
 		img = _opaque(cop_img)
 		colours.clear()
 	elif colours.size() >= 2 and imgs.size() >= 2:
-		img = _paint_mask(imgs, colours)
+		# (The swatches themselves, not the double-strength colours: the grey comes out half as bright.)
+		var sw: Array[Color] = []
+		for c in colours:
+			sw.append(Color(c.r * 0.5, c.g * 0.5, c.b * 0.5))
+		img = _paint_mask(imgs, sw)
 	elif imgs.size() >= 2 and _estimate_swatches(imgs):
 		img = _paint_mask(imgs, _swatches)
 	else:
@@ -423,11 +431,49 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 		other.convert(Image.FORMAT_RGBA8)
 	var px := light.get_data()
 	var ox := other.get_data()
+	# Witnesses: the skins whose paint is strongly coloured (as measured where the pair
+	# differ: vehicle.ini's swatches can be off the skins). A texel that's paint is that colour
+	# in most of them; one that isn't (a lamp, a number plate: a darker skin can be darker all
+	# over, the black McLaren's) keeps its own colour.
+	var wit: Array[PackedByteArray] = []
+	var wit_hue: Array[Vector3] = []
+	var every: Array[PackedByteArray] = []
+	for j in imgs.size():
+		if imgs[j].get_size() != light.get_size():
+			continue
+		var w := imgs[j]
+		if w.get_format() != Image.FORMAT_RGBA8:
+			w = w.duplicate() as Image
+			w.convert(Image.FORMAT_RGBA8)
+		var wx := w.get_data()
+		every.append(wx)
+		var mean := Vector3.ZERO
+		for i in range(0, px.size(), 16):
+			if absi(px[i] - ox[i]) + absi(px[i + 1] - ox[i + 1]) + absi(px[i + 2] - ox[i + 2]) > PAINT_DIFF:
+				mean += Vector3(wx[i], wx[i + 1], wx[i + 2])
+		var sum := mean.x + mean.y + mean.z
+		if sum <= 0.0 or (maxf(mean.x, maxf(mean.y, mean.z)) - minf(mean.x, minf(mean.y, mean.z))) * 3.0 / sum < WITNESS_SAT:
+			continue
+		wit.append(wx)
+		wit_hue.append(mean / sum)
 	# (The swatch at double strength: grey * 2 swatch gives back the skin.)
 	var k := 255.0 / maxf(_luma(swatches[a]) * 255.0, 1.0)
 	for i in range(0, px.size(), 4):
 		var diff := absi(px[i] - ox[i]) + absi(px[i + 1] - ox[i + 1]) + absi(px[i + 2] - ox[i + 2])
-		if diff > PAINT_DIFF:
+		var paint := diff > PAINT_DIFF
+		var against := 0
+		for j in wit.size():
+			if not paint:
+				break
+			var t := Vector3(wit[j][i], wit[j][i + 1], wit[j][i + 2])
+			var sum := t.x + t.y + t.z
+			# (Too dark to tell its colour: a shadow drawn in the paint.)
+			if sum > 60.0 and absf(t.x / sum - wit_hue[j].x) + absf(t.y / sum - wit_hue[j].y) + absf(t.z / sum - wit_hue[j].z) > WITNESS_HUE:
+				against += 1
+		# (Most of them: a skin can be off its swatch.)
+		if paint and against * 2 > wit.size():
+			paint = false
+		if paint:
 			var grey := clampi(int((px[i] * 0.2126 + px[i + 1] * 0.7152 + px[i + 2] * 0.0722) * k * 0.5), 0, 255)
 			px[i] = grey
 			px[i + 1] = grey
@@ -435,6 +481,22 @@ static func _paint_mask(imgs: Array[Image], swatches: Array[Color]) -> Image:
 			px[i + 3] = PAINT_ALPHA
 		else:
 			px[i + 3] = 255
+			# Not paint but not the same in every skin either (a moulding's or an arch's edge,
+			# just under PAINT_DIFF): a neutral grey as bright as the middle of them, not the
+			# light skin's colour whatever the paint.
+			var lo := 255
+			var hi := 0
+			for e in every:
+				lo = mini(lo, e[i + 1])
+				hi = maxi(hi, e[i + 1])
+			if hi - lo > 16 and every.size() >= 3:
+				var v: Array[int] = []
+				for e in every:
+					v.append(int(e[i] * 0.2126 + e[i + 1] * 0.7152 + e[i + 2] * 0.0722))
+				v.sort()
+				px[i] = v[v.size() / 2]
+				px[i + 1] = px[i]
+				px[i + 2] = px[i]
 	light.set_data(light.get_width(), light.get_height(), false, Image.FORMAT_RGBA8, px)
 	return light
 
@@ -454,8 +516,9 @@ static func _to_car(v: Vector3) -> Vector3:
 func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 	var body := _Tris.new()
 	var glass := _Tris.new()
+	var lens := _Tris.new()   # ALPHA_ADD_ glass: lamp covers HP2 adds as a reflection only
 	var wheel_parts: Array[Dictionary] = []
-	var wheel_verts := PackedVector3Array()
+	var brake_parts: Array[Dictionary] = []
 	for part in model.model_parts("car"):
 		if part.geoprim < 0:
 			continue
@@ -472,8 +535,15 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 			wheel_parts.append({"name": part.name, "g": g})
 			continue
 		if part.texture == "wl00":
-			continue   # the brakes: on the wheel texture, which the body's material hasn't
-		var is_glass := pname.contains("TRANS_") or pname.contains("~EASVEHICLEGLASS") and not pname.contains("ADD_")
+			brake_parts.append(g)   # the brakes: on the wheel texture, riding with their wheels
+			continue
+		# (ALPHA_ADD_ glass black in its vertex colour is the lamps' covers and the like, which
+		# HP2 adds over them as a reflection only: clear glass, not a dark patch of the skin. A
+		# lit one, a light bar's, adds its texture: drawn with the body.)
+		if pname.contains("ALPHA_ADD_") and _dark_part(g):
+			lens.add(g, Vector3.ZERO)
+			continue
+		var is_glass := pname.contains("TRANS_") or pname.contains("~EASVEHICLEGLASS")
 		# Traffic's windows: HP2 blacks them out with their vertex colour, their UVs pointing at
 		# a sliver of the skin with anything in it (a number plate's green edge). The vertex
 		# colours can't be drawn here (car.gdshader reads COLOR as Porsche Unleashed's): they
@@ -485,17 +555,23 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 			uv.fill(_darkest_uv())
 			g.uv = uv
 		var zone := int(geomdata.get((part.name as String).to_lower(), {}).get("damagezoneid", "-1"))
-		var steering := pname.contains("STEERINGWHEEL")
-		var first := body.pos.size()
-		(glass if is_glass else body).add(g, Vector3.ZERO, zone, steering)
-		if steering:
-			wheel_verts.append_array(body.pos.slice(first))
+		(glass if is_glass else body).add(g, Vector3.ZERO, zone, pname.contains("STEERINGWHEEL"))
 	if body.pos.is_empty():
 		error = "no body in car.o"
 		return
+	# The steering wheel's column (SteeringColumn: some cars mark the column or its shroud
+	# with the wheel; that stays put). Before commit, as it may stop part of it turning.
+	var turns := PackedInt32Array()
+	for i in range(0, body.pos.size() - 2, 3):
+		if body.uv2[i].x > 0.5:
+			turns.append(i)
+	var column := SteeringColumn.fit(body.pos, turns)
+	for i: int in column.get("dropped", PackedInt32Array()):
+		for k in 3:
+			body.uv2[i + k] = Vector2.ZERO
 	var part := {"name": "body", "mesh": body.commit(), "center": Vector3.ZERO, "damaged": _damaged(body)}
-	if wheel_verts.size() >= 3:
-		part.steering = _column(wheel_verts)
+	if not column.is_empty():
+		part.steering = {"pivot": column.pivot, "axis": column.axis}
 		# The in-car view from the modelled cabin (HP2 had none): the eye behind the wheel, up
 		# the seat's height above its hub, but under the roof (the top of the car over it).
 		var col: Dictionary = part.steering
@@ -522,6 +598,8 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 	body_parts.append(part)
 	if not glass.pos.is_empty():
 		body_parts.append({"name": "glass", "mesh": glass.commit(), "center": Vector3.ZERO, "glass": true})
+	if not lens.pos.is_empty():
+		body_parts.append({"name": "lens", "mesh": lens.commit(), "center": Vector3.ZERO, "glass": true, "clarity": 1.0})
 	# The wheels in Nfs3Car's order: front left, front right, rear left, rear right (+X the left, +Z the front).
 	if wheel_parts.size() == 4:
 		var placed: Array[Dictionary] = []
@@ -536,6 +614,22 @@ func _read_model(model: Eagl, geomdata: Dictionary) -> void:
 			t.add(w.g, center)
 			var slot := (0 if center.z > 0.0 else 2) + (0 if center.x > 0.0 else 1)
 			placed.append({"name": w.name, "mesh": t.commit(), "center": center, "slot": slot})
+		# Each brake with the wheel nearest it, about the same hub.
+		var brakes := {}
+		for b in brake_parts:
+			var mid := Vector3.ZERO
+			for p: Vector3 in b.pos:
+				mid += _to_car(p)
+			mid /= maxf((b.pos as PackedVector3Array).size(), 1.0)
+			var near := 0
+			for k in placed.size():
+				if mid.distance_to(placed[k].center) < mid.distance_to(placed[near].center):
+					near = k
+			if not brakes.has(near):
+				brakes[near] = _Tris.new()
+			brakes[near].add(b, placed[near].center)
+		for k in brakes:
+			placed[k].brake = brakes[k].commit()
 		placed.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return x.slot < y.slot)
 		var slots := placed.map(func(x: Dictionary) -> int: return x.slot)
 		if slots == [0, 1, 2, 3]:
@@ -653,31 +747,6 @@ const EYE_ABOVE_WHEEL := 0.36
 const EYE_BELOW_ROOF := 0.13
 const EYE_NEAREST_WHEEL := 0.35
 const EYE_CLEARANCE := 0.15
-
-
-## The steering wheel's column: through the middle of its rim, along the direction its vertices
-## spread least (the wheel's a flat ring), pointing out through the front of the car.
-static func _column(verts: PackedVector3Array) -> Dictionary:
-	var mid := Vector3.ZERO
-	for v in verts:
-		mid += v
-	mid /= verts.size()
-	var cov := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
-	for v in verts:
-		var d := v - mid
-		cov.x += d * d.x
-		cov.y += d * d.y
-		cov.z += d * d.z
-	# The smallest eigenvector: power iteration on the inverse's stand-in (trace I - C).
-	var tr := cov.x.x + cov.y.y + cov.z.z
-	var m := Basis(Vector3(tr, 0, 0), Vector3(0, tr, 0), Vector3(0, 0, tr))
-	m.x -= cov.x
-	m.y -= cov.y
-	m.z -= cov.z
-	var axis := Vector3(0.1, 0.2, 1.0).normalized()
-	for k in 64:
-		axis = (m * axis).normalized()
-	return {"pivot": mid, "axis": axis if axis.z > 0.0 else -axis}
 
 
 ## HP2 bends its cars at run time (each vertex skinned to its zone's damage bone), so there's no

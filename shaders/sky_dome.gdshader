@@ -7,6 +7,9 @@ render_mode unshaded, cull_disabled, depth_draw_never, fog_disabled, shadows_dis
 
 uniform sampler2DArray textures : source_color, filter_linear_mipmap, repeat_enable;
 uniform float brightness = 1.0;
+// 1 at night (TrackWorld sets it, the material being among the track's night_materials): the
+// game has no night sky, so the day's goes dark and blue.
+uniform float night = 0.0;
 varying flat float layer;
 
 void vertex() {
@@ -19,6 +22,7 @@ void vertex() {
 
 void fragment() {
 	vec4 c = texture(textures, vec3(UV, layer));
-	ALBEDO = c.rgb * COLOR.rgb * brightness;
+	vec3 day = c.rgb * COLOR.rgb * brightness;
+	ALBEDO = mix(day, dot(day, vec3(0.3, 0.5, 0.2)) * vec3(0.05, 0.07, 0.14), night);
 	ALPHA = c.a * COLOR.a;
 }

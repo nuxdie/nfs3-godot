@@ -15,6 +15,9 @@ const FCE4_HEADER_END := 0x2038
 ## pursuit cars' alternative interiors (OND, OLD) are left out; the pop-up lamps (OL) and
 ## wheels are handled apart.
 const FCE4_BODY_PARTS := [":hb", ":olm", ":orm", ":ot", ":oc", ":od", ":oh", ":odl"]
+## Its side mirrors, left and right: parts of their own, which a crash can tear off (the
+## "loose" key, as Porsche Unleashed's; Car.tear_off).
+const FCE4_MIRRORS := {":olm": 35, ":orm": 36}
 ## FCE4 triangle flags: the windows have both of these set (the bits above say which window;
 ## 0x02 and 0x04 are set on some cars' windows and not others, 0x04 on plain body too).
 const FCE4_WINDOW := 0x28
@@ -504,6 +507,7 @@ func _parse_fce(d: PackedByteArray) -> void:
 	var glass_dmg_n := PackedVector3Array()
 	var body_panels := PackedInt32Array()
 	var glass_panels := PackedInt32Array()
+	var mirrors := {}   # FCE4_MIRRORS name -> {st, pos, normal, panels} (Arrays: built up in place)
 	if merged:
 		body_st = SurfaceTool.new()
 		body_st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -527,6 +531,13 @@ func _parse_fce(d: PackedByteArray) -> void:
 			return
 		var in_body := merged and pi in body_ids
 		var is_driver := in_body and pname == ":od"
+		var mirror: Dictionary = {}
+		if in_body and FCE4_MIRRORS.has(pname):
+			if not mirrors.has(pname):
+				var mst := SurfaceTool.new()
+				mst.begin(Mesh.PRIMITIVE_TRIANGLES)
+				mirrors[pname] = {"st": mst, "pos": [], "normal": [], "panels": []}
+			mirror = mirrors[pname]
 		var part_dmg := has_damage and in_body and header_end + maxi(damaged_off, damaged_norm_off) + (first_v + nv) * 12 <= d.size()
 		# A vertex belongs to every panel of the triangles round it, so the copies of it
 		# (unindexed) bend alike and the panels stay joined.
@@ -607,7 +618,7 @@ func _parse_fce(d: PackedByteArray) -> void:
 			if d.decode_u32(q + 4) >= nv or d.decode_u32(q + 8) >= nv or d.decode_u32(q + 12) >= nv:
 				continue
 			var glass := in_body and (d.decode_u32(q + 28) & FCE4_WINDOW) == FCE4_WINDOW
-			var to := driver_st if is_driver else glass_st if glass else st
+			var to: SurfaceTool = mirror.st if not mirror.is_empty() else driver_st if is_driver else glass_st if glass else st
 			# Mirroring X flips handedness; emit the triangle in reverse order to keep it front-facing.
 			for k in [2, 1, 0]:
 				var vi := d.decode_u32(q + 4 + k * 4)
@@ -626,9 +637,14 @@ func _parse_fce(d: PackedByteArray) -> void:
 					to.set_uv2(Vector2(1.0 if steering.has(vi) else 0.0, 0.0))
 				to.add_vertex(pos + offset)
 				if in_body and not is_driver:
-					(glass_dmg if glass else body_dmg).append(bent + offset)
 					var bn := _v(d, header_end + damaged_norm_off + (first_v + vi) * 12).normalized() if part_dmg \
 						else _v(d, np).normalized()
+					if not mirror.is_empty():
+						mirror.pos.append(bent + offset)
+						mirror.normal.append(bn)
+						mirror.panels.append(int(panels.get(vi, 0)))
+						continue
+					(glass_dmg if glass else body_dmg).append(bent + offset)
 					(glass_dmg_n if glass else body_dmg_n).append(bn)
 					(glass_panels if glass else body_panels).append(int(panels.get(vi, 0)))
 		if in_body:
@@ -656,6 +672,14 @@ func _parse_fce(d: PackedByteArray) -> void:
 			body_parts.append(driver)
 		if not glass_dmg.is_empty():
 			body_parts.append(glass)
+		for mname: String in mirrors:
+			var m: Dictionary = mirrors[mname]
+			var mp := {"name": mname, "mesh": (m.st as SurfaceTool).commit(), "center": main_center,
+				"loose": FCE4_MIRRORS[mname]}
+			if has_damage:
+				mp.damaged = {"pos": PackedVector3Array(m.pos), "normal": PackedVector3Array(m.normal),
+					"panels": PackedInt32Array(m.panels)}
+			body_parts.append(mp)
 	wheels.sort_custom(func(a, b): return a.slot < b.slot)
 
 

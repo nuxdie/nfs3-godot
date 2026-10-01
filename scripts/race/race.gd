@@ -13,6 +13,7 @@ const ESCAPE_DISTANCE := 380.0
 const HEAT_STEP := 20.0           # s of unbroken chase per heat level (max 3)
 const RIVAL_HOLD := 5.0           # s a busted rival sits at the side of the road
 const MAX_TICKETS := 3
+const PLAYER_HOLD := 6.0          # s the tower marks you BUSTED while the officer writes it up
 const SHORTCUT_BACK := 30         # nodes behind and ahead of its last a car off on a shortcut
 const SHORTCUT_AHEAD := 250       # is looked for along the lap (_update_progress)
 const RADIO_DB := -3.0   # the police radio, a little under the voices on the spot
@@ -485,10 +486,12 @@ func _spawn_cars() -> void:
 		if grid_ai:
 			grid_ai.lane = side * col
 		var drv: Dictionary = grid[i].get_meta("driver", {})
+		# Your row in the tower says YOU (the car's name is under it).
+		var short: String = "YOU" if grid[i] == player and not spectating() else drv.get("short", grid[i].display_name)
 		racers.append({"car": grid[i], "name": grid[i].display_name, "lap": -1,
-			"color": drv.get("color", UiKit.ACCENT), "short": drv.get("short", grid[i].display_name), "max_lap": -1, "node": n,
+			"color": drv.get("color", UiKit.ACCENT), "short": short, "max_lap": -1, "node": n,
 			"progress": path.progress_at(grid[i].global_position, n), "total": 0.0, "finished": false, "time": 0.0, "best": INF, "lap_start": 0.0,
-			"bust_t": 0.0, "cool": 0.0})
+			"bust_t": 0.0, "cool": 0.0, "model": grid[i].car_data.display_name, "tickets": 0, "held_t": 0.0})
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
 		_spawn_cops()
 	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
@@ -1347,6 +1350,7 @@ func player_racer() -> Dictionary:
 func _update_pursuit(dt: float) -> void:
 	for r in racers:
 		r.cool = maxf(r.cool - dt, 0.0)
+		r.held_t = maxf(r.held_t - dt, 0.0)
 	for cop in cops.duplicate():
 		var ai := _controller(cop)
 		if ai.chasing:
@@ -1354,7 +1358,6 @@ func _update_pursuit(dt: float) -> void:
 				var was_player := ai.target == player
 				_stop_chase(cop)
 				if was_player and _chasers(player).is_empty():
-					hud.flash("Evaded", 1.5)
 					speech.say(_officer(cop), [32, 33, 34, 35], RADIO_DB)
 		else:
 			var speeder := _speeder_near(cop)
@@ -1372,10 +1375,7 @@ func _update_pursuit(dt: float) -> void:
 		_heli = null
 	else:
 		pursuit_time += dt
-		var h := mini(1 + int(pursuit_time / HEAT_STEP), 3)
-		if h > heat and heat > 0:
-			hud.flash("Heat level %d" % h, 1.5, "alert")
-		heat = h
+		heat = mini(1 + int(pursuit_time / HEAT_STEP), 3)
 		# Backup units: one per heat level above the first.
 		_backup_t -= dt
 		var backup := cops.filter(func(c): return c.has_meta("backup")).size()
@@ -1484,7 +1484,6 @@ func _start_chase(cop: Car, target: Car) -> void:
 	# In at the back; _assign_slots moves it up as it gets further up the road than the others.
 	ai.chase_slot = 99
 	if target == player and _chasers(target).is_empty():
-		hud.flash("PURSUIT!", 1.5, "alert")
 		speech.say("copspch", range(10))
 		_radio_call(cop, _speed_call())
 	ai.target = target
@@ -1507,20 +1506,21 @@ func _stop_chase(cop: Car) -> void:
 
 func _bust() -> void:
 	tickets += 1
+	var pr := player_racer()
+	pr.tickets = tickets
+	pr.held_t = PLAYER_HOLD
 	var arresting: Car = _chasers(player)[0] if not _chasers(player).is_empty() else null
 	_send_officer(_chasers(player), player)
 	for cop in _chasers(player):
 		_stop_chase(cop)
-	player_racer().cool = 10.0
+	pr.cool = 10.0
 	if Game.mode == Game.Mode.HOT_PURSUIT and tickets >= MAX_TICKETS:
-		hud.flash("BUSTED - you're under arrest!", 3.0, "alert")
 		speech.say("copspch", [32, 33, 34])
 		speech.say(_officer(arresting), [44, 45, 46, 47], RADIO_DB)
 		_end_race(true)
 		return
 	var fine: int = TICKET_FINES[mini(tickets - 1, TICKET_FINES.size() - 1)]
 	fines += fine
-	hud.flash("BUSTED! Ticket #%d - $%d fine" % [tickets, fine], 3.0, "alert")
 	speech.say("copspch", 19 if Game.mode == Game.Mode.HOT_PURSUIT and tickets == MAX_TICKETS - 1 else [16, 17, 18])
 
 
@@ -1530,7 +1530,8 @@ func _bust_rival(r: Dictionary) -> void:
 	for cop in _chasers(r.car):
 		_stop_chase(cop)
 	r.cool = RIVAL_HOLD + 8.0
-	hud.flash("%s busted!" % r.name, 2.0)
+	r.tickets += 1
+	r.held_t = RIVAL_HOLD
 	var ai := _controller(r.car)
 	if ai == null:
 		return
@@ -1576,7 +1577,6 @@ func _call_helicopter() -> void:
 	add_child(_heli)
 	var at := player.global_transform * Vector3(0, 60.0, -180.0)
 	_heli.setup(_heli_data, player, at, Game.night)
-	hud.flash("Air support!", 1.5, "alert")
 	# On the radio: it calls in, the dispatcher answers, it's on its way; then it finds him.
 	var air := randi() % 3   # Air One, Air 3, Rotor 1
 	speech.say("helicop", air, RADIO_DB)
@@ -1697,9 +1697,7 @@ func _spawn_roadblock(with_spikes: bool) -> void:
 		if not hit.is_empty():
 			xf.origin = hit.position
 		strip.global_transform = xf
-		strip.punctured.connect(_on_punctured)
 		spikes.append(strip)
-	hud.flash("Roadblock ahead!" if not with_spikes else "Roadblock - spikes!", 2.0, "alert")
 	# The officer asks, the dispatcher clears it, the officer reports it done.
 	var off := _officer(cops[0] if not cops.is_empty() else null)
 	speech.say(off, [55, 56] if with_spikes else [51, 52], RADIO_DB)
@@ -1823,13 +1821,6 @@ func _clear_roadblock() -> void:
 			_controller(cop).gap = _gap
 		# The next one only after another stretch of chase.
 		_block_t = 20.0
-
-
-func _on_punctured(c: Car) -> void:
-	if c == player:
-		hud.flash("Spiked! Tyres shredded", 2.5, "alert")
-	elif not c.is_cop and position_of(c) > 0:
-		hud.flash("%s hit the spikes" % c.display_name, 1.5)
 
 
 # ------------------------------------------------------------------ resets

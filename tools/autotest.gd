@@ -307,6 +307,10 @@ func _physics_process(dt: float) -> void:
 		_traffic_test()
 	if _heat > 0 and race.state == 2 and not _heated:
 		_heat_up(p)
+	# --spike=S: S s in, the player's tyres shredded as if by a spike strip (the rim sparks).
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--spike=") and t >= float(arg.trim_prefix("--spike=")) and t - dt < float(arg.trim_prefix("--spike=")):
+			p.puncture()
 	# --no-ai-speeds: without the speed tables only.
 	if "--no-ai-speeds" in OS.get_cmdline_user_args() and race.path and not race.path.ai_speeds[0].is_empty():
 		race.path.ai_speeds = [PackedFloat32Array(), PackedFloat32Array()]

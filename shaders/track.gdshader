@@ -53,12 +53,15 @@ varying flat float layer;
 // Hot Pursuit 2's layered surfaces (Nfs6TrackBuilder): an overlay texture blended over the
 // base by a mask's alpha (rock into grass, the road's edge into the verge) and a shadow
 // layer multiplied in (trees' shadows on the road). CUSTOM2 = overlay uv, mask uv;
-// CUSTOM1.zw = shadow uv; CUSTOM3.xyz = overlay, mask, shadow layer + 1 (0: none).
+// CUSTOM1.zw = shadow uv; CUSTOM3.xyz = overlay, mask, shadow layer + 1 (0: none); CUSTOM3.w
+// 1 where the texture is a sphere map of the sky (the Tropics' puddles): mapped by the view's
+// reflection off the surface, as the game does, rather than by the stored uvs.
 uniform bool layered = false;
 varying vec2 uv_over;
 varying vec2 uv_mask;
 varying vec2 uv_shadow;
 varying flat vec3 extra_layers;
+varying flat float sphere_mapped;
 // 1 on a front/back quad pair sharing the same corners (road signs): cull the back face
 // so the pair doesn't z-fight.
 varying flat float one_sided;
@@ -95,6 +98,7 @@ void vertex() {
 		uv_mask = CUSTOM2.zw;
 		uv_shadow = CUSTOM1.zw;
 		extra_layers = CUSTOM3.xyz;
+		sphere_mapped = CUSTOM3.w;
 	}
 	one_sided = mod(UV2.y, 2.0);
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -222,6 +226,17 @@ void fragment() {
 		}
 		if (extra_layers.z > 0.5) {
 			c.rgb *= mix(vec3(1.0), shade.rgb, shade.a);
+		}
+		if (sphere_mapped > 0.5) {
+			// View-space reflection, sphere-mapped; flat surfaces reflect the sky over them.
+			vec3 n = normalize((VIEW_MATRIX * vec4(world_normal.y < 0.0 ? -world_normal : world_normal, 0.0)).xyz);
+			vec3 r = reflect(normalize(VERTEX), n);
+			float m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
+			vec4 sky = textureLod(textures, vec3(r.xy / m * vec2(1.0, -1.0) + 0.5, layer), 0.0);
+			// Standing water: dark, the sky in it stronger the flatter it's seen (Fresnel).
+			float ndv = clamp(dot(-normalize(VERTEX), n), 0.0, 1.0);
+			float fres = 0.25 + 0.55 * pow(1.0 - ndv, 3.0);
+			c = vec4(mix(vec3(0.09, 0.1, 0.11), sky.rgb, fres), 1.0);
 		}
 	}
 	vec3 light = COLOR.rgb * brightness * night_tint * car_shadows();

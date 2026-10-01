@@ -12,7 +12,7 @@ func _ready() -> void:
 	var menu := get_tree().current_scene
 	menu.show_screen("garage")
 	var mine: Array = Game.garage_cars()
-	menu._garage.open(mine[0])
+	menu._dealer.open(mine[0])
 	for k in 150:
 		await get_tree().process_frame
 	_shot("gs_%s_own" % series)
