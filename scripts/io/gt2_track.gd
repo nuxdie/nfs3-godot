@@ -73,6 +73,16 @@ const MIN_VERGE := 3.0
 const MIN_HALF := 5.0
 ## Objects wider than this (m) are backdrop hills and tree lines (drawn behind the rest).
 const BACKDROP_SPAN := 100.0
+## The placed objects' lists (header 0x118), each one seen from the chunks its bit is set in
+## (a chunk's u32 at 0x0C).
+const OBJECT_LISTS := 32
+## Polygons this near (m) each other's plane, and as parallel (their normals' dot), lie in
+## the same plane (_layer); one is moved this far (m) off the other.
+const TIE := 0.005
+const TIE_PARALLEL := 0.99
+const LAYER := 0.01
+const TIE_PASSES := 4
+const TIE_OVERLAP := 0.02
 ## How many nodes either side the lap's centre line is eased over (_smooth).
 const LINE_EASE := 2
 ## The centre line's nodes are this far apart (m).
@@ -133,9 +143,6 @@ static func load_dir(dir: String, _night := false) -> Gt2Track:
 	t._read_header()
 	t._read_chunks()
 	t.backdrop = [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
-	# (The backdrop hills' and tree lines' huge faces reach over the road, up high or standing
-	# across it: the PS1 draws them first, under everything nearer, so it never shows.)
-	t.backdrop_far = true
 	t._read_objects()
 	t._make_vroad()
 	if t.vroad.size() < 10:
@@ -363,6 +370,7 @@ func _add_shape(p: int, origin: Vector3, unit: float, object: bool, xf: Transfor
 		var v := Vector3(d.decode_s16(q), d.decode_s16(q + 4), d.decode_s16(q + 2)) if not object \
 			else Vector3(d.decode_s16(q), d.decode_s16(q + 2), -d.decode_s16(q + 4))
 		verts.append(xf * (origin + v * unit))
+	var polys: Array[Vector2i] = []   # (q, list)
 	for li in 8:
 		var list_at := d.decode_u32(p + 4 + li * 4)
 		var count := d.decode_s16(p + 48 + li * 2)
@@ -371,26 +379,152 @@ func _add_shape(p: int, origin: Vector3, unit: float, object: bool, xf: Transfor
 			var q := list_at + k * stride
 			if q + stride > d.size():
 				break
-			_add_poly(q, li, object, verts, pieces)
+			polys.append(Vector2i(q, li))
+	var shifts := PackedVector3Array()
+	shifts.resize(polys.size())
+	var backed := PackedByteArray()
+	backed.resize(polys.size())
+	if not object:
+		shifts = _layer(polys, verts, backed)
+	for k in polys.size():
+		_add_poly(polys[k].x, polys[k].y, object, verts, pieces, shifts[k], backed[k] == 1)
 
 
-func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces: Array) -> void:
-	var d := _d
-	var w0 := d.decode_u32(q)
-	var w1 := d.decode_u32(q + 4)
-	var quad: bool = QUAD_LIST[li]
+## A polygon's corners (indices into its shape's vertices), or none if they aren't all there.
+func _corners(q: int, li: int, object: bool, n_verts: int) -> PackedInt32Array:
+	var w0 := _d.decode_u32(q)
+	var w1 := _d.decode_u32(q + 4)
 	var idx := PackedInt32Array()
 	if object:
 		idx = PackedInt32Array([w0 & 0x3FF, (w0 >> 10) & 0x3FF, (w0 >> 20) & 0x3FF])
-		if quad:
+		if QUAD_LIST[li]:
 			idx.append(w1 & 0x3FF)
 	else:
 		idx = PackedInt32Array([w0 & 0x1FF, (w0 >> 9) & 0x1FF, (w0 >> 18) & 0x1FF])
-		if quad:
+		if QUAD_LIST[li]:
 			idx.append(w1 & 0x1FF)
 	for i in idx:
-		if i >= verts.size():
-			return
+		if i >= n_verts:
+			return PackedInt32Array()
+	return idx
+
+
+## How far each of a chunk's polygons is moved (m) so the ones lying in the same plane as
+## another don't fight it in the depth buffer (the PS1 has none: it drew them in an order).
+## Of two overlapping in a plane, a textured one is over an untextured one (the plain
+## fillers under the tarmac), and a smaller one over a bigger one (the lane lines, kerbs,
+## signs on walls). The one over is lifted (a decal) or the one under sunk (a filler) by
+## LAYER, off the face's front: up, or towards the middle of the chunk for walls. Two back
+## to back (a sign's face and its back) show their fronts only instead: `backed` 1.
+func _layer(polys: Array[Vector2i], verts: PackedVector3Array, backed: PackedByteArray) -> PackedVector3Array:
+	var middle := Vector3.ZERO
+	for v in verts:
+		middle += v
+	middle /= maxf(verts.size(), 1)
+	var shifts := PackedVector3Array()
+	shifts.resize(polys.size())
+	var n := polys.size()
+	var normals := PackedVector3Array()
+	var centres := PackedVector3Array()
+	var areas := PackedFloat32Array()
+	var boxes: Array[AABB] = []
+	var corners: Array[PackedVector3Array] = []
+	for pq in polys:
+		var idx := _corners(pq.x, pq.y, false, verts.size())
+		var cs := PackedVector3Array()
+		for i in idx:
+			cs.append(verts[i])
+		corners.append(cs)
+		var nrm := Vector3.ZERO
+		var mid := Vector3.ZERO
+		var box := AABB(cs[0], Vector3.ZERO) if cs.size() > 0 else AABB()
+		for k in range(1, cs.size() - 1):
+			nrm += (cs[k] - cs[0]).cross(cs[k + 1] - cs[0])
+		for c in cs:
+			mid += c
+			box = box.expand(c)
+		areas.append(nrm.length() * 0.5)
+		normals.append(nrm.normalized())
+		centres.append(mid / maxf(cs.size(), 1))
+		boxes.append(box.grow(TIE))
+	var ties := []   # [over, under, its front]
+	for i in n:
+		if areas[i] < 1e-4:
+			continue
+		for j in range(i + 1, n):
+			if areas[j] < 1e-4 or not boxes[i].intersects(boxes[j]):
+				continue
+			if absf(normals[i].dot(normals[j])) < TIE_PARALLEL \
+					or absf((centres[j] - corners[i][0]).dot(normals[i])) > TIE:
+				continue
+			if not _overlap(corners[i], corners[j], normals[i]):
+				continue
+			if normals[i].dot(normals[j]) < 0.0:
+				backed[i] = 1
+				backed[j] = 1
+				continue
+			var ti: bool = TEXTURED_LIST[polys[i].y]
+			var tj: bool = TEXTURED_LIST[polys[j].y]
+			var over := i if (ti and not tj) or (ti == tj and areas[i] < areas[j]) else j
+			var under := j if over == i else i
+			var front := normals[over]
+			if absf(front.y) >= 0.5:
+				front = Vector3.UP
+			elif front.dot(middle - centres[over]) < 0.0:
+				front = -front
+			ties.append([over, under, front])
+	# (Lifted till each is over all it should be: a line over a band over the tarmac.)
+	for pass_i in TIE_PASSES:
+		var moved := false
+		for t: Array in ties:
+			var over: int = t[0]
+			var under: int = t[1]
+			var front: Vector3 = t[2]
+			var gap := shifts[over].dot(front) - shifts[under].dot(front)
+			if gap >= LAYER - 1e-4:
+				continue
+			moved = true
+			if TEXTURED_LIST[polys[under].y]:
+				shifts[over] += front * (LAYER - gap)
+			else:
+				shifts[under] -= front * (LAYER - gap)
+		if not moved:
+			break
+	return shifts
+
+
+## Whether two convex polygons in a plane (normal `nrm`) overlap by more than TIE_OVERLAP
+## (neighbours sharing an edge don't): no edge of either separates them.
+static func _overlap(a: PackedVector3Array, b: PackedVector3Array, nrm: Vector3) -> bool:
+	for poly in [a, b]:
+		for k in poly.size():
+			var axis: Vector3 = (poly[(k + 1) % poly.size()] - poly[k]).cross(nrm)
+			if axis.length_squared() < 1e-10:
+				continue
+			axis = axis.normalized()
+			var lo_a := INF
+			var hi_a := -INF
+			var lo_b := INF
+			var hi_b := -INF
+			for v in a:
+				lo_a = minf(lo_a, v.dot(axis))
+				hi_a = maxf(hi_a, v.dot(axis))
+			for v in b:
+				lo_b = minf(lo_b, v.dot(axis))
+				hi_b = maxf(hi_b, v.dot(axis))
+			if minf(hi_a, hi_b) - maxf(lo_a, lo_b) < TIE_OVERLAP:
+				return false
+	return true
+
+
+func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces: Array, shift := Vector3.ZERO,
+		cull := false) -> void:
+	var d := _d
+	var w1 := d.decode_u32(q + 4)
+	var quad: bool = QUAD_LIST[li]
+	var idx := _corners(q, li, object, verts.size())
+	if idx.is_empty():
+		return
 	# Colours, one per corner on the gouraud ones: a textured face's tint its texture (128 as
 	# it is), an untextured one's its colour (255 full) (_shade).
 	var full := 128.0 if TEXTURED_LIST[li] else 255.0
@@ -427,9 +561,9 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 	# Quads go round their edge, as the cars' (0 1 2 3).
 	var tris := [[0, 1, 2]] if not quad else [[0, 1, 2], [0, 2, 3]]
 	for tri in tris:
-		var a := verts[idx[tri[0]]]
-		var b := verts[idx[tri[1]]]
-		var c := verts[idx[tri[2]]]
+		var a := verts[idx[tri[0]]] + shift
+		var b := verts[idx[tri[1]]] + shift
+		var c := verts[idx[tri[2]]] + shift
 		var n := (b - a).cross(c - a)
 		if n.length_squared() < 1e-8:
 			continue
@@ -442,12 +576,12 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 		# by the swap, the objects' in z), anticlockwise. Objects show their fronts only, as
 		# the PS1 draws them (their big hillsides would hang over the road from below).
 		for k in [tri[0], tri[2], tri[1]]:
-			piece.pos.append(verts[idx[k]])
+			piece.pos.append(verts[idx[k]] + shift)
 			piece.uv.append(uv[k])
 			piece.colour.append(cols[k])
 		piece.tex.append(img)
 		piece.scroll.append(Vector2.ZERO)
-		if object:
+		if object or cull:
 			piece.one_sided.resize(piece.tex.size())
 			piece.one_sided[piece.tex.size() - 1] = 1
 		if up and not object:
@@ -473,12 +607,18 @@ func _read_objects() -> void:
 	for k in n_types:
 		var o := d.decode_u32(lod_table + 4 + k * 4)
 		meshes.append(d.decode_u32(o + 8) if d.decode_s32(o) > 0 else 0)   # the nearest LOD's
-	var pieces := [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
-	var far := [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
-	for li in 33:
+	# Each list is drawn only from the chunks whose mask (at 0x0C) has its bit: its backdrop
+	# hills and tree lines a group shown so (they'd hang in the sky over a stretch GT2 hides
+	# them from).
+	for c in _chunk_at.size():
+		view_masks.append([_centre(c), d.decode_u32(_chunk_at[c] + 0x0C)])
+	for li in OBJECT_LISTS:
 		var o := d.decode_u32(0x118 + li * 4)
 		if o <= 0 or o + 4 > d.size():
 			continue
+		var pieces := [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
+		var far := [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
+		var at := Vector3.ZERO
 		for k in d.decode_s32(o):
 			var e := o + 4 + k * 28
 			if e + 28 > d.size():
@@ -489,31 +629,37 @@ func _read_objects() -> void:
 			var rot := Vector3(d.decode_s16(e), d.decode_s16(e + 2), d.decode_s16(e + 4)) * TAU / 4096.0
 			var scale := Vector3(d.decode_s16(e + 8), d.decode_s16(e + 10), d.decode_s16(e + 12)) / 4096.0
 			var pos := _v32(e + 16)
+			at = pos
 			# (The meshes come mirrored in z, as the chunks' vertices by their swap: turns about
 			# x and y go the other way.)
 			var basis := Basis.from_euler(Vector3(-rot.x, -rot.y, rot.z), EULER_ORDER_YXZ).scaled(scale)
 			var mesh := meshes[kind]
 			var unit := pow(2.0, d.decode_s32(mesh + 84) - 16) / 4096.0
-			# (The backdrop hills and tree lines are to be seen, not run into: Backdrop.)
+			# (The backdrop hills and tree lines are to be seen, not run into, and drawn behind
+			# the rest: the PS1 draws them first, under everything nearer.)
 			var backdrop_mesh := _mesh_span(mesh) * unit > BACKDROP_SPAN
 			_add_shape(mesh, Vector3.ZERO, unit, true, Transform3D(basis, pos), far if backdrop_mesh else pieces)
-	for k in 3:
-		backdrop[k].pos.append_array(far[k].pos)
-		backdrop[k].uv.append_array(far[k].uv)
-		backdrop[k].colour.append_array(far[k].colour)
-		backdrop[k].tex.append_array(far[k].tex)
-		backdrop[k].scroll.append_array(far[k].scroll)
-		backdrop[k].one_sided.append_array(far[k].one_sided)
-	# (The road kind of the backdrop would be road: as scenery, without the solid bodies.)
-	backdrop[Kind.SCENERY].pos.append_array(backdrop[Kind.ROAD].pos)
-	backdrop[Kind.SCENERY].uv.append_array(backdrop[Kind.ROAD].uv)
-	backdrop[Kind.SCENERY].colour.append_array(backdrop[Kind.ROAD].colour)
-	backdrop[Kind.SCENERY].tex.append_array(backdrop[Kind.ROAD].tex)
-	backdrop[Kind.SCENERY].scroll.append_array(backdrop[Kind.ROAD].scroll)
-	backdrop[Kind.SCENERY].one_sided.append_array(backdrop[Kind.ROAD].one_sided)
-	backdrop[Kind.ROAD] = _piece(Kind.ROAD)
-	if pieces[Kind.SCENERY].pos.size() + pieces[Kind.ROAD].pos.size() > 0:
-		chunks.append({"center": _start, "pieces": pieces})
+		# (The rest are drawn from anywhere: from a chunk that leaves them out, GT2's camera
+		# faces away from them, ours may not; and the depth buffer keeps them in their place.)
+		if pieces[Kind.SCENERY].pos.size() + pieces[Kind.ROAD].pos.size() > 0:
+			chunks.append({"center": at, "pieces": pieces, "group": -1, "name": "Objects%02d" % li})
+		# (The road kind of the backdrop would be road: as scenery, without the solid bodies.)
+		_append_piece(far[Kind.SCENERY], far[Kind.ROAD])
+		far[Kind.ROAD] = _piece(Kind.ROAD)
+		if far[Kind.SCENERY].pos.size() > 0:
+			chunks.append({"center": at, "pieces": far, "group": li, "far": true, "name": "Backdrop%02d" % li})
+
+
+static func _append_piece(to: Piece, from: Piece) -> void:
+	to.pos.append_array(from.pos)
+	to.uv.append_array(from.uv)
+	to.colour.append_array(from.colour)
+	to.tex.append_array(from.tex)
+	to.scroll.append_array(from.scroll)
+	# (one_sided may be shorter than tex: none past its end are.)
+	if not from.one_sided.is_empty():
+		to.one_sided.resize(to.tex.size() - from.tex.size())
+		to.one_sided.append_array(from.one_sided)
 
 
 ## A mesh's widest reach across (its vertices' x or z span, in its own units).

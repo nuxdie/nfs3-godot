@@ -30,6 +30,36 @@ func odd_marks(near: Array, reach := 1000.0) -> Array:
 			out.append("  skid #%d  x %s  y %s  z %s  at %s  colour %s" % [i, xf.basis.x, xf.basis.y,
 				xf.basis.z, xf.origin, multimesh.get_instance_color(i)])
 	out.push_front("  skid marks laid %d of %d, odd %d" % [laid, multimesh.instance_count, out.size()])
+	out.append_array(_gpu_mismatch())
+	return out
+
+
+## Debug: where the GPU's copy of the instances differs from the CPU's (which is all the
+## other calls read back).
+func _gpu_mismatch() -> Array:
+	var rd := RenderingServer.get_rendering_device()
+	var rid := RenderingServer.multimesh_get_buffer_rd_rid(multimesh.get_rid())
+	if rd == null or not rid.is_valid():
+		return ["  skid GPU buffer: can't read it here"]
+	var gpu := rd.buffer_get_data(rid).to_float32_array()
+	var cpu := multimesh.buffer
+	var stride := 20   # 12 transform, 4 colour, 4 custom
+	var bad := []
+	var n := multimesh.instance_count
+	for i in mini(gpu.size(), cpu.size()) / stride:
+		# (The last few written haven't been uploaded yet: that waits for the frame's draw.)
+		if posmod(_next - 1 - i, n) < 16:
+			continue
+		for k in stride:
+			var a := gpu[i * stride + k]
+			var b := cpu[i * stride + k]
+			if not is_equal_approx(a, b):
+				bad.append(i)
+				break
+	var out := ["  skid GPU buffer: %d floats vs CPU %d, instances differing %d" % [gpu.size(), cpu.size(), bad.size()]]
+	for i: int in bad.slice(0, 8):
+		out.append("    #%d gpu %s" % [i, gpu.slice(i * stride, i * stride + stride)])
+		out.append("    #%d cpu %s" % [i, cpu.slice(i * stride, i * stride + stride)])
 	return out
 
 
@@ -53,7 +83,14 @@ func _init(capacity: int, atlas: Texture2D = null) -> void:
 	mm.use_custom_data = true   # x: which skid texture
 	mm.mesh = plane
 	mm.instance_count = capacity
-	# All drawn from the start: unwritten instances are zero-scaled, so they draw nothing.
+	# Godot only uploads the 512-instance regions that have been written to, and the GPU
+	# buffer starts out as whatever memory it was given (NaNs, or an old buffer's floats,
+	# drawn as huge dark discs and bands): upload the whole of it once, zeroed. Only the
+	# instances laid so far are drawn (add() raises the count until the ring wraps).
+	var zeros := PackedFloat32Array()
+	zeros.resize(capacity * 20)   # 12 transform, 4 colour, 4 custom
+	mm.buffer = zeros
+	mm.visible_instance_count = 0
 	cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# Spans the whole track; a fixed box spares recomputing bounds on every new segment.
 	mm.custom_aabb = AABB(Vector3(-1e5, -1e4, -1e5), Vector3(2e5, 2e4, 2e5))
@@ -77,3 +114,5 @@ func add(a: Vector3, b: Vector3, n: Vector3, alpha: float, variant := 0, width :
 	multimesh.set_instance_color(_next, Color(1, 1, 1, alpha))
 	multimesh.set_instance_custom_data(_next, Color(variant, 0, 0, 0))
 	_next = (_next + 1) % multimesh.instance_count
+	if multimesh.visible_instance_count != -1:
+		multimesh.visible_instance_count = -1 if _next == 0 else maxi(multimesh.visible_instance_count, _next)

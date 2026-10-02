@@ -87,13 +87,16 @@ class Piece:
 	var one_sided := PackedByteArray()
 
 
-## Per chunk: {center, pieces: [Piece ROAD, Piece GROUND, Piece SCENERY]}.
+## Per chunk: {center, pieces: [Piece ROAD, Piece GROUND, Piece SCENERY]}; optionally
+## group (int: drawn from any distance, and if >= 0 only from where `view_masks` has its
+## bit), far (bool: drawn behind everything nearer, whatever its depth: track.gdshader's
+## far_away; not solid) and name (its meshes').
 var chunks: Array[Dictionary] = []
+## Gran Turismo 2's: per place on the course [position, bit mask of the chunk groups seen
+## from there] (ViewGroups shows the nearest's).
+var view_masks: Array = []
 ## Scenery on the horizon (see BACKDROP_REACH), one Piece per kind.
 var backdrop: Array = []
-## The backdrop is drawn behind everything nearer, whatever its depth (track.gdshader's
-## far_away): Gran Turismo 2's.
-var backdrop_far := false
 ## The animated props ("Anim": people, the Alps' rescue helicopter, the Autobahn's train,
 ## Auvergne's van and church bell, Zone Industrielle's cranes): {name, piece (a Piece about
 ## the prop's own origin), keys (KeyframeMover's {pos, rot, scale}, ANIM_KEYS_PER_SECOND),

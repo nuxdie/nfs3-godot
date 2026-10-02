@@ -110,7 +110,9 @@ void vertex() {
 	// (Written for all, as Godot then takes it for all.)
 	POSITION = PROJECTION_MATRIX * (MODELVIEW_MATRIX * vec4(VERTEX, 1.0));
 	if (far_away) {
-		POSITION.z *= 0.001;
+		// (Squeezed, its own faces still in order, and lifted clear of Gt2Sky's dome, which is
+		// at w * 1.2e-7: steps of a 24-bit depth buffer, as a SubViewport's may be.)
+		POSITION.z = POSITION.z * 0.002 + POSITION.w * 3.6e-7;
 	}
 }
 

@@ -100,6 +100,16 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 
 	for ci in t.chunks.size():
 		var c: Dictionary = t.chunks[ci]
+		if c.has("group"):
+			_add_group(geo, c, see_through, mats)
+			if c.get("far", false):
+				continue
+			_add_ground(road, c.pieces[Nfs5Track.Kind.ROAD], SURFACE_ROAD)
+			var g := _split_steep(c.pieces[Nfs5Track.Kind.GROUND], see_through, passable)
+			_add_ground(terrain, g[0], SURFACE_GROUND)
+			_add_faces(scenery, g[1])
+			_add_solid(scenery, cam_block, c.pieces[Nfs5Track.Kind.SCENERY], passable)
+			continue
 		var taken := _take_rails(c.pieces, rail_images, rail_mesh)
 		var pieces: Array = taken[0]
 		_add_faces(scenery, taken[1])
@@ -114,10 +124,10 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[PASS_OPAQUE], Nfs3TrackBuilder.DRAW_DISTANCE)
 			rail_mesh = Nfs3TrackBuilder._rail_arrays()
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
-	if t.backdrop_far:
-		for mi in geo.get_children():
-			if mi is MeshInstance3D and mi.name.begins_with("Backdrop"):
-				mi.set_instance_shader_parameter("far_away", true)
+	if not t.view_masks.is_empty():
+		var vg := ViewGroups.new()
+		vg.masks = t.view_masks
+		geo.add_child(vg)
 	var night_only: Array = root.get_meta("night_only", [])
 	night_only.append_array(_add_props(t, geo, see_through, mats))
 	var particles := PuParticles.build(t, Game.pu_root) if Game.quality != Game.Quality.LOW else null
@@ -149,6 +159,20 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 	ai_walls.collision_layer = Nfs3TrackBuilder.AI_WALL_LAYER
 	root.add_child(ai_walls)
 	return path
+
+
+## A chunk group's meshes (Gran Turismo 2's placed objects, a list of them), with no draw
+## limit, for ViewGroups to show and hide (group >= 0); a far one's drawn behind everything
+## nearer.
+static func _add_group(geo: Node3D, c: Dictionary, see_through: PackedByteArray, mats: Array[ShaderMaterial]) -> void:
+	var before := geo.get_child_count()
+	_add_meshes(geo, c.get("name", "Group"), c.pieces, see_through, mats, 0.0)
+	for k in range(before, geo.get_child_count()):
+		var mi := geo.get_child(k)
+		if c.group >= 0:
+			mi.set_meta("view_group", c.group)
+		if c.get("far", false):
+			mi.set_instance_shader_parameter("far_away", true)
 
 
 static func _body(body_name: String, layer: int) -> StaticBody3D:
