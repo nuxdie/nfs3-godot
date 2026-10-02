@@ -57,6 +57,10 @@ varying flat float layer;
 // 1 where the texture is a sphere map of the sky (the Tropics' puddles): mapped by the view's
 // reflection off the surface, as the game does, rather than by the stored uvs.
 uniform bool layered = false;
+// Gran Turismo 2's backdrop (hills, tree lines): the PS1 draws it first, under everything
+// nearer, so its faces that stand over the road never show. Its depth is squeezed into the
+// far end of the range (reversed Z: 0 far), its own faces still in order.
+instance uniform bool far_away = false;
 varying vec2 uv_over;
 varying vec2 uv_mask;
 varying vec2 uv_shadow;
@@ -103,6 +107,11 @@ void vertex() {
 	one_sided = mod(UV2.y, 2.0);
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	world_normal = (MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz;
+	// (Written for all, as Godot then takes it for all.)
+	POSITION = PROJECTION_MATRIX * (MODELVIEW_MATRIX * vec4(VERTEX, 1.0));
+	if (far_away) {
+		POSITION.z *= 0.001;
+	}
 }
 
 float hash(vec2 p) {

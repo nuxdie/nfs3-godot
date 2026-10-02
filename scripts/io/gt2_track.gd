@@ -16,13 +16,16 @@ extends Nfs5Track
 ## bytes (s16 x, z, height, 0) in 1/64 m about the centre rounded down to 64 m (each axis). The lists
 ## are the PS1's primitives in order (flat tri, quad; gouraud tri, quad; textured tri, quad;
 ## both), 12 bytes (gouraud: 20, 24): u32 three 9-bit vertex indices; u32 a quad's fourth
-## index (9 bits), a 10-bit UV record index from bit 9, the surface at 24; colour and code;
+## index (9 bits), a 12-bit UV pair index from bit 9 (32 bytes: the near texture's record,
+## then its half-size far copy's), the surface at 24; colour and code;
 ## the gouraud ones' other corners' colours. Object meshes (s16 x, height, z; z mirrored to
 ## match the chunks): as a shape, the LOD's vertex scale
-## in its last u32 (2^(s - 16) / 4096 m, as GT2's cars), 24-byte polygons: u32 three 10-bit
-## indices, u32 the fourth, colour and code, then uv0 + palette, uv1 + page, uv2, uv3.
+## in its last u32 (2^(s - 16) / 4096 m, as GT2's cars), polygons (OBJECT_STRIDE): u32 three
+## 10-bit indices, u32 the fourth, colour and code, then the textured ones' uv0 + palette,
+## uv1 + page, uv2, uv3; the gouraud ones' other corners' colours last.
 
 const STRIDE := [12, 12, 20, 24, 12, 12, 20, 24]
+const OBJECT_STRIDE := [12, 12, 20, 24, 24, 24, 32, 36]
 const QUAD_LIST := [false, true, false, true, false, true, false, true]
 const TEXTURED_LIST := [false, false, false, false, true, true, true, true]
 const GOURAUD_LIST := [false, false, true, true, false, false, true, true]
@@ -34,13 +37,17 @@ const FLAT := 0.8
 ## A steep face lower than this (m) is road all the same.
 const LOW_STEP := 0.6
 ## A course whose last chunk is this near the start line (m) is a lap; one whose chain jumps
-## this many times its chunks' usual spacing is a run that ends there.
+## this many times the spacing of the chunks round it (the median of 3 either side; and more
+## than CLOSE_REACH) is a run
+## that ends there.
 const CLOSE_REACH := 150.0
 const JUMP := 4.0
 ## How far back from a run's start line its lead-in reaches (m): room for its grid.
 const LEAD_IN := 250.0
 ## An image under this share of the driving line's samples isn't tarmac (a kerb it clips).
 const TARMAC_SHARE := 0.01
+## ...nor is grass: an image whose green is this many times its blue, and no less than its red.
+const GRASS_BLUE := 1.3
 ## The centring's smoothing, nodes either side.
 const SMOOTH := 4
 ## The driving line guides the centring within this distance (m).
@@ -48,6 +55,10 @@ const LINE_REACH := 30.0
 ## A driving line whose ends are this near each other (m), the road between, goes round the lap.
 const LINE_GAP := 1500.0
 const LINE_ON_ROAD := 0.9
+## A driving line's points further apart than this (m) are where it jumps back to its start.
+const LINE_JUMP := 600.0
+## The driving lines the centre line may follow are at least this share of the longest's length.
+const LINE_LENGTH_SHARE := 0.7
 ## The widest a road is taken to reach either side of where it's aimed for (m).
 const HALF_ROAD := 9.0
 ## The stretch of road the grid stands on: this far behind the start line (m), and ahead.
@@ -60,18 +71,33 @@ const MIN_VERGE := 3.0
 ## The road is taken to be at least this wide either side of the centre line (m): where the
 ## tarmac goes unseen (the start line's and grid's paint), room for the grid's two columns.
 const MIN_HALF := 5.0
-## Objects wider than this (m) are backdrop hills; their faces this far (m) above the road
-## beneath them are left out (_add_poly).
+## Objects wider than this (m) are backdrop hills and tree lines (drawn behind the rest).
 const BACKDROP_SPAN := 100.0
-const OVERHANG := 8.0
+## How many nodes either side the lap's centre line is eased over (_smooth).
+const LINE_EASE := 2
 ## The centre line's nodes are this far apart (m).
 const NODE_STEP := 4.0
 ## How far out from the centre line the road may reach (m), and the step the edge is found in.
 const WALL_REACH := 40.0
 const WALL_STEP := 0.5
+## A bend's radius is found over this many nodes either side; the wall on its inside stands no
+## further out than this share of it.
+const BEND_SPAN := 3
+const BEND_SHARE := 0.7
+## The walls are kept off stretches of the course this far along it from theirs (m); the
+## nodes are found by XZ cell this wide (m).
+const CAP_APART := 60.0
+const CAP_CELL := 16.0
+## ...by the middle of their road, this far either side of their centre line (m).
+const CAP_CORE := 3.0
+## The most the road's height steps from one node to the next (m) as it's followed.
+const LEVEL_STEP := 3.0
+## How far across a driving-line node off the tarmac looks for it (m).
+const OFF_LINE_REACH := 90.0
 
 ## The disc the courses come from (Game sets it when it finds one).
 static var vol: Gt2Vol
+static var force_chunks := false
 
 var course := ""
 var misses := 0              # textured faces whose image wasn't found
@@ -81,6 +107,7 @@ var _tex_rect: Array[Rect2i] = []   # each image's place in its page (u, v, w, h
 var _white := -1             # the plain image the untextured faces use
 var _road_tris := []         # [a, b, c, image], the flat faces (for the centre line)
 var _tarmac := {}            # image -> true: the ones under GT2's driving lines
+var _grass := {}             # image -> whether it's grass (_is_grass)
 var _start := Vector3.ZERO
 var _open := false
 var _grid: Array[Vector3] = []
@@ -106,6 +133,9 @@ static func load_dir(dir: String, _night := false) -> Gt2Track:
 	t._read_header()
 	t._read_chunks()
 	t.backdrop = [_piece(Kind.ROAD), _piece(Kind.GROUND), _piece(Kind.SCENERY)]
+	# (The backdrop hills' and tree lines' huge faces reach over the road, up high or standing
+	# across it: the PS1 draws them first, under everything nearer, so it never shows.)
+	t.backdrop_far = true
 	t._read_objects()
 	t._make_vroad()
 	if t.vroad.size() < 10:
@@ -253,13 +283,17 @@ func _read_header() -> void:
 
 
 ## GT2's AI driving lines (header 0x20: a header size, a count, the lists' offsets from the
-## block; a list: a count, then 40 bytes each: type (1 an arc, its signed radius at 0x14),
-## x, z (16.16 / 16, z the other way), ..., the heading at 0x24): the longest, which the
-## lap's centre line follows (a curve through its points along their headings), and which
-## tells the tarmac's images from the verges'.
+## block; a list: a count, then 40 bytes each, a stretch from its point to the next: type
+## (0 straight, 1 an arc), x, z (16.16 / 16, z the other way), ..., the arc's signed radius
+## at 0x18 (as x; + its centre to the left of the heading), the heading at 0x24): the
+## one with the most points tells the tarmac's images from the verges'; the lap's centre line
+## follows the one most on the tarmac (_pick_line). Lists 1 and 2 are the racing lines, in
+## arcs; 3 a coarser one, in straights; 4 the pit lane.
 var _line := PackedVector2Array()
 var _line_dir := PackedVector2Array()   # its heading at each point (unit, XZ)
+var _line_radius := PackedFloat32Array()   # the arc from each point (m, + left), 0 straight
 var _line_closed := false
+var _lines: Array = []   # every list: [points, headings, radii]
 
 
 func _read_lines() -> void:
@@ -275,6 +309,7 @@ func _read_lines() -> void:
 		var q := p + o
 		var pts := PackedVector2Array()
 		var dirs := PackedVector2Array()
+		var radii := PackedFloat32Array()
 		for i in d.decode_s32(q):
 			var e := q + 4 + i * 40
 			if e + 40 > d.size():
@@ -283,9 +318,12 @@ func _read_lines() -> void:
 			# The heading at 0x24, 4096 a turn.
 			var a := d.decode_s32(e + 36) * TAU / 4096.0
 			dirs.append(Vector2(-sin(a), -cos(a)))
+			radii.append(d.decode_s32(e + 24) * 16.0 / FIXED if d.decode_s32(e) == 1 else 0.0)
+		_lines.append([pts.duplicate(), dirs.duplicate(), radii.duplicate()])
 		if pts.size() > _line.size():
 			_line = pts
 			_line_dir = dirs
+			_line_radius = radii
 
 
 
@@ -328,7 +366,7 @@ func _add_shape(p: int, origin: Vector3, unit: float, object: bool, xf: Transfor
 	for li in 8:
 		var list_at := d.decode_u32(p + 4 + li * 4)
 		var count := d.decode_s16(p + 48 + li * 2)
-		var stride: int = 24 if object else STRIDE[li]
+		var stride: int = OBJECT_STRIDE[li] if object else STRIDE[li]
 		for k in count:
 			var q := list_at + k * stride
 			if q + stride > d.size():
@@ -354,15 +392,16 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 		if i >= verts.size():
 			return
 	# Colours, one per corner on the gouraud ones: a textured face's tint its texture (128 as
-	# it is), an untextured one's its colour (255 full); halved, as Porsche Unleashed's, which
-	# Nfs5TrackBuilder lights at twice their value.
-	var full := 256.0 if TEXTURED_LIST[li] else 510.0
+	# it is), an untextured one's its colour (255 full) (_shade).
+	var full := 128.0 if TEXTURED_LIST[li] else 255.0
 	var cols: Array[Color] = []
-	var base := Color(d[q + 8] / full, d[q + 9] / full, d[q + 10] / full)
+	var base := _shade(d[q + 8], d[q + 9], d[q + 10], full)
+	# (An object's textured face has its UVs between: its other colours from 24.)
+	var first := 24 if object and TEXTURED_LIST[li] else 12
 	for k in idx.size():
-		if GOURAUD_LIST[li] and k > 0 and not object and q + 8 + k * 4 + 3 <= q + STRIDE[li]:
-			var o := q + 8 + k * 4
-			cols.append(Color(d[o] / full, d[o + 1] / full, d[o + 2] / full))
+		if GOURAUD_LIST[li] and k > 0:
+			var o := q + first + (k - 1) * 4
+			cols.append(_shade(d[o], d[o + 1], d[o + 2], full))
 		else:
 			cols.append(base)
 	# The texture and its UVs.
@@ -371,10 +410,11 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 	if TEXTURED_LIST[li]:
 		var rec := q + 12
 		if not object:
-			var k := (w1 >> 9) & 0x3FF
-			if k >= _uv_count:
+			# (A pair of UV records: the near texture's, then its half-size far copy's.)
+			var k := (w1 >> 9) & 0xFFF
+			if k * 2 >= _uv_count:
 				return
-			rec = _uv_at + k * 16
+			rec = _uv_at + k * 32
 		var uvs: Array[Vector2i] = [Vector2i(d[rec], d[rec + 1]), Vector2i(d[rec + 4], d[rec + 5]),
 			Vector2i(d[rec + 8], d[rec + 9]), Vector2i(d[rec + 10], d[rec + 11])]
 		if not quad:
@@ -390,11 +430,6 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 		var a := verts[idx[tri[0]]]
 		var b := verts[idx[tri[1]]]
 		var c := verts[idx[tri[2]]]
-		# The backdrop hills' and tree lines' huge faces reach over the road (up high, or
-		# standing across it): the PS1 draws them first, under everything nearer, so it never
-		# shows; a depth buffer would. Left out there.
-		if _backdrop_mesh and _hangs_over_road((a + b + c) / 3.0):
-			continue
 		var n := (b - a).cross(c - a)
 		if n.length_squared() < 1e-8:
 			continue
@@ -419,15 +454,19 @@ func _add_poly(q: int, li: int, object: bool, verts: PackedVector3Array, pieces:
 			_road_tris.append([a, b, c, img])
 
 
+## A PS1 colour (`full` as it is) as the track shader's vertex colour: the PS1 tints in
+## gamma space, the shader in linear (its textures linearised), so it's linearised too;
+## halved, as Porsche Unleashed's, which Nfs5TrackBuilder lights at twice their value.
+static func _shade(r: int, g: int, b: int, full: float) -> Color:
+	return Color(pow(r / full, 2.2), pow(g / full, 2.2), pow(b / full, 2.2)) * 0.5
+
+
 # ---------------------------------------------------------------- placed objects
 
-var _over_road := {}         # the flat faces' grid, while the objects are added (see _add_poly)
-var _backdrop_mesh := false  # the object being added is a big backdrop hill
 
 
 func _read_objects() -> void:
 	var d := _d
-	_over_road = _tri_grid()
 	var lod_table := d.decode_u32(0x14)
 	var n_types := d.decode_s32(lod_table)
 	var meshes := PackedInt32Array()
@@ -455,11 +494,9 @@ func _read_objects() -> void:
 			var basis := Basis.from_euler(Vector3(-rot.x, -rot.y, rot.z), EULER_ORDER_YXZ).scaled(scale)
 			var mesh := meshes[kind]
 			var unit := pow(2.0, d.decode_s32(mesh + 84) - 16) / 4096.0
-			_backdrop_mesh = _mesh_span(mesh) * unit > BACKDROP_SPAN
 			# (The backdrop hills and tree lines are to be seen, not run into: Backdrop.)
-			_add_shape(mesh, Vector3.ZERO, unit, true, Transform3D(basis, pos), far if _backdrop_mesh else pieces)
-	_backdrop_mesh = false
-	_over_road = {}
+			var backdrop_mesh := _mesh_span(mesh) * unit > BACKDROP_SPAN
+			_add_shape(mesh, Vector3.ZERO, unit, true, Transform3D(basis, pos), far if backdrop_mesh else pieces)
 	for k in 3:
 		backdrop[k].pos.append_array(far[k].pos)
 		backdrop[k].uv.append_array(far[k].uv)
@@ -519,12 +556,17 @@ func _chunk_order() -> PackedInt32Array:
 	var gaps := PackedFloat32Array()
 	for i in order.size() - 1:
 		gaps.append(_centre(order[i]).distance_to(_centre(order[i + 1])))
+	# (Against the chunks either side, not the course's usual: a long straight's chunks are
+	# long, Grand Valley East's 4x its twisty bits'.)
 	if gaps.size() > 4:
-		var sorted := gaps.duplicate()
-		sorted.sort()
-		var median := sorted[sorted.size() / 2]
 		for i in gaps.size():
-			if gaps[i] > JUMP * median:
+			var around := PackedFloat32Array()
+			for j in range(maxi(i - 3, 0), mini(i + 4, gaps.size())):
+				if j != i:
+					around.append(gaps[j])
+			around.sort()
+			var near := around[around.size() / 2]
+			if gaps[i] > JUMP * near and gaps[i] > CLOSE_REACH:
 				order = order.slice(0, i + 1)
 				_open = true
 				break
@@ -577,8 +619,9 @@ func _make_vroad() -> void:
 	var grid := _tri_grid()
 	_close_line(grid)
 	_find_tarmac(grid)
-	if closed and _line_closed and _line.size() > 10:
-		_vroad_from(grid, _line_curve(), ahead)
+	_pick_line(grid)
+	if closed and _line_closed and _line.size() >= 3 and not force_chunks:
+		_vroad_from(grid, _smooth(_recentre(grid, _line_curve(), true)), ahead)
 		return
 	# Catmull-Rom through the control points, a node every NODE_STEP.
 	var pts := PackedVector3Array()
@@ -598,30 +641,70 @@ func _make_vroad() -> void:
 			var t2 := t * t
 			var t3 := t2 * t
 			pts.append(0.5 * ((2.0 * p1) + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3))
+	# A run past its start line follows its driving line (up to where it jumps back), as a lap
+	# does; else its chunks to the end.
+	var run := _run_curve() if not closed and not force_chunks else PackedVector3Array()
+	if run.size() > 10:
+		pts = pts.slice(0, start_node) + run
+		pts = _smooth(_recentre(grid, pts, true))
+	else:
+		if not closed:
+			pts.append(ctrl[m - 1])
+		# (Then the nodes the smoothing left off the tarmac, a hairpin's, back on it.)
+		pts = _recentre(grid, _recentre(grid, pts), true)
 	if not closed:
-		pts.append(ctrl[m - 1])
-	pts = _recentre(grid, pts)
+		# A run's chain ends past its road (Pikes Peak's summit): to the last node on it.
+		while pts.size() > start_node + 10 and _tri_at(grid, pts[pts.size() - 1]) < 0:
+			pts.resize(pts.size() - 1)
 	_vroad_from(grid, pts, ahead)
 	if not closed:
 		sprint = PackedInt32Array([start_node, vroad.size() - 1, vroad.size() - 1, start_node])
 
 
-## The driving line as a curve (cubic Hermite through its points along their headings), a
-## point every NODE_STEP, starting where it passes the start line.
+## A run's driving line as a curve from where it passes the start line to where it ends or
+## jumps back to its start (Pikes Peak's, as its chunk chain), or empty. It becomes _line.
+func _run_curve() -> PackedVector3Array:
+	var best: Array = []
+	var best_len := 0.0
+	for l: Array in _lines:
+		var pts: PackedVector2Array = l[0]
+		var len := 0.0
+		var end := pts.size() - 1
+		for i in pts.size() - 1:
+			var gap := pts[i].distance_to(pts[i + 1])
+			if gap > LINE_JUMP:
+				end = i
+				break
+			len += gap
+		if len > best_len:
+			best_len = len
+			best = [pts.slice(0, end + 1), (l[1] as PackedVector2Array).slice(0, end + 1), (l[2] as PackedFloat32Array).slice(0, end + 1)]
+	if best.is_empty() or best[0].size() < 3:
+		return PackedVector3Array()
+	_line = best[0]
+	_line_dir = best[1]
+	_line_radius = best[2]
+	_line_radius[_line.size() - 1] = 0.0
+	var curve := PackedVector3Array()
+	for i in _line.size() - 1:
+		for q in _line_stretch(i):
+			curve.append(Vector3(q.x, _start.y, q.y))
+	var last := _line[_line.size() - 1]
+	curve.append(Vector3(last.x, _start.y, last.y))
+	var first := 0
+	for i in curve.size():
+		if Vector2(curve[i].x - _start.x, curve[i].z - _start.z).length_squared() < \
+				Vector2(curve[first].x - _start.x, curve[first].z - _start.z).length_squared():
+			first = i
+	return curve.slice(first)
+
+
+## The driving line as a curve (its straights and arcs), a point every NODE_STEP, starting
+## where it passes the start line.
 func _line_curve() -> PackedVector3Array:
 	var pts := PackedVector3Array()
 	for i in _line.size() - 1:
-		var a := _line[i]
-		var b := _line[i + 1]
-		var len := a.distance_to(b)
-		var ta := _line_dir[i] * len
-		var tb := _line_dir[i + 1] * len
-		var steps := maxi(1, ceili(len / NODE_STEP))
-		for k in steps:
-			var t := float(k) / steps
-			var t2 := t * t
-			var t3 := t2 * t
-			var q := (2.0 * t3 - 3.0 * t2 + 1.0) * a + (t3 - 2.0 * t2 + t) * ta + (-2.0 * t3 + 3.0 * t2) * b + (t3 - t2) * tb
+		for q in _line_stretch(i):
 			pts.append(Vector3(q.x, _start.y, q.y))
 	# Node 0 at the start line.
 	var first := 0
@@ -630,6 +713,40 @@ func _line_curve() -> PackedVector3Array:
 				Vector2(pts[first].x - _start.x, pts[first].z - _start.z).length_squared():
 			first = i
 	return pts.slice(first) + pts.slice(0, first)
+
+
+## The driving line's stretch from point `i` to the next, a point every NODE_STEP (not the
+## next's): a straight, or an arc about its centre (its radius off the heading); one whose
+## ends don't sit on its circle, a cubic Hermite along the headings.
+func _line_stretch(i: int) -> PackedVector2Array:
+	var a := _line[i]
+	var b := _line[i + 1]
+	var out := PackedVector2Array()
+	var r := _line_radius[i]
+	if r != 0.0:
+		var h := _line_dir[i]
+		var c := a + Vector2(h.y, -h.x) * r
+		var ra := a - c
+		var rb := b - c
+		if absf(rb.length() - absf(r)) < maxf(2.0, absf(r) * 0.05):
+			# The way round: as the heading turns about the centre.
+			var turn := signf(ra.x * h.y - ra.y * h.x)
+			var sweep := fposmod(turn * (rb.angle() - ra.angle()), TAU) * turn
+			var steps := maxi(1, ceili(absf(sweep) * absf(r) / NODE_STEP))
+			for k in steps:
+				var t := float(k) / steps
+				out.append(c + ra.rotated(sweep * t).normalized() * lerpf(ra.length(), rb.length(), t))
+			return out
+	var len := a.distance_to(b)
+	var ta := _line_dir[i] * len if r != 0.0 else b - a
+	var tb := _line_dir[i + 1] * len if r != 0.0 else b - a
+	var steps := maxi(1, ceili(len / NODE_STEP))
+	for k in steps:
+		var t := float(k) / steps
+		var t2 := t * t
+		var t3 := t2 * t
+		out.append((2.0 * t3 - 3.0 * t2 + 1.0) * a + (t3 - 2.0 * t2 + t) * ta + (-2.0 * t3 + 3.0 * t2) * b + (t3 - t2) * tb)
+	return out
 
 
 ## The centre line's nodes at `pts`: on the road's surface, its tarmac's width either side
@@ -658,28 +775,143 @@ func _vroad_from(grid: Dictionary, pts: PackedVector3Array, ahead: Vector3) -> v
 		walls_l.append(clampf(_edge(grid, vr.pos, -right), vr.left_wall + MIN_VERGE, vr.left_wall + VERGE))
 		walls_r.append(clampf(_edge(grid, vr.pos, right), vr.right_wall + MIN_VERGE, vr.right_wall + VERGE))
 	fences = [walls_l, walls_r]
+	_cap_walls()
 
 
-## A lap's driving line starts and ends past the start line: it's closed over the road
-## between its ends (the main straight) if they're no more than LINE_GAP apart and that
-## stretch is over the road (LINE_ON_ROAD of it).
+## The walls kept off the rest of the course: on the inside of a tight bend no further out
+## than BEND_SHARE of its radius (the wall, a line from node to node, would fold back across
+## the road); where the road runs beside another stretch of the course (Motor Sports Land's
+## switchbacks, its start straight's two sides), the lanes and walls stop halfway between.
+func _cap_walls() -> void:
+	var n := vroad.size()
+	var walls: Array[PackedFloat32Array] = [fences[0], fences[1]]
+	for i in n:
+		var a := vroad[(i - BEND_SPAN + n) % n if closed else maxi(i - BEND_SPAN, 0)].forward
+		var b := vroad[(i + BEND_SPAN) % n if closed else mini(i + BEND_SPAN, n - 1)].forward
+		var turn := a.angle_to(b)
+		if turn < 0.05:
+			continue
+		var radius := 2.0 * BEND_SPAN * NODE_STEP / turn
+		# (Turning right, the inside is the right.)
+		var side := 1 if a.cross(b).y < 0.0 else 0
+		var own := vroad[i].right_wall if side == 1 else vroad[i].left_wall
+		walls[side][i] = minf(walls[side][i], maxf(own, radius * BEND_SHARE))
+	var cells := {}
+	for i in n:
+		var key := Vector2i(floori(vroad[i].pos.x / CAP_CELL), floori(vroad[i].pos.z / CAP_CELL))
+		if not cells.has(key):
+			cells[key] = []
+		cells[key].append(i)
+	for side in 2:
+		for i in n:
+			var v: VRoad = vroad[i]
+			var dir := v.right if side == 1 else -v.right
+			var x := 0.0
+			while x < walls[side][i]:
+				x += 1.0
+				if _other_stretch(cells, i, v.pos + dir * x):
+					# (The other's centre line is about CAP_CORE further.)
+					var half := maxf((x + CAP_CORE) * 0.5, 2.0)
+					walls[side][i] = minf(walls[side][i], half)
+					if side == 1:
+						v.right_wall = minf(v.right_wall, half)
+					else:
+						v.left_wall = minf(v.left_wall, half)
+					break
+	fences = [walls[0], walls[1]]
+
+
+## Whether `q` is on the middle (CAP_CORE either side of the centre line) of a stretch of the
+## course well along it from node `i`.
+func _other_stretch(cells: Dictionary, i: int, q: Vector3) -> bool:
+	var n := vroad.size()
+	var c := Vector2i(floori(q.x / CAP_CELL), floori(q.z / CAP_CELL))
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for j: int in cells.get(c + Vector2i(dx, dz), []):
+				var apart := absi(i - j)
+				if closed:
+					apart = mini(apart, n - apart)
+				if apart * NODE_STEP < CAP_APART:
+					continue
+				var o: VRoad = vroad[j]
+				var d := q - o.pos
+				if absf(d.y) < LEVEL_STEP and absf(d.dot(o.forward)) < NODE_STEP and absf(d.dot(o.right)) < CAP_CORE:
+					return true
+	return false
+
+
+## Of the driving lines that go round (_close_line) and are near the longest's length, the one
+## whose curve is most on the tarmac becomes _line (the first, on a tie).
+func _pick_line(grid: Dictionary) -> void:
+	var longest := 0.0
+	var lengths := PackedFloat32Array()
+	for l: Array in _lines:
+		# (Round the lap: with the stretch from its last point back to its first.)
+		var len: float = l[0][l[0].size() - 1].distance_to(l[0][0]) if l[0].size() > 0 else 0.0
+		for i in l[0].size() - 1:
+			len += l[0][i].distance_to(l[0][i + 1])
+		lengths.append(len)
+		longest = maxf(longest, len)
+	var best := -1.0
+	var pick: Array = []
+	for k in _lines.size():
+		var l: Array = _lines[k]
+		if l[0].size() < 3 or lengths[k] < LINE_LENGTH_SHARE * longest:
+			continue
+		_line = l[0].duplicate()
+		_line_dir = l[1].duplicate()
+		_line_radius = l[2].duplicate()
+		_line_closed = false
+		_close_line(grid)
+		if not _line_closed:
+			continue
+		var on := 0
+		var curve := _line_curve()
+		for q in curve:
+			var t := _tri_at(grid, q)
+			if t >= 0 and (_tarmac.is_empty() or _tarmac.has(_road_tris[t][3])):
+				on += 1
+		var score := float(on) / maxi(curve.size(), 1)
+		if score > best + 0.001:
+			best = score
+			pick = [_line, _line_dir, _line_radius]
+	if pick.is_empty():
+		_line_closed = false
+		return
+	_line = pick[0]
+	_line_dir = pick[1]
+	_line_radius = pick[2]
+	_line_closed = true
+
+
+## A lap's driving line goes round: closed by its last stretch (to its first point) if its ends
+## are no more than LINE_GAP apart and that stretch is over the road (LINE_ON_ROAD of it).
 func _close_line(grid: Dictionary) -> void:
 	if _line.size() < 3:
 		return
-	var a := _line[_line.size() - 1]
+	var last := _line.size() - 1
+	var a := _line[last]
 	var b := _line[0]
-	if a.distance_to(b) > LINE_GAP:
+	# (The list goes round: its last stretch, a straight or an arc as any, ends at its first
+	# point. Not a line that's one run up a straight, Max Speed Attack's: the way back is
+	# against its heading.)
+	if a.distance_to(b) > LINE_GAP or _line_radius[last] == 0.0 and _line_dir[last].dot((b - a).normalized()) < 0.5:
 		return
-	var steps := maxi(2, int(a.distance_to(b) / 4.0))
+	_line.append(b)
+	_line_dir.append(_line_dir[0])
+	_line_radius.append(0.0)
 	var on := 0
-	for k in steps + 1:
-		var q := a.lerp(b, float(k) / steps)
+	var way := _line_stretch(last)
+	for q in way:
 		if _tri_at(grid, Vector3(q.x, 0.0, q.y)) >= 0:
 			on += 1
-	if on >= LINE_ON_ROAD * (steps + 1):
+	if on >= LINE_ON_ROAD * way.size():
 		_line_closed = true
-		_line.append(b)
-		_line_dir.append(_line_dir[0])
+	else:
+		_line.resize(last + 1)
+		_line_dir.resize(last + 1)
+		_line_radius.resize(last + 1)
 
 
 ## The images under the driving line (every 2 m along it), those with at least TARMAC_SHARE
@@ -699,31 +931,50 @@ func _find_tarmac(grid: Dictionary) -> void:
 				hits[img] = hits.get(img, 0) + 1
 				total += 1
 	for img: int in hits:
-		if hits[img] >= TARMAC_SHARE * total:
+		if hits[img] >= TARMAC_SHARE * total and not _is_grass(img):
 			_tarmac[img] = true
 
 
-## The flat face under `p` (its XZ), or -1.
-func _tri_at(grid: Dictionary, p: Vector3) -> int:
+## Whether image `img` is grass (its mean green, at least as much as red and well over blue):
+## a verge a driving line cuts across, not tarmac (dirt roads are redder).
+func _is_grass(img: int) -> bool:
+	if _grass.has(img):
+		return _grass[img]
+	var im: Image = images[img]
+	var sum := Color(0, 0, 0, 0)
+	for y in range(0, im.get_height(), 2):
+		for x in range(0, im.get_width(), 2):
+			var c := im.get_pixel(x, y)
+			sum += Color(c.r, c.g, c.b, 1.0) * c.a
+	if sum.a <= 0.0:
+		return false
+	var m := sum / sum.a
+	_grass[img] = m.g >= m.r and m.g > m.b * GRASS_BLUE
+	return _grass[img]
+
+
+## The flat face under `p` (its XZ; within `reach` m of its height, if given), or -1.
+func _tri_at(grid: Dictionary, p: Vector3, reach := INF) -> int:
 	for i: int in grid.get(Vector2i(floori(p.x / 16.0), floori(p.z / 16.0)), []):
-		if _height_in(_road_tris[i], p) > -INF:
+		var h := _height_in(_road_tris[i], p)
+		if h > -INF and absf(h - p.y) < reach:
 			return i
 	return -1
 
 
 ## The tarmac across `p` along `right`: Vector2(left edge, right edge) in m from `p` (the
 ## run nearest `aim` m across, within WALL_REACH), or (0, 0) if there's none.
-func _tarmac_span(grid: Dictionary, p: Vector3, right: Vector3, aim := 0.0) -> Vector2:
+func _tarmac_span(grid: Dictionary, p: Vector3, right: Vector3, aim := 0.0, reach := WALL_REACH, any_height := false) -> Vector2:
 	var best := Vector2.ZERO
 	var best_d := INF
 	var run_start := INF
-	var x := -WALL_REACH
-	while x <= WALL_REACH + WALL_STEP:
+	var x := -reach
+	while x <= reach + WALL_STEP:
 		var on := false
-		if x <= WALL_REACH:
+		if x <= reach:
 			var t := _tri_at(grid, p + right * x)
 			on = t >= 0 and (_tarmac.is_empty() or _tarmac.has(_road_tris[t][3])) \
-				and absf(_height_in(_road_tris[t], p + right * x) - p.y) < 4.0
+				and (any_height or absf(_height_in(_road_tris[t], p + right * x) - p.y) < 4.0)
 		if on and run_start == INF:
 			run_start = x
 		elif not on and run_start != INF:
@@ -799,17 +1050,42 @@ func _line_offset(p: Vector3, right: Vector3) -> float:
 
 ## The nodes moved across to the middle of the tarmac (each its run's), the move smoothed
 ## along the road so the line doesn't jink where a run is cut short.
-func _recentre(grid: Dictionary, pts: PackedVector3Array) -> PackedVector3Array:
+## `keep`: the nodes on the tarmac stay where they are (the driving line's), the rest move
+## to the middle of the nearest, the move eased in and out over SMOOTH nodes (GT2's lines cut
+## some corners in straight pieces, over the grass).
+func _recentre(grid: Dictionary, pts: PackedVector3Array, keep := false) -> PackedVector3Array:
 	var n := pts.size()
 	var shift := PackedFloat32Array()
 	var rights := PackedVector3Array()
+	# (The driving line has no heights: the road's is followed along it from the start line,
+	# so where it passes under a bridge the deck overhead isn't taken for its road.)
+	var level := _start.y
+	if keep and n > 0:
+		# (The start line's own height may be 0 whatever the road's: the road under it.)
+		var under: Array = _ground(grid, Vector3(pts[0].x, _start.y, pts[0].z))
+		if under[0] > -INF:
+			level = under[0]
 	for i in n:
 		var f := pts[(i + 1) % n] - pts[(i - 1 + n) % n] if closed else pts[mini(i + 1, n - 1)] - pts[maxi(i - 1, 0)]
 		f.y = 0.0
 		var right := f.normalized().cross(Vector3.UP).normalized() if f.length() > 0.01 else Vector3.RIGHT
 		rights.append(right)
-		var g := _ground(grid, pts[i])
-		var p := Vector3(pts[i].x, g[0] if g[0] > -INF else pts[i].y, pts[i].z)
+		var g := _ground(grid, Vector3(pts[i].x, level, pts[i].z) if keep else pts[i])
+		if keep and g[0] > -INF and absf(g[0] - level) > LEVEL_STEP:
+			g[0] = -INF
+		var p := Vector3(pts[i].x, g[0] if g[0] > -INF else (level if keep else pts[i].y), pts[i].z)
+		if keep:
+			level = p.y
+			pts[i].y = p.y
+			# (On the tarmac, or on its paint (the grid's, the start line's) and kerbs: not on
+			# grass.)
+			var t := _tri_at(grid, p, LEVEL_STEP)
+			if t >= 0 and (_tarmac.is_empty() or _tarmac.has(_road_tris[t][3]) or not _is_grass(_road_tris[t][3])):
+				shift.append(0.0)
+			else:
+				var near := _tarmac_span(grid, p, right, 0.0, OFF_LINE_REACH)
+				shift.append((near.x + near.y) * 0.5 if near.y - near.x >= 3.0 else 0.0)
+			continue
 		# Where the grid stands, through its slots' middle (the race lines its cars up
 		# either side of the centre line); elsewhere the tarmac where the driving line is
 		# (not the pit lane beside it).
@@ -822,6 +1098,16 @@ func _recentre(grid: Dictionary, pts: PackedVector3Array) -> PackedVector3Array:
 		shift.append((span.x + span.y) * 0.5 if span.y - span.x >= 3.0 else 0.0)
 	var out := PackedVector3Array()
 	for i in n:
+		if keep:
+			var most := 0.0
+			for k in range(-SMOOTH, SMOOTH + 1):
+				var j := (i + k + n) % n if closed else i + k
+				if j >= 0 and j < n:
+					var w := shift[j] * (1.0 - absf(k) / (SMOOTH + 1.0))
+					if absf(w) > absf(most):
+						most = w
+			out.append(pts[i] + rights[i] * most)
+			continue
 		var sum := 0.0
 		var cnt := 0
 		for k in range(-SMOOTH, SMOOTH + 1):
@@ -836,10 +1122,21 @@ func _recentre(grid: Dictionary, pts: PackedVector3Array) -> PackedVector3Array:
 	return out
 
 
-## Whether `p` is over the road (above it, or less than OVERHANG below).
-func _hangs_over_road(p: Vector3) -> bool:
-	var t := _tri_at(_over_road, p)
-	return t >= 0 and p.y - _height_in(_road_tris[t], p) > -OVERHANG
+## The nodes eased round (their XZ the mean of LINE_EASE nodes either side, twice; a run's
+## ends as they are): GT2's lines turn some corners in straight pieces, kinks the AI would
+## slow for.
+func _smooth(pts: PackedVector3Array) -> PackedVector3Array:
+	var n := pts.size()
+	for pass_i in 2:
+		var out := pts.duplicate()
+		for i in n:
+			var sum := Vector3.ZERO
+			for k in range(-LINE_EASE, LINE_EASE + 1):
+				sum += pts[(i + k + n) % n] if closed else pts[clampi(i + k, 0, n - 1)]
+			sum /= 2 * LINE_EASE + 1
+			out[i] = Vector3(sum.x, pts[i].y, sum.z)
+		pts = out
+	return pts
 
 
 ## The flat faces by XZ cell (16 m): Vector2i -> [triangle indices].

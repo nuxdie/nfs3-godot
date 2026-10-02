@@ -1376,7 +1376,7 @@ func _start() -> void:
 	Game.laps = _laps.index + 1
 	Game.opponents = _opp_value
 	Game.traffic = _traffic.index == 1
-	Game.night = _time_row.index == 1
+	Game.night = _time_row.index == 1 or Game.night_only(Game.track_id)
 	Game.weather = _weather.index == 1
 	Game.layout = _layout_row.index
 	Game.save_settings()

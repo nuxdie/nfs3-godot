@@ -65,7 +65,7 @@ func _ready() -> void:
 		Game.mode = int(pos[1])
 	if pos.size() > 2:
 		Game.car_index = int(pos[2]) if pos[2].is_valid_int() else maxi(Game.cars.find_custom(func(c: Dictionary) -> bool: return c.id == pos[2]), 0)
-	Game.night = "--night" in args
+	Game.night = "--night" in args or Game.night_only(Game.track_id)
 	for arg in args:
 		if arg.begins_with("--duration="):
 			duration = float(arg.trim_prefix("--duration="))

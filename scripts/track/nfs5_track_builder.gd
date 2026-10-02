@@ -114,6 +114,10 @@ static func build(t: Nfs5Track, root: Node3D) -> TrackPath:
 			rails.add_chunk(rail_mesh[0], rail_mesh[1], mats[PASS_OPAQUE], Nfs3TrackBuilder.DRAW_DISTANCE)
 			rail_mesh = Nfs3TrackBuilder._rail_arrays()
 	_add_meshes(geo, "Backdrop", t.backdrop, see_through, mats, 0.0)
+	if t.backdrop_far:
+		for mi in geo.get_children():
+			if mi is MeshInstance3D and mi.name.begins_with("Backdrop"):
+				mi.set_instance_shader_parameter("far_away", true)
 	var night_only: Array = root.get_meta("night_only", [])
 	night_only.append_array(_add_props(t, geo, see_through, mats))
 	var particles := PuParticles.build(t, Game.pu_root) if Game.quality != Game.Quality.LOW else null

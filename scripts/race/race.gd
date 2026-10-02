@@ -397,7 +397,7 @@ func _cars_to_load() -> Array:
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
 		for m in Game.cop_models():
 			out.append([m, 3])
-	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
+	if Game.traffic_on(Game.track_id) and Game.mode != Game.Mode.TIME_TRIAL:
 		for m in Game.traffic_models():
 			out.append([m, 4])
 	return out
@@ -494,7 +494,7 @@ func _spawn_cars() -> void:
 			"bust_t": 0.0, "cool": 0.0, "model": grid[i].car_data.display_name, "tickets": 0, "held_t": 0.0})
 	if Game.mode == Game.Mode.HOT_PURSUIT or Game.mode == Game.Mode.FREE_ROAM:
 		_spawn_cops()
-	if Game.traffic and Game.mode != Game.Mode.TIME_TRIAL:
+	if Game.traffic_on(Game.track_id) and Game.mode != Game.Mode.TIME_TRIAL:
 		_spawn_traffic()
 	# Cars parked where the track leaves room for them (the procedural track's streets and lots).
 	parked_cars = ParkedCars.spawn(get_tree(), _make_car, _parking)

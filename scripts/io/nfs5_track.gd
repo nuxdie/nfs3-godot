@@ -91,6 +91,9 @@ class Piece:
 var chunks: Array[Dictionary] = []
 ## Scenery on the horizon (see BACKDROP_REACH), one Piece per kind.
 var backdrop: Array = []
+## The backdrop is drawn behind everything nearer, whatever its depth (track.gdshader's
+## far_away): Gran Turismo 2's.
+var backdrop_far := false
 ## The animated props ("Anim": people, the Alps' rescue helicopter, the Autobahn's train,
 ## Auvergne's van and church bell, Zone Industrielle's cranes): {name, piece (a Piece about
 ## the prop's own origin), keys (KeyframeMover's {pos, rot, scale}, ANIM_KEYS_PER_SECOND),

@@ -122,7 +122,7 @@ func _read_game() -> void:
 		var dir := Game.track_dir(id)
 		var snow := dir != "" and Nfs3Horizon.peek_precip(dir) == Nfs3Horizon.Precip.SNOW
 		facts.append("Snow" if snow else "Rain")
-	if m != Game.Mode.TIME_TRIAL and Game.traffic:
+	if m != Game.Mode.TIME_TRIAL and Game.traffic_on(id):
 		facts.append("Traffic")
 	_facts = "  ·  ".join(facts)
 	if Game.car_index < Game.cars.size():

@@ -113,6 +113,12 @@ func light(parent: Node, night: bool, weather: bool, vp: Viewport = null) -> voi
 		_make_overcast(e, sm, night)
 	if horizon:
 		_apply_horizon(horizon, e, sky, night, weather)
+	# Gran Turismo 2's own sky (not over a day course raced at night, nor in the rain).
+	if Game.gt2_sky(id) >= 0 and night == Game.night_only(id) and not weather:
+		var dome := Gt2Sky.build(Game.gt2_sky(id))
+		if dome:
+			_nodes.append(dome)
+			parent.add_child(dome)
 
 
 ## Dark sky and fog (NFS3's night horizons use near-black fog), a faint moon and a cool
@@ -131,7 +137,9 @@ func _make_night(e: Environment, sm: ProceduralSkyMaterial) -> void:
 	sun.light_energy = 0.12
 	sun.shadow_enabled = false
 	if track_mat:
-		track_mat.set_shader_parameter("night_tint", Vector3(0.16, 0.18, 0.28))
+		# (A course only raced at night, Gran Turismo 2's, has the night baked in: a touch more
+		# darkness on top, as High Stakes' night versions.)
+		track_mat.set_shader_parameter("night_tint", Vector3(0.8, 0.8, 0.85) if Game.night_only(id) else Vector3(0.16, 0.18, 0.28))
 		# Only a faint contact shadow under moonlight.
 		track_mat.set_shader_parameter("shadow_strength", 0.35)
 

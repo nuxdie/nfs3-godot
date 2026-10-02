@@ -466,7 +466,7 @@ func _scan_gt2_cars() -> void:
 
 ## Gran Turismo 2's courses (.crsinfo: "CRS", u16 version, u16 count, then 24 bytes each:
 ## its name's offset, its file's hash, flags (night, evening, dirt, 2 players, reverse, point
-## to point), skybox...), in its order: the races' courses, one way round (the reverse
+## to point), at 10 its sky (its place among bgsobj's .bso files)...), in its order: the races' courses, one way round (the reverse
 ## option runs them the other), not the two-player, license and test ones.
 func _scan_gt2_tracks() -> void:
 	_gt2_tracks.clear()
@@ -491,7 +491,7 @@ func _scan_gt2_tracks() -> void:
 		if course == "" or name == "" or flags & 0x08 or name.begins_with("L_") or name[0] == name[0].to_lower():
 			continue
 		all.append({"course": course, "name": name, "night": flags & 0x01 != 0, "dirt": flags & 0x04 != 0,
-			"reverse": flags & 0x10 != 0, "sprint": flags & 0x20 != 0})
+			"reverse": flags & 0x10 != 0, "sprint": flags & 0x20 != 0, "sky": d[p + 10]})
 		if not flags & 0x10:
 			seen[name] = true
 	for c in all:
@@ -515,6 +515,23 @@ static func _gt2_course_hash(s: String) -> int:
 
 func is_gt2_track(id: String) -> bool:
 	return _gt2_tracks.has(id)
+
+
+## Whether the race on `id` has traffic: the player's choice, but for the closed circuits
+## that never had any (Gran Turismo 2's: its cars beach on their kerbs, in the racers' way).
+func traffic_on(id: String) -> bool:
+	return traffic and not is_gt2_track(id)
+
+
+## A Gran Turismo 2 course's sky (Gt2Sky.build's index), or -1.
+func gt2_sky(id: String) -> int:
+	return _gt2_tracks[id].sky if is_gt2_track(id) else -1
+
+
+## A course that's only ever raced at night (its colours are baked dark, its windows lit):
+## Gran Turismo 2's night ones.
+func night_only(id: String) -> bool:
+	return is_gt2_track(id) and _gt2_tracks[id].night
 
 
 ## High Stakes cars join the list after NFS3's; one NFS3 also has ("Ferrari 550 Maranello")
