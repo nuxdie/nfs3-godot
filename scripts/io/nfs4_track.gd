@@ -34,6 +34,10 @@ const SURFACE_TERRAIN := 14
 ## of it: not the roof of a covered bridge or a tunnel's ceiling.
 const MIN_FACING := 0.5
 const ROAD_REACH := 3.0
+## Ground further below the road's surface counts only this flat (cosine to the road's
+## normal) and joined to the road: a canyon floor falling away from it. Ground further above
+## never does: the banks and embankments climbing away from the verge stay walled off.
+const FLAT_FACING := 0.9
 
 var t: Nfs3Track
 var _tex_of := {}   # Vector4i(archive index, uv flags, lane, frames) -> first Nfs3Track.textures index
@@ -233,7 +237,10 @@ func _read_xobjs(d: PackedByteArray, p: int, n: int, b: Nfs3Track.Block) -> int:
 				p += 8 + n_keys * 20
 			6:
 				# Physics prop: position, mass, orientation, half extents; the header's
-				# point is its position too.
+				# point is its position too, and its vertices are already turned.
+				if _short(d, p, 72):
+					return -1
+				x.physics = {"mass": d.decode_float(p + 12)}
 				p += 72
 		var nv: int = hd[2]
 		var np: int = hd[3]
@@ -338,17 +345,22 @@ static func _split_objects(polys: Array) -> Array:
 
 
 ## Marks each block's road polys drivable when they lie between the walls of the nearest
-## virtual road node, facing up and near its surface (High Stakes has no surface flags for
-## them): the rest is scenery terrain, which the invisible walls fence off.
+## virtual road node and face up (High Stakes has no surface flags for them): those near the
+## road's own surface, and the flat ground joined to them below it (a canyon floor falling
+## away from the road to a second track below). Not the roof of a covered bridge or a
+## tunnel's ceiling: those join the road only through steep walls. The rest is scenery
+## terrain, which the invisible walls fence off.
 func _flag_road() -> void:
 	var n := t.vroad.size()
+	var ground := []   # [block, poly] of the up-facing polys between the walls
+	var seeds := []    # their indices in `ground` that are near the road's surface
 	for bi in t.blocks.size():
 		var b := t.blocks[bi]
 		b.road_flags.resize(b.road.size())
+		b.road_flags.fill(SURFACE_TERRAIN)
 		for i in b.road.size():
 			var p: Nfs3Track.Poly = b.road[i]
 			if p.v[0] >= b.verts.size() or p.v[1] >= b.verts.size() or p.v[2] >= b.verts.size() or p.v[3] >= b.verts.size():
-				b.road_flags[i] = SURFACE_TERRAIN
 				continue
 			var c := (b.verts[p.v[0]] + b.verts[p.v[1]] + b.verts[p.v[2]] + b.verts[p.v[3]]) * 0.25
 			var best: Nfs3Track.VRoad = null
@@ -363,7 +375,36 @@ func _flag_road() -> void:
 			# Across the diagonals: a triangle stored as a quad repeats a corner.
 			var facing := (b.verts[p.v[2]] - b.verts[p.v[0]]).cross(b.verts[p.v[1]] - b.verts[p.v[3]]).normalized().dot(up)
 			var lat := (c - best.pos).dot(best.right.normalized())
+			if facing <= MIN_FACING or lat < -best.left_wall or lat > best.right_wall:
+				continue
 			var rise := (c - best.pos).dot(up)
-			var on_road := lat >= -best.left_wall and lat <= best.right_wall \
-				and facing > MIN_FACING and rise > -ROAD_REACH and rise < ROAD_REACH
-			b.road_flags[i] = SURFACE_ROAD if on_road else SURFACE_TERRAIN
+			if rise > -ROAD_REACH and rise < ROAD_REACH:
+				seeds.append(ground.size())
+			elif facing <= FLAT_FACING or rise >= ROAD_REACH:
+				continue
+			ground.append([bi, i])
+	# Corners by position (blocks don't share vertices) -> the ground polys on them.
+	var at := {}
+	for gi in ground.size():
+		var b := t.blocks[ground[gi][0]]
+		var p: Nfs3Track.Poly = b.road[ground[gi][1]]
+		for k in 4:
+			var key := Vector3i((b.verts[p.v[k]] * 10.0).round())
+			if not at.has(key):
+				at[key] = []
+			at[key].append(gi)
+	var reached := PackedByteArray()
+	reached.resize(ground.size())
+	var todo: Array = seeds.duplicate()
+	for gi: int in seeds:
+		reached[gi] = 1
+	while not todo.is_empty():
+		var gi: int = todo.pop_back()
+		var b := t.blocks[ground[gi][0]]
+		b.road_flags[ground[gi][1]] = SURFACE_ROAD
+		var p: Nfs3Track.Poly = b.road[ground[gi][1]]
+		for k in 4:
+			for gj: int in at[Vector3i((b.verts[p.v[k]] * 10.0).round())]:
+				if not reached[gj]:
+					reached[gj] = 1
+					todo.append(gj)

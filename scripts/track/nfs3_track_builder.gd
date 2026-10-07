@@ -186,10 +186,13 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 				TrackSurface.tag(cs, pair[2][0], pair[2][1])
 				pair[0].add_child(cs)
 
-		# Animated extra objects (planes, boats, ...): keyframed along the track.
+		# Animated extra objects (planes, boats, trains, ...): keyframed along the track. Those
+		# with opaque faces are solid, pushing aside whatever they run into (Kindiak Park's
+		# train runs along the verge).
 		for x in b.xobjs:
 			if not x.has("anim") or x.anim.size() == 0:
 				continue
+			var mover: Node3D = _moving_body(t, x)
 			for pass_i in 2:
 				var amesh := _mesh(t, [[x.polys, x.verts, x.shading, Vector3.ZERO, _mirrored(x)]], pass_i == 1)
 				if amesh == null:
@@ -198,10 +201,11 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 				ami.mesh = amesh
 				ami.material_override = mats[pass_i]
 				ami.visibility_range_end = DRAW_DISTANCE * 1.5
-				ami.set_script(preload("res://scripts/track/keyframe_mover.gd"))
-				ami.set("keys", x.anim)
-				ami.set("delay", x.get("anim_delay", 1))
-				geo.add_child(ami)
+				mover.add_child(ami)
+			mover.set_script(preload("res://scripts/track/keyframe_mover.gd"))
+			mover.set("keys", x.anim)
+			mover.set("delay", x.get("anim_delay", 1))
+			geo.add_child(mover)
 
 	# Global scenery from the .col file.
 	var global_groups := []
@@ -223,6 +227,26 @@ static func build(t: Nfs3Track, root: Node3D) -> TrackPath:
 	root.add_child(_water_body(water[0]))
 	root.add_child(_edge_walls(t, road_quads, water))
 	return _make_path(t)
+
+
+## The node an animated object moves on: a body cars collide with (on the scenery layer)
+## when it has opaque faces, else a plain node.
+static func _moving_body(t: Nfs3Track, x: Dictionary) -> Node3D:
+	var faces := PackedVector3Array()
+	_solid_faces(t, x.polys, x.verts, Vector3.ZERO, faces, false)
+	if faces.is_empty():
+		return Node3D.new()
+	var body := AnimatableBody3D.new()
+	body.sync_to_physics = false
+	body.collision_layer = SCENERY_LAYER
+	body.collision_mask = 0
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = true
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	body.add_child(cs)
+	return body
 
 
 ## Cars collide with every opaque scenery object: buildings, bridge piers and road signs
@@ -621,10 +645,13 @@ static func _add_rail(t: Nfs3Track, panel: Dictionary, out: Array) -> void:
 
 ## Sign-sized extra objects with an opaque post or plate and no foliage (foliage cut-outs are
 ## left standing: the car passes through them anyway). A cut-out plate is still a sign: High
-## Stakes' round and triangular ones are see-through at the corners.
+## Stakes' round and triangular ones are see-through at the corners. High Stakes' physics
+## objects (cones, barriers, hay bales, crates) always are, whatever their size.
 static func _is_prop(t: Nfs3Track, x: Dictionary) -> bool:
 	if not x.has("prop"):
-		x.prop = false
+		x.prop = x.has("physics")
+		if x.prop:
+			return true
 		if x.get("compound", false):
 			return false
 		var box := _poly_box(x.polys, x.verts)
@@ -675,13 +702,14 @@ static func _make_prop(t: Nfs3Track, x: Dictionary, material: Material) -> Knock
 				break
 	var reach := _poly_box(low, x.verts) if low.size() > 0 else box
 	reach = AABB(reach.position - foot, Vector3(reach.size.x, minf(reach.size.y, PROP_REACH), reach.size.z))
+	var weight: float = x.physics.mass if x.has("physics") else KnockableProp.MASS
 	var hull := PackedVector3Array()
 	for v in x.verts:
 		hull.append(v - foot)
 	var prop := KnockableProp.new()
 	prop.position = x.ref + foot
 	prop.setup(_mesh(t, [[x.polys, x.verts, x.shading, -foot, _mirrored(x)]], false), material,
-			reach, hull, DRAW_DISTANCE)
+			reach, hull, DRAW_DISTANCE, maxf(weight, 1.0))
 	return prop
 
 
@@ -709,7 +737,7 @@ static func _camera_blockers(t: Nfs3Track) -> StaticBody3D:
 		for obj in b.objects:
 			_solid_faces(t, obj, b.verts, Vector3.ZERO, faces, true)
 		for x in b.xobjs:
-			if not x.has("anim"):
+			if not x.has("anim") and not x.has("physics"):
 				_solid_faces(t, x.polys, x.verts, x.ref, faces, true)
 	for o in t.col_objects:
 		_solid_faces(t, o.polys, o.verts, o.ref, faces, true)

@@ -16,9 +16,11 @@ var _knocked := false
 ## car body can touch, e.g. just the post) and `hull` (all of its points, for the loose body).
 ## `mesh` may be null (its nodes added as children instead) and `material` null (the mesh's
 ## own surface materials).
+## `weight` (kg) is how hard it is to shift: a sign flies off at the car's speed, a heavy
+## bale or crate takes a share of it (see _knock).
 func setup(mesh: ArrayMesh, material: Material, reach: AABB, hull: PackedVector3Array,
-		draw_distance: float) -> void:
-	mass = MASS
+		draw_distance: float, weight := MASS) -> void:
+	mass = weight
 	freeze = true
 	freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
 	collision_layer = 0
@@ -70,8 +72,12 @@ func _knock(car: Car) -> void:
 	var v := car.linear_velocity
 	var speed := v.length()
 	var up := Vector3.UP
-	linear_velocity = v * 1.1 + up * (2.0 + speed * 0.12)
+	# Signs and cones fly off; something heavy (a hay bale, a crate) is shoved along with
+	# the car, which loses about as much speed as the pair sharing its momentum would.
+	var share := car.mass / (car.mass + mass)
+	var throw := minf(1.1, 2.0 * share)
+	linear_velocity = v * throw + up * (2.0 + speed * 0.12) * throw
 	# Topple away from the car: spin about the axis across its path.
 	var axis := v.cross(up).normalized() if speed > 0.5 else Vector3.RIGHT
-	angular_velocity = -axis * (2.0 + speed * 0.25)
-	car.linear_velocity *= CAR_SPEED_KEPT
+	angular_velocity = -axis * (2.0 + speed * 0.25) * throw
+	car.linear_velocity *= minf(CAR_SPEED_KEPT, share)

@@ -1,5 +1,6 @@
 extends Node3D
-## Loops a node through NFS3 animated-object keyframes (position and rotation).
+## Loops a node through NFS3 animated-object keyframes (position and rotation): a plain
+## node, or an AnimatableBody3D for a solid object.
 ## The last key is where the loop ends, not a step back to the first: it jumps from there
 ## to the first key. Spinning things end a symmetry turn on (a water wheel a spoke
 ## round, a two-sided sign half a turn), paths often far from where they began.
@@ -7,6 +8,17 @@ extends Node3D
 var keys: Array = []
 var delay := 1
 var _t := 0.0
+
+
+func _ready() -> void:
+	# A solid one (an AnimatableBody3D) moves with the physics, so it pushes cars smoothly.
+	var body := is_class("PhysicsBody3D")
+	set_process(not body)
+	set_physics_process(body)
+
+
+func _physics_process(dt: float) -> void:
+	_process(dt)
 
 
 func _process(dt: float) -> void:
