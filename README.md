@@ -62,24 +62,24 @@ runs, on a generated circuit with stand-in cars.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/shots/hs-redrock.jpg" alt="McLaren F1 GTR at Redrock Ridge"><br><sub>Redrock Ridge (High Stakes)</sub></td>
-    <td width="50%"><img src="docs/media/shots/hp2-tropics.jpg" alt="Lamborghini Murciélago at sunset on Island Outskirts"><br><sub>Island Outskirts (Hot Pursuit 2)</sub></td>
+    <td width="50%"><img src="docs/media/gallery/hs-redrock.jpg" alt="McLaren F1 GTR at Redrock Ridge"><br><sub>Redrock Ridge (High Stakes)</sub></td>
+    <td width="50%"><img src="docs/media/gallery/hp2-tropics.jpg" alt="Lamborghini Murciélago at sunset on Island Outskirts"><br><sub>Island Outskirts (Hot Pursuit 2)</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/media/shots/pu-alps.jpg" alt="Porsche 911 Turbo in the Alps"><br><sub>Alps (Porsche Unleashed)</sub></td>
-    <td><img src="docs/media/shots/pu-monaco.jpg" alt="Porsche 911 Turbo racing through Monte Carlo"><br><sub>Monte Carlo (Porsche Unleashed)</sub></td>
+    <td><img src="docs/media/gallery/pu-alps.jpg" alt="Porsche 911 Turbo in the Alps"><br><sub>Alps (Porsche Unleashed)</sub></td>
+    <td><img src="docs/media/gallery/pu-monaco.jpg" alt="Porsche 911 Turbo racing through Monte Carlo"><br><sub>Monte Carlo (Porsche Unleashed)</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/media/shots/nfs3-hometown-pursuit.jpg" alt="Ferrari 355 chased by a helicopter on Hometown"><br><sub>Hometown, Hot Pursuit (NFS III)</sub></td>
-    <td><img src="docs/media/shots/nfs3-atlantica-night-rain.jpg" alt="Lamborghini Diablo at night in the rain on Atlantica"><br><sub>Atlantica at night, raining (NFS III)</sub></td>
+    <td><img src="docs/media/gallery/nfs3-hometown-pursuit.jpg" alt="Ferrari 355 chased by a helicopter on Hometown"><br><sub>Hometown, Hot Pursuit (NFS III)</sub></td>
+    <td><img src="docs/media/gallery/nfs3-atlantica-night-rain.jpg" alt="Lamborghini Diablo at night in the rain on Atlantica"><br><sub>Atlantica at night, raining (NFS III)</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/media/shots/hs-aquatica.jpg" alt="Ferrari F50 on Aquatica"><br><sub>Aquatica (High Stakes)</sub></td>
-    <td><img src="docs/media/shots/hp2-mediterranean.jpg" alt="Porsche Carrera GT on Wine Country"><br><sub>Wine Country (Hot Pursuit 2)</sub></td>
+    <td><img src="docs/media/gallery/hs-aquatica.jpg" alt="Ferrari F50 on Aquatica"><br><sub>Aquatica (High Stakes)</sub></td>
+    <td><img src="docs/media/gallery/hp2-mediterranean.jpg" alt="Porsche Carrera GT on Wine Country"><br><sub>Wine Country (Hot Pursuit 2)</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/media/shots/hs-empire-city.jpg" alt="Lamborghini Diablo at night in Empire City"><br><sub>Empire City at night (High Stakes)</sub></td>
-    <td><img src="docs/media/shots/gt2-rome-night.jpg" alt="Mazda RX-7 at Rome by night"><br><sub>Rome Night (Gran Turismo 2)</sub></td>
+    <td><img src="docs/media/gallery/hs-empire-city.jpg" alt="Lamborghini Diablo at night in Empire City"><br><sub>Empire City at night (High Stakes)</sub></td>
+    <td><img src="docs/media/gallery/gt2-rome-night.jpg" alt="Mazda RX-7 at Rome by night"><br><sub>Rome Night (Gran Turismo 2)</sub></td>
   </tr>
 </table>
 
@@ -88,15 +88,15 @@ runs, on a generated circuit with stand-in cars.
 <br>
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/shots/menu-home.jpg" alt="The race setup page with the car on its turntable"><br><sub>Race setup</sub></td>
-    <td width="50%"><img src="docs/media/shots/menu-track.jpg" alt="The track picker: every game's tracks pinned on one map"><br><sub>Choosing a track</sub></td>
+    <td width="50%"><img src="docs/media/gallery/menu-home.jpg" alt="The race setup page with the car on its turntable"><br><sub>Race setup</sub></td>
+    <td width="50%"><img src="docs/media/gallery/menu-track.jpg" alt="The track picker: every game's tracks pinned on one map"><br><sub>Choosing a track</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/media/shots/menu-car.jpg" alt="The car dealers on a map of the world's makers"><br><sub>Choosing a car</sub></td>
-    <td><img src="docs/media/shots/menu-tournaments.jpg" alt="High Stakes tournaments with circuits, prizes and postcards of their races"><br><sub>Tournaments</sub></td>
+    <td><img src="docs/media/gallery/menu-car.jpg" alt="The car dealers on a map of the world's makers"><br><sub>Choosing a car</sub></td>
+    <td><img src="docs/media/gallery/menu-tournaments.jpg" alt="High Stakes tournaments with circuits, prizes and postcards of their races"><br><sub>Tournaments</sub></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="docs/media/shots/menu-garage.jpg" alt="The garage: a Mercedes SLK 230 with its upgrades, damage and spec sheet"><br><sub>Garage</sub></td>
+    <td colspan="2"><img src="docs/media/gallery/menu-garage.jpg" alt="The garage: a Mercedes SLK 230 with its upgrades, damage and spec sheet"><br><sub>Garage</sub></td>
   </tr>
 </table>
 </details>
