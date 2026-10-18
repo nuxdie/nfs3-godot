@@ -174,24 +174,43 @@ func _ready() -> void:
 
 # ------------------------------------------------------------------ data files
 
+## The folder the game runs from: the project folder, or in an exported build the one
+## holding the executable (the .app's folder on macOS). Game data is looked for beside it.
+func install_dir() -> String:
+	if OS.has_feature("editor"):
+		return ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var d := OS.get_executable_path().get_base_dir()
+	if d.ends_with(".app/Contents/MacOS"):
+		d = d.get_base_dir().get_base_dir().get_base_dir()
+	return d
+
+
+## Where an EA game is installed by default on Windows, for `folder` under Electronic Arts.
+func _windows_install(folder: String) -> String:
+	return "C:/Program Files (x86)/Electronic Arts".path_join(folder) if OS.get_name() == "Windows" else ""
+
+
 func candidate_roots() -> PackedStringArray:
-	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var res := install_dir()
 	var home := OS.get_environment("HOME")
 	return PackedStringArray([
 		OS.get_environment("NFS3_DATA"),
 		res.get_base_dir().path_join("OpenNFS/resources/NFS_3"),
 		res.path_join("nfs3_data"),
+		_windows_install("Need for Speed III - Hot Pursuit"),
 		home.path_join("Games/need-for-speed-iii-hot-pursuit/drive_c/Program Files (x86)/Electronic Arts/Need for Speed III - Hot Pursuit"),
 	])
 
 
 ## Where a Need for Speed: High Stakes install's Data folder may be, first match wins.
 func candidate_hs_roots() -> PackedStringArray:
-	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var res := install_dir()
 	var home := OS.get_environment("HOME")
 	var lutris := "need-for-speed-high-stakes/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - High Stakes/Data"
 	return PackedStringArray([
 		OS.get_environment("NFS4_DATA"),
+		res.path_join("nfs4_data"),
+		_windows_install("Need for Speed - High Stakes/Data"),
 		res.get_base_dir().path_join("OpenNFS/resources/NFS_4/data"),
 		res.get_base_dir().path_join(lutris),
 		home.path_join("Games").path_join(lutris),
@@ -200,11 +219,13 @@ func candidate_hs_roots() -> PackedStringArray:
 
 ## Where a Need for Speed: Porsche Unleashed install's GameData folder may be, first match wins.
 func candidate_pu_roots() -> PackedStringArray:
-	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var res := install_dir()
 	var home := OS.get_environment("HOME")
 	var lutris := "need-for-speed-porsche-unleashed/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Porsche Unleashed/GameData"
 	return PackedStringArray([
 		OS.get_environment("NFS5_DATA"),
+		res.path_join("nfs5_data"),
+		_windows_install("Need for Speed - Porsche Unleashed/GameData"),
 		res.get_base_dir().path_join("OpenNFS/resources/NFS_5/GameData"),
 		res.get_base_dir().path_join(lutris),
 		home.path_join("Games").path_join(lutris),
@@ -213,11 +234,13 @@ func candidate_pu_roots() -> PackedStringArray:
 
 ## Where a Need for Speed: Hot Pursuit 2 install may be, first match wins.
 func candidate_hp2_roots() -> PackedStringArray:
-	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var res := install_dir()
 	var home := OS.get_environment("HOME")
 	var lutris := "need-for-speed-hot-pursuit-2/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Hot Pursuit 2"
 	return PackedStringArray([
 		OS.get_environment("NFS6_DATA"),
+		res.path_join("nfs6_data"),
+		_windows_install("Need for Speed - Hot Pursuit 2"),
 		res.get_base_dir().path_join("OpenNFS/resources/NFS_6"),
 		res.get_base_dir().path_join(lutris),
 		home.path_join("Games").path_join(lutris),
@@ -226,13 +249,14 @@ func candidate_hp2_roots() -> PackedStringArray:
 
 ## Where a Gran Turismo 2 disc image may be (a file, or a folder holding one), first match wins.
 func candidate_gt2_images() -> PackedStringArray:
-	var res := ProjectSettings.globalize_path("res://").trim_suffix("/")
+	var res := install_dir()
 	var out := PackedStringArray([OS.get_environment("GT2_DATA")])
-	var d := DirAccess.open(res.get_base_dir())
-	if d:
-		for f in d.get_directories():
-			if f.to_lower().begins_with("gran turismo 2"):
-				out.append(res.get_base_dir().path_join(f))
+	for base in [res, res.get_base_dir()]:
+		var d := DirAccess.open(base)
+		if d:
+			for f in d.get_directories():
+				if f.to_lower().begins_with("gran turismo 2") or f.to_lower() == "gt2_data":
+					out.append(base.path_join(f))
 	return out
 
 

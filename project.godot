@@ -39,3 +39,4 @@ jolt_physics_3d/queries/enable_ray_cast_face_index=true
 renderer/rendering_method="mobile"
 textures/default_filters/anisotropic_filtering_level=4
 anti_aliasing/quality/msaa_3d=2
+textures/vram_compression/import_etc2_astc=true

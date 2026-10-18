@@ -33,8 +33,11 @@ func _init() -> void:
 
 static func _texture() -> Texture2D:
 	if _tex == null:
-		# Read straight from the file: it works without the editor having imported it.
-		var img := Image.load_from_file(ProjectSettings.globalize_path(MAP_PATH))
+		# Read straight from the file: it works without the editor having imported it. An
+		# exported build has only the imported texture.
+		var file := ProjectSettings.globalize_path(MAP_PATH)
+		var img: Image = Image.load_from_file(file) if FileAccess.file_exists(file) \
+			else (load(MAP_PATH) as Texture2D).get_image() if ResourceLoader.exists(MAP_PATH) else null
 		if img == null or img.is_empty():
 			img = Image.create(8, 4, false, Image.FORMAT_RGB8)
 		img.generate_mipmaps()

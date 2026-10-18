@@ -1,24 +1,144 @@
-# NFS Revival (Godot 4)
+<p align="center">
+  <img src="docs/media/banner.jpg" alt="NFS Revival: an open-source arcade racer for Godot 4 that loads the cars and tracks of the classics from your own install">
+</p>
 
-A *Need for Speed III: Hot Pursuit*, *Need for Speed: High Stakes* and *Need for Speed:
-Porsche Unleashed*-style arcade racer for Godot 4.7. All game code is original GDScript; it
-loads **tracks and cars from your own NFS3, High Stakes and/or Porsche Unleashed install at
-runtime** (nothing from the games is copied into
-this project). With no game data present it falls back to a procedural circuit and
-stand-in cars, so the project always runs.
+<p align="center">
+  <a href="https://github.com/nuxdie/nfs3-godot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/nuxdie/nfs3-godot?style=for-the-badge&color=ffb81a&labelColor=15161c"></a>
+  <img alt="Godot 4.7" src="https://img.shields.io/badge/Godot-4.7-478cbf?style=for-the-badge&logo=godotengine&logoColor=white&labelColor=15161c">
+  <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-ff6b1f?style=for-the-badge&labelColor=15161c">
+  <a href="https://github.com/nuxdie/nfs3-godot/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/nuxdie/nfs3-godot/total?style=for-the-badge&color=2a2c36&labelColor=15161c"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/nuxdie/nfs3-godot/releases/latest"><b>Download</b></a> ·
+  <a href="https://github.com/nuxdie/nfs3-godot/releases/latest/download/nfs-revival-trailer.mp4"><b>Watch the trailer</b></a> ·
+  <a href="#game-data"><b>Game data</b></a> ·
+  <a href="#controls"><b>Controls</b></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/nuxdie/nfs3-godot/releases/latest/download/nfs-revival-trailer.mp4"><img src="docs/media/hero.gif" width="100%" alt="Gameplay: Redrock Ridge, a Hot Pursuit on Hometown, the Alps, Island Outskirts, Seattle, Atlantica at night in the rain and Monte Carlo from the driver's seat"></a>
+</p>
+
+**NFS Revival** is an arcade racer for Godot 4.7 in the spirit of *Need for Speed III: Hot
+Pursuit*, *High Stakes* and *Porsche Unleashed*. All of its code is original GDScript; the
+**tracks, cars, sounds and music come from your own copies of the games at runtime**:
+nothing from them is in this repository or in the downloads. Point it at any of
+*Need for Speed III*, *High Stakes*, *Porsche Unleashed*, *Hot Pursuit 2* or a *Gran Turismo 2*
+disc image and their tracks and cars race side by side. With no game data at all it still
+runs, on a generated circuit with stand-in cars.
+
+## Highlights
+
+- **Five games, one garage.** 85+ tracks and 750+ cars across NFS III, High Stakes, Porsche
+  Unleashed, Hot Pursuit 2 and Gran Turismo 2, read straight from the original files and
+  pinned on one world map.
+- **Hot Pursuit**: cruisers that box you in, roadblocks, spike strips, the High Stakes
+  helicopter with its searchlight at night, the police radio and tickets.
+- **Career**: High Stakes' tournaments with money, a garage, a dealer, upgrades and
+  repairs, plus NFS III's and Porsche Unleashed's series.
+- **Day, night and weather** from each track's own sky, fog and lighting; rain and snow,
+  wet roads, lightning.
+- **Cockpits**: the in-car view of High Stakes and Porsche Unleashed cars, with working
+  mirrors and animated drivers.
+- **Traffic** that keeps to its lanes, pulls over for sirens and honks at you.
+- A **front end** with a car showroom, a sortable car browser, a world map of tracks, and
+  a music player for every game's soundtrack.
+- Keyboard, gamepad and mouse throughout; Low/Medium/High quality, tuned down to old
+  integrated GPUs.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/pursuit.gif" alt="A Hot Pursuit on Hometown: a police cruiser spins out behind the player"><br><sub><b>Hot Pursuit</b>: Hometown (NFS III)</sub></td>
+    <td width="50%"><img src="docs/media/rain.gif" alt="Atlantica at night in heavy rain"><br><sub><b>Night and rain</b>: Atlantica (NFS III)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/cockpit.gif" alt="Driving through Monte Carlo from the driver's seat of a Porsche 911 Turbo"><br><sub><b>In-car view</b>: Monte Carlo (Porsche Unleashed)</sub></td>
+    <td><img src="docs/media/gt2.gif" alt="Racing GT2 cars at Seattle"><br><sub><b>Gran Turismo 2</b>: Seattle Circuit</sub></td>
+  </tr>
+</table>
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/shots/hs-redrock.jpg" alt="McLaren F1 GTR at Redrock Ridge"><br><sub>Redrock Ridge (High Stakes)</sub></td>
+    <td width="50%"><img src="docs/media/shots/hp2-tropics.jpg" alt="Lamborghini Murciélago at sunset on Island Outskirts"><br><sub>Island Outskirts (Hot Pursuit 2)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/shots/pu-alps.jpg" alt="Porsche 911 Turbo in the Alps"><br><sub>Alps (Porsche Unleashed)</sub></td>
+    <td><img src="docs/media/shots/pu-monaco.jpg" alt="Porsche 911 Turbo racing through Monte Carlo"><br><sub>Monte Carlo (Porsche Unleashed)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/shots/nfs3-hometown-pursuit.jpg" alt="Ferrari 355 chased by a helicopter on Hometown"><br><sub>Hometown, Hot Pursuit (NFS III)</sub></td>
+    <td><img src="docs/media/shots/nfs3-atlantica-night-rain.jpg" alt="Lamborghini Diablo at night in the rain on Atlantica"><br><sub>Atlantica at night, raining (NFS III)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/shots/hs-aquatica.jpg" alt="Ferrari F50 on Aquatica"><br><sub>Aquatica (High Stakes)</sub></td>
+    <td><img src="docs/media/shots/hp2-mediterranean.jpg" alt="Porsche Carrera GT on Wine Country"><br><sub>Wine Country (Hot Pursuit 2)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/shots/hs-empire-city.jpg" alt="Lamborghini Diablo at night in Empire City"><br><sub>Empire City at night (High Stakes)</sub></td>
+    <td><img src="docs/media/shots/gt2-rome-night.jpg" alt="Mazda RX-7 at Rome by night"><br><sub>Rome Night (Gran Turismo 2)</sub></td>
+  </tr>
+</table>
+
+<details>
+<summary><b>The front end</b> (race setup, track map, car dealers, tournaments, garage)</summary>
+<br>
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/shots/menu-home.jpg" alt="The race setup page with the car on its turntable"><br><sub>Race setup</sub></td>
+    <td width="50%"><img src="docs/media/shots/menu-track.jpg" alt="The track picker: every game's tracks pinned on one map"><br><sub>Choosing a track</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/shots/menu-car.jpg" alt="The car dealers on a map of the world's makers"><br><sub>Choosing a car</sub></td>
+    <td><img src="docs/media/shots/menu-tournaments.jpg" alt="High Stakes tournaments with circuits, prizes and postcards of their races"><br><sub>Tournaments</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/media/shots/menu-garage.jpg" alt="The garage: a Mercedes SLK 230 with its upgrades, damage and spec sheet"><br><sub>Garage</sub></td>
+  </tr>
+</table>
+</details>
+
+## Download and play
+
+1. Get the zip for your system from the
+   [**latest release**](https://github.com/nuxdie/nfs3-godot/releases/latest):
+   Windows (x86_64), macOS (universal: Intel and Apple Silicon) or Linux (x86_64).
+2. Unzip it, and put your game files beside the executable (any one game is enough):
+
+   | Folder | Game | What to copy in |
+   |---|---|---|
+   | `nfs3_data/` | Need for Speed III: Hot Pursuit | the folder holding `gamedata/` |
+   | `nfs4_data/` | Need for Speed: High Stakes | its `Data` folder's contents |
+   | `nfs5_data/` | Need for Speed: Porsche Unleashed | its `GameData` folder's contents |
+   | `nfs6_data/` | Need for Speed: Hot Pursuit 2 | the install folder's contents |
+   | `gt2_data/` | Gran Turismo 2 | a folder holding the disc image |
+
+   Or point `NFS3_DATA`, `NFS4_DATA`, `NFS5_DATA`, `NFS6_DATA` or `GT2_DATA` at them. On
+   Windows the default install folders under `C:\Program Files (x86)\Electronic Arts` are
+   found by themselves. Settings → Game data shows what was found.
+3. Run `NFS Revival.exe`, `NFS Revival.app` or `nfs-revival.x86_64`.
+
+The macOS app isn't notarized: right-click it and choose **Open** the first time (or run
+`xattr -dr com.apple.quarantine "NFS Revival.app"`).
+
+## Run from source
+
+Install [Godot 4.7](https://godotengine.org/download), then:
+
+```bash
+godot --path nfs3-godot          # play
+godot -e --path nfs3-godot       # open in the editor
+```
+
+`tools/release.sh <version>` exports the three builds and packs the release zips (it needs
+Godot's export templates).
 
 (It was called *NFS3 Revival* before High Stakes came in. Godot keeps the save data under
 the project's name, so on the first start the settings, tournament progress and track
 postcards are copied over from the old `NFS3 Revival` folder.)
-
-## Run
-
-```bash
-godot --path /home/n/NFSHS-revive/nfs3-godot          # play
-godot -e --path /home/n/NFSHS-revive/nfs3-godot       # open in the editor
-```
-
-(`/home/n/OpenSkyRPG/3d-rpg-game-v4/godot` is a Godot 4.7.2 binary on this machine.)
 
 ## Game data
 
@@ -26,8 +146,9 @@ The first folder that contains `gamedata/tracks` wins:
 
 1. `NFS3_DATA` environment variable
 2. `../OpenNFS/resources/NFS_3` (the lowercased copy next to this project)
-3. `./nfs3_data`
-4. The Lutris install under `~/Games/need-for-speed-iii-hot-pursuit/...`
+3. `./nfs3_data` (in a release build: beside the executable)
+4. `C:\Program Files (x86)\Electronic Arts\Need for Speed III - Hot Pursuit` (Windows)
+5. The Lutris install under `~/Games/need-for-speed-iii-hot-pursuit/...`
 
 File lookups are case-insensitive, so a raw Windows install works too.
 What's read:
@@ -66,9 +187,11 @@ On its tracks the police and traffic are its own. The first `Data`
 folder that contains `tracks` and `gameart` wins:
 
 1. `NFS4_DATA` environment variable
-2. `../OpenNFS/resources/NFS_4/data`
-3. `../need-for-speed-high-stakes/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - High Stakes/Data`
-4. The same under `~/Games`
+2. `./nfs4_data` (in a release build: beside the executable)
+3. `C:\Program Files (x86)\Electronic Arts\Need for Speed - High Stakes\Data` (Windows)
+4. `../OpenNFS/resources/NFS_4/data`
+5. `../need-for-speed-high-stakes/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - High Stakes/Data`
+6. The same under `~/Games`
 
 | File | Used for |
 |---|---|
@@ -187,9 +310,11 @@ which are laps. Its 80 cars (every version of each model: the '50 356 1100 Coup�
 The first `GameData` folder that contains `Track` and `Carmodel` wins:
 
 1. `NFS5_DATA` environment variable
-2. `../OpenNFS/resources/NFS_5/GameData`
-3. `../need-for-speed-porsche-unleashed/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Porsche Unleashed/GameData`
-4. The same under `~/Games`
+2. `./nfs5_data` (in a release build: beside the executable)
+3. `C:\Program Files (x86)\Electronic Arts\Need for Speed - Porsche Unleashed\GameData` (Windows)
+4. `../OpenNFS/resources/NFS_5/GameData`
+5. `../need-for-speed-porsche-unleashed/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Porsche Unleashed/GameData`
+6. The same under `~/Games`
 
 | File | Used for |
 |---|---|
@@ -352,9 +477,11 @@ With an install present its 23 songs join the jukebox.
 The first folder that has `Audio/Music/music.ini` wins:
 
 1. `NFS6_DATA` environment variable
-2. `../OpenNFS/resources/NFS_6`
-3. `../need-for-speed-hot-pursuit-2/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Hot Pursuit 2`
-4. The same under `~/Games`
+2. `./nfs6_data` (in a release build: beside the executable)
+3. `C:\Program Files (x86)\Electronic Arts\Need for Speed - Hot Pursuit 2` (Windows)
+4. `../OpenNFS/resources/NFS_6`
+5. `../need-for-speed-hot-pursuit-2/drive_c/Program Files (x86)/Electronic Arts/Need for Speed - Hot Pursuit 2`
+6. The same under `~/Games`
 
 | File | Used for |
 |---|---|
