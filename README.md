@@ -83,9 +83,8 @@ runs, on a generated circuit with stand-in cars.
   </tr>
 </table>
 
-<details>
-<summary><b>The front end</b> (race setup, track map, car dealers, tournaments, garage)</summary>
-<br>
+### The front end
+
 <table>
   <tr>
     <td width="50%"><img src="docs/media/gallery/menu-home.jpg" alt="The race setup page with the car on its turntable"><br><sub>Race setup</sub></td>
@@ -99,7 +98,6 @@ runs, on a generated circuit with stand-in cars.
     <td colspan="2"><img src="docs/media/gallery/menu-garage.jpg" alt="The garage: a Mercedes SLK 230 with its upgrades, damage and spec sheet"><br><sub>Garage</sub></td>
   </tr>
 </table>
-</details>
 
 ## Download and play
 
